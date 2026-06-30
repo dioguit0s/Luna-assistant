@@ -1,0 +1,31 @@
+{
+  "name": "luna-client-test",
+  "version": "0.1.0",
+  "description": "Cliente de testes do Projeto Luna — simula satélite via microfone do PC",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "dev:mic": "tsx src/index.ts --mic",
+    "dev:wav": "tsx src/index.ts --wav fixtures/silence.wav",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "ffmpeg-static": "^5.2.0",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "naudiodon": "^2.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
