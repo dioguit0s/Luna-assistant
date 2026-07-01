@@ -7,8 +7,7 @@ import {
   parseIncomingMessage,
   serializeControlMessage,
 } from './protocol.js';
-import { readWavPcm16, writeWavPcm16, generateSilence } from './wav.js';
-import { playWavFile } from './playback.js';
+import { readWavPcm16, writeWavPcm16, generateSilence, playPcm16 } from './wav.js';
 
 loadEnv();
 
@@ -19,7 +18,7 @@ let seq = 0;
 let lastAudioSentAt: number | null = null;
 let ttfabLogged = false;
 let responsePcm = Buffer.alloc(0);
-let playback: { write: (pcm: Buffer) => void; quit: () => void } | null = null;
+let playback: { write: (pcm: Buffer) => void; quit: () => void; live: boolean } | null = null;
 
 const wavFile = args.wavFile;
 const useMic = args.useMic ?? !wavFile;
@@ -59,12 +58,18 @@ function flushResponseWav(reason: string): void {
   }
   if (responsePcm.length === 0) return;
 
-  const outPath = args.outputFile ?? 'luna-response.wav';
-  writeWavPcm16(outPath, responsePcm);
-  console.log(
-    `Resposta salva em ${outPath} (${responsePcm.length} bytes PCM, ${reason})`,
-  );
-  void playWavFile(outPath);
+  if (!playback?.live) {
+    playPcm16(responsePcm);
+    console.log(`Reproduzindo resposta (${responsePcm.length} bytes PCM, ${reason})`);
+  } else {
+    console.log(`Resposta concluída (${responsePcm.length} bytes PCM, ${reason})`);
+  }
+
+  if (args.outputFile) {
+    writeWavPcm16(args.outputFile, responsePcm);
+    console.log(`Resposta salva em ${args.outputFile}`);
+  }
+
   responsePcm = Buffer.alloc(0);
 }
 

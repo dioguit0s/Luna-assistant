@@ -1,4 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { playWavFile } from './playback.js';
 
 const SAMPLE_RATE = 16000;
 
@@ -91,4 +94,39 @@ function resamplePcm16(input: Buffer, fromRate: number, toRate: number): Buffer 
 export function generateSilence(durationMs: number): Buffer {
   const samples = Math.floor((SAMPLE_RATE * durationMs) / 1000);
   return Buffer.alloc(samples * 2);
+}
+
+export function playPcm16(pcm: Buffer, sampleRate = SAMPLE_RATE): void {
+  void playPcm16Async(pcm, sampleRate);
+}
+
+async function playPcm16Async(pcm: Buffer, sampleRate = SAMPLE_RATE): Promise<void> {
+  try {
+    const { AudioIO, SampleFormat16Bit } = await import('naudiodon');
+    const speaker = new AudioIO({
+      outOptions: {
+        channelCount: 1,
+        sampleFormat: SampleFormat16Bit,
+        sampleRate,
+        deviceId: -1,
+        closeOnError: true,
+      },
+    });
+
+    speaker.start();
+    speaker.write(pcm);
+
+    const durationMs = (pcm.length / (sampleRate * 2)) * 1000;
+    setTimeout(() => {
+      try {
+        speaker.quit();
+      } catch (e) {
+        console.error('Erro ao encerrar o stream de audio:', e);
+      }
+    }, durationMs + 200);
+  } catch {
+    const tmpPath = join(tmpdir(), `luna-playback-${Date.now()}.wav`);
+    writeWavPcm16(tmpPath, pcm, sampleRate);
+    await playWavFile(tmpPath);
+  }
 }

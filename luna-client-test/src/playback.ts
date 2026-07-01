@@ -24,3 +24,16 @@ export async function playWavFile(wavPath: string): Promise<void> {
     console.log(`Abra manualmente: ${absolute}`);
   }
 }
+
+export async function createAudioStream() {
+  const { AudioIO, SampleFormat16Bit } = await import('naudiodon');
+  return new AudioIO({
+    outOptions: {
+      channelCount: 1,
+      sampleFormat: SampleFormat16Bit,
+      sampleRate: 24000,
+      deviceId: -1,
+      closeOnError: true,
+    },
+  });
+}

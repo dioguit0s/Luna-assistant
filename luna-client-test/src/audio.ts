@@ -11,8 +11,6 @@ import {
   startFfmpegPlayback,
 } from './ffmpeg-audio.js';
 
-type PortAudio = typeof import('naudiodon');
-
 let micStop: (() => void) | null = null;
 
 export async function startMicrophoneStream(
@@ -23,13 +21,13 @@ export async function startMicrophoneStream(
   incSeq: () => void,
 ): Promise<void> {
   try {
-    const portAudio: PortAudio = await import('naudiodon');
+    const { AudioIO, SampleFormat16Bit } = await import('naudiodon');
     console.log('Captura via naudiodon (PortAudio).');
 
-    const audioIn = new portAudio.default.AudioIO({
+    const audioIn = new AudioIO({
       inOptions: {
         channelCount: CHANNELS,
-        sampleFormat: portAudio.default.SampleFormatInt16,
+        sampleFormat: SampleFormat16Bit,
         sampleRate: SAMPLE_RATE,
         deviceId: -1,
         closeOnError: false,
@@ -84,13 +82,15 @@ export async function startMicrophoneStream(
 export async function startPlayback(): Promise<{
   write: (pcm: Buffer) => void;
   quit: () => void;
+  live: boolean;
 }> {
   try {
-    const portAudio: PortAudio = await import('naudiodon');
-    const stream = new portAudio.default.AudioIO({
+    const { AudioIO, SampleFormat16Bit } = await import('naudiodon');
+    console.log('Playback via naudiodon (PortAudio).');
+    const stream = new AudioIO({
       outOptions: {
         channelCount: CHANNELS,
-        sampleFormat: portAudio.default.SampleFormatInt16,
+        sampleFormat: SampleFormat16Bit,
         sampleRate: SAMPLE_RATE,
         deviceId: -1,
         closeOnError: false,
@@ -101,17 +101,22 @@ export async function startPlayback(): Promise<{
     return {
       write: (pcm: Buffer) => stream.write(pcm),
       quit: () => stream.quit(),
+      live: true,
     };
   } catch {
     if (await isFfmpegAvailable()) {
       const ffplay = await startFfmpegPlayback();
-      if (ffplay) return ffplay;
+      if (ffplay) {
+        console.log('Playback via ffplay.');
+        return { ...ffplay, live: true };
+      }
     }
 
-    console.warn('Playback ao vivo indisponível — resposta será salva em luna-response.wav');
+    console.warn('Playback ao vivo indisponível — áudio será reproduzido ao final da resposta.');
     return {
       write: () => {},
       quit: () => {},
+      live: false,
     };
   }
 }
