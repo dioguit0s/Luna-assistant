@@ -28,3 +28,7 @@ Thumbs.db
 
 # Test coverage
 coverage/
+
+# PlatformIO / firmware
+luna-firmware/.pio/
+luna-firmware/include/secrets.h

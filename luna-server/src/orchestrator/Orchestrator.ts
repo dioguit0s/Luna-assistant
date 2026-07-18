@@ -72,12 +72,18 @@ export class Orchestrator {
         );
       }
 
-      const header = serializeControlMessage(
-        createEnvelope('audio_response', roomId, { seq: Date.now() }),
-      );
-      const headerBuf = Buffer.from(header, 'utf8');
-      const combined = Buffer.concat([headerBuf, chunk]);
-      sendToClient(combined);
+      // Fragmenta a resposta em frames pequenos. Satélites embarcados
+      // (ESP32 / arduinoWebSockets) fecham a conexão ao receber um frame
+      // binário grande; o cliente de testes (Node) aceita qualquer tamanho.
+      const MAX_AUDIO_FRAME_BYTES = 1024; // múltiplo de 2 (PCM16)
+      for (let offset = 0; offset < chunk.length; offset += MAX_AUDIO_FRAME_BYTES) {
+        const piece = chunk.subarray(offset, offset + MAX_AUDIO_FRAME_BYTES);
+        const header = serializeControlMessage(
+          createEnvelope('audio_response', roomId, { seq: Date.now() }),
+        );
+        const headerBuf = Buffer.from(header, 'utf8');
+        sendToClient(Buffer.concat([headerBuf, piece]));
+      }
     });
 
     provider.onTurnComplete((turn: CompletedTurn) => {
