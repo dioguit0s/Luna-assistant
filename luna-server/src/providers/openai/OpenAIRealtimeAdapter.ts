@@ -1,7 +1,7 @@
 import WebSocket from 'ws';
 import type { AppConfig } from '../../config/env.js';
 import type { IAudioProvider } from '../IAudioProvider.js';
-import type { CompletedTurn, ProviderSessionConfig } from '../types.js';
+import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../types.js';
 import { resample16kTo24k, resample24kTo16k } from '../utils/resampler.js';
 import { getLogger } from '../../logging/logger.js';
 
@@ -18,6 +18,7 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
+  private toolCallCb: ((call: ToolCall) => void) | null = null;
   private userTranscript = '';
   private assistantTranscript = '';
 
@@ -46,6 +47,8 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
             output_audio_format: 'pcm16',
             turn_detection: { type: 'server_vad' },
             input_audio_transcription: { model: 'whisper-1' },
+            // TODO(LUNA-307): mapear `sessionConfig.tools` para `tools`/`tool_choice`
+            // e tratar `response.function_call_arguments.done` em handleMessage.
           },
         });
         getLogger().info(
@@ -98,6 +101,14 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
 
   onError(callback: (err: Error) => void): void {
     this.errorCb = callback;
+  }
+
+  onToolCall(callback: (call: ToolCall) => void): void {
+    this.toolCallCb = callback;
+  }
+
+  sendToolResult(_callId: string, _result: unknown): void {
+    throw new Error('OpenAIRealtimeAdapter.sendToolResult não implementado (LUNA-307)');
   }
 
   async disconnect(): Promise<void> {

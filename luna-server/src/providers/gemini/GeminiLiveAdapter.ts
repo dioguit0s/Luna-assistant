@@ -2,7 +2,7 @@ import { GoogleGenAI, Modality, EndSensitivity } from '@google/genai';
 import type { AutomaticActivityDetection } from '@google/genai';
 import type { AppConfig } from '../../config/env.js';
 import type { IAudioProvider } from '../IAudioProvider.js';
-import type { CompletedTurn, ProviderSessionConfig } from '../types.js';
+import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../types.js';
 import { resample24kTo16k } from '../utils/resampler.js';
 import { getLogger } from '../../logging/logger.js';
 
@@ -15,6 +15,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
+  private toolCallCb: ((call: ToolCall) => void) | null = null;
   private userTranscript = '';
   private assistantTranscript = '';
   private activityOpen = false;
@@ -63,6 +64,8 @@ export class GeminiLiveAdapter implements IAudioProvider {
         systemInstruction: sessionConfig.systemPrompt,
         inputAudioTranscription: {},
         outputAudioTranscription: {},
+        // TODO(LUNA-306): mapear `sessionConfig.tools` para
+        // `tools: [{ functionDeclarations: [...] }]` e tratar `message.toolCall`.
         ...(automaticActivityDetection
           ? { realtimeInputConfig: { automaticActivityDetection } }
           : {}),
@@ -118,6 +121,14 @@ export class GeminiLiveAdapter implements IAudioProvider {
 
   onError(callback: (err: Error) => void): void {
     this.errorCb = callback;
+  }
+
+  onToolCall(callback: (call: ToolCall) => void): void {
+    this.toolCallCb = callback;
+  }
+
+  sendToolResult(_callId: string, _result: unknown): void {
+    throw new Error('GeminiLiveAdapter.sendToolResult não implementado (LUNA-306)');
   }
 
   async disconnect(): Promise<void> {

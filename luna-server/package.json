@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test src/rooms/ConversationRingBuffer.test.ts src/prompts/luna-system-prompt.test.ts src/providers/utils/resampler.test.ts src/providers/AudioProviderFactory.test.ts src/ws/auth.test.ts src/ws/WsServer.integration.test.ts src/ws/health.test.ts"
+    "test": "node --import tsx --test src/rooms/ConversationRingBuffer.test.ts src/prompts/luna-system-prompt.test.ts src/providers/utils/resampler.test.ts src/providers/AudioProviderFactory.test.ts src/providers/types.test.ts src/ws/auth.test.ts src/ws/WsServer.integration.test.ts src/ws/health.test.ts"
   },
   "engines": {
     "node": ">=20.0.0"

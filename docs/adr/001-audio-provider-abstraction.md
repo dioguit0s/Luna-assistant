@@ -22,6 +22,7 @@ O orquestrador depende exclusivamente do contrato do port. Implementações conc
 interface IAudioProvider {
   connect(session: ProviderSessionConfig): Promise<void>;
   sendAudio(pcm16kHz: Buffer): void;
+  signalActivityEnd(): void;
   onAudioResponse(callback: (chunk: Buffer) => void): void;
   onTurnComplete(callback: (turn: CompletedTurn) => void): void;
   onError(callback: (err: Error) => void): void;
@@ -72,3 +73,4 @@ Camada intermediária que traduz qualquer WebSocket de IA para o protocolo Luna.
 - [PROJETO LUNA.md](../PROJETO%20LUNA.md) — Seções 2, 3 e 7
 - [Gemini Live API](https://ai.google.dev/gemini-api/docs/live-api)
 - [OpenAI Realtime API](https://developers.openai.com/api/docs/guides/realtime-conversations)
+- [ADR 002 — Contrato de Function Calling](./002-function-calling-contract.md) — estende este port com tools

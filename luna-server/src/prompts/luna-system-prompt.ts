@@ -1,12 +1,14 @@
 import type { ConversationTurn } from '../providers/types.js';
 
+/**
+ * Chaves são `area_id` do Home Assistant, não rótulos livres: o mesmo valor
+ * chega no `room_id` do satélite e vai no `control_device`. Ao criar um cômodo,
+ * crie a área no HA primeiro e use o `area_id` gerado — ver `infra/README.md`.
+ */
 const ROOM_LABELS: Record<string, string> = {
-  sala: 'a sala de estar',
+  sala_de_estar: 'a sala de estar',
   cozinha: 'a cozinha',
   quarto: 'o quarto',
-  escritorio: 'o escritório',
-  banheiro: 'o banheiro',
-  garagem: 'a garagem',
 };
 
 type PeriodOfDay = 'madrugada' | 'manhã' | 'tarde' | 'noite';

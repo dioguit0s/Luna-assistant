@@ -1,6 +1,7 @@
 import type { AppConfig } from '../config/env.js';
 import { createAudioProvider } from '../providers/AudioProviderFactory.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
+import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import { buildLunaSystemPrompt } from '../prompts/luna-system-prompt.js';
 import { ConversationRingBuffer } from './ConversationRingBuffer.js';
 import { getLogger } from '../logging/logger.js';
@@ -45,7 +46,12 @@ export class RoomManager {
     const history = this.ringBuffer.getHistory(roomId);
     const systemPrompt = buildLunaSystemPrompt(roomId, history);
 
-    await provider.connect({ roomId, systemPrompt, history });
+    await provider.connect({
+      roomId,
+      systemPrompt,
+      history,
+      tools: [CONTROL_DEVICE_TOOL],
+    });
 
     this.sessions.set(roomId, { provider });
     getLogger().info({ room_id: roomId, event: 'room_created' }, 'Sala criada');

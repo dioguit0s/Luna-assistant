@@ -11,6 +11,14 @@ describe('buildLunaSystemPrompt', () => {
     assert.match(prompt, /dispositivo em a cozinha/);
   });
 
+  it('traduz os três area_id do Home Assistant', () => {
+    // Regressão: as chaves precisam ser o `area_id` exato do HA (`sala_de_estar`,
+    // não `sala`), senão o cômodo cai no fallback genérico. Ver infra/README.md.
+    assert.match(buildLunaSystemPrompt('sala_de_estar', [], at(10)), /em a sala de estar/);
+    assert.match(buildLunaSystemPrompt('cozinha', [], at(10)), /em a cozinha/);
+    assert.match(buildLunaSystemPrompt('quarto', [], at(10)), /em o quarto/);
+  });
+
   it('usa fallback citado para room_id desconhecido', () => {
     const prompt = buildLunaSystemPrompt('varanda', [], at(10));
     assert.match(prompt, /o ambiente "varanda"/);
@@ -29,7 +37,7 @@ describe('buildLunaSystemPrompt', () => {
     ];
 
     for (const [hora, periodo] of casos) {
-      const prompt = buildLunaSystemPrompt('sala', [], at(hora));
+      const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(hora));
       assert.match(
         prompt,
         new RegExp(`período da ${periodo}`),
@@ -39,12 +47,12 @@ describe('buildLunaSystemPrompt', () => {
   });
 
   it('formata a hora com zero à esquerda', () => {
-    assert.match(buildLunaSystemPrompt('sala', [], at(7, 5)), /Agora são 07:05/);
-    assert.match(buildLunaSystemPrompt('sala', [], at(19, 30)), /Agora são 19:30/);
+    assert.match(buildLunaSystemPrompt('sala_de_estar', [], at(7, 5)), /Agora são 07:05/);
+    assert.match(buildLunaSystemPrompt('sala_de_estar', [], at(19, 30)), /Agora são 19:30/);
   });
 
   it('sinaliza ausência de histórico na primeira fala', () => {
-    const prompt = buildLunaSystemPrompt('sala', [], at(10));
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
     assert.match(prompt, /Ainda não há histórico/);
     assert.doesNotMatch(prompt, /Histórico recente desta conversa/);
   });
@@ -54,7 +62,7 @@ describe('buildLunaSystemPrompt', () => {
       { role: 'user', text: 'acende a luz', timestamp: 1 },
       { role: 'assistant', text: 'Pronto.', timestamp: 2 },
     ];
-    const prompt = buildLunaSystemPrompt('sala', history, at(10));
+    const prompt = buildLunaSystemPrompt('sala_de_estar', history, at(10));
 
     assert.match(prompt, /Histórico recente desta conversa/);
     assert.match(prompt, /Usuário: acende a luz/);
@@ -63,20 +71,20 @@ describe('buildLunaSystemPrompt', () => {
   });
 
   it('mantém as diretrizes de fala para TTS', () => {
-    const prompt = buildLunaSystemPrompt('sala', [], at(10));
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
     assert.match(prompt, /Nunca use markdown/);
     assert.match(prompt, /vinte e três graus/);
     assert.match(prompt, /Nunca mencione IA/);
   });
 
   it('inclui os exemplos few-shot de estilo', () => {
-    const prompt = buildLunaSystemPrompt('sala', [], at(10));
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
     assert.match(prompt, /# Exemplos de estilo/);
     assert.match(prompt, /Luna: Não peguei direito/);
   });
 
   it('não vaza marcação markdown nos exemplos de fala da Luna', () => {
-    const prompt = buildLunaSystemPrompt('sala', [], at(10));
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
     const falasDaLuna = prompt
       .split('\n')
       .filter((linha) => linha.startsWith('Luna: '))
@@ -90,7 +98,7 @@ describe('buildLunaSystemPrompt', () => {
   });
 
   it('usa a hora atual quando o parâmetro now é omitido', () => {
-    const prompt = buildLunaSystemPrompt('sala', []);
+    const prompt = buildLunaSystemPrompt('sala_de_estar', []);
     assert.match(prompt, /Agora são \d{2}:\d{2}/);
   });
 });
