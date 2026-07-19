@@ -138,6 +138,11 @@ export class Orchestrator {
         return;
       }
 
+      // Marco do ciclo completo: tool call recebida → HA executado → resposta
+      // devolvida. O `latency_ms` do HomeAssistantClient mede só o HTTP; o que
+      // o usuário sente é este intervalo, que inclui resolução no registro.
+      const toolStartedAt = Date.now();
+
       const { device, action } = call.args;
 
       // O `room_id` do modelo é descartado: ele alucina o cômodo (visto em
@@ -191,9 +196,35 @@ export class Orchestrator {
       void this.haClient
         .callService(domain, action === 'on' ? 'turn_on' : 'turn_off', entityId)
         .then((result) => {
-          sendToClient(
-            serializeControlMessage(createEnvelope('command_result', roomId)),
+          const latencyMs = Date.now() - toolStartedAt;
+
+          getLogger().info(
+            {
+              event: 'command_dispatch',
+              room_id: roomId,
+              device_id: deviceId,
+              device,
+              action,
+              entity_id: entityId,
+              success: result.success,
+              latency_ms: latencyMs,
+            },
+            `Comando despachado: ${device} → ${action} (${latencyMs}ms)`,
           );
+
+          // `success` reflete o resultado real: o satélite não pode tratar um
+          // HA fora do ar como comando executado.
+          sendToClient(
+            serializeControlMessage(
+              createEnvelope('command_result', roomId, {
+                success: result.success,
+                device,
+                action,
+                entity_id: entityId,
+              }),
+            ),
+          );
+
           provider.sendToolResult(call.callId, result);
         });
     });

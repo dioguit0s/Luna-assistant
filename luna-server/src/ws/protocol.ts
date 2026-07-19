@@ -21,6 +21,14 @@ export interface MessageEnvelope {
   device_id?: string;
   token?: string;
   reason?: string;
+  /** `command_result`: se o comando de automação foi de fato executado. */
+  success?: boolean;
+  /** `command_result`: o dispositivo falado, como resolvido no registro. */
+  device?: string;
+  /** `command_result`: a ação aplicada ao dispositivo. */
+  action?: 'on' | 'off';
+  /** `command_result`: entidade acionada no Home Assistant. */
+  entity_id?: string;
 }
 
 export function createEnvelope(

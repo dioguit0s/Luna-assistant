@@ -2,6 +2,7 @@ import { config as loadEnv } from 'dotenv';
 import WebSocket from 'ws';
 import { computeAuthToken, loadClientConfig, parseArgs } from './config.js';
 import { startMicrophoneStream, startPlayback, stopMicrophone, streamWavFile } from './audio.js';
+import type { MessageEnvelope } from './protocol.js';
 import {
   createEnvelope,
   parseIncomingMessage,
@@ -138,7 +139,9 @@ function scheduleResponseSave(): void {
   saveTimer = setTimeout(() => flushResponseWav('timeout'), 800);
 }
 
-function handleServerEnvelope(type: string, pcm: Buffer): void {
+function handleServerEnvelope(envelope: MessageEnvelope, pcm: Buffer): void {
+  const { type } = envelope;
+
   if (type === 'speaking_start') {
     ttfabLogged = false;
     return;
@@ -160,7 +163,11 @@ function handleServerEnvelope(type: string, pcm: Buffer): void {
   }
 
   if (type === 'command_result') {
-    console.log('[command_result] comando de automação despachado');
+    const status = envelope.success ? 'ok' : 'falhou';
+    console.log(
+      `[command_result] ${envelope.device} → ${envelope.action} ` +
+        `(${envelope.entity_id}): ${status}`,
+    );
     return;
   }
 
@@ -189,9 +196,9 @@ function connect(): WebSocket {
 
   ws.on('message', (data, isBinary) => {
     if (!isBinary) {
-      let envelope: { type: string; reason?: string };
+      let envelope: MessageEnvelope;
       try {
-        envelope = JSON.parse(data.toString()) as { type: string; reason?: string };
+        envelope = JSON.parse(data.toString()) as MessageEnvelope;
       } catch {
         return;
       }
@@ -220,13 +227,13 @@ function connect(): WebSocket {
       }
 
       // speaking_start / speaking_end chegam como JSON puro (não binário)
-      handleServerEnvelope(envelope.type, Buffer.alloc(0));
+      handleServerEnvelope(envelope, Buffer.alloc(0));
       return;
     }
 
     const parsed = parseIncomingMessage(Buffer.from(data as Buffer));
     if (!parsed) return;
-    handleServerEnvelope(parsed.envelope.type, parsed.pcm);
+    handleServerEnvelope(parsed.envelope, parsed.pcm);
   });
 
   ws.on('close', () => {

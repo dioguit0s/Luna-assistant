@@ -25,6 +25,10 @@ export interface MessageEnvelope {
   device_id?: string;
   token?: string;
   reason?: string;
+  success?: boolean;
+  device?: string;
+  action?: 'on' | 'off';
+  entity_id?: string;
 }
 
 export function createEnvelope(
