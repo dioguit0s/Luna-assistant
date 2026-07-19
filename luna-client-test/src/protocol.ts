@@ -13,6 +13,7 @@ export type MessageType =
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
+  | 'command_result'
   | 'ping'
   | 'pong';
 

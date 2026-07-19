@@ -5,6 +5,11 @@ import type { IAudioProvider } from '../IAudioProvider.js';
 import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../types.js';
 import { resample24kTo16k } from '../utils/resampler.js';
 import { getLogger } from '../../logging/logger.js';
+import {
+  normalizeToolCalls,
+  toGeminiFunctionDeclarations,
+  type RawToolCall,
+} from './tool-mapping.js';
 
 type LiveSession = Awaited<
   ReturnType<InstanceType<typeof GoogleGenAI>['live']['connect']>
@@ -19,6 +24,9 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private userTranscript = '';
   private assistantTranscript = '';
   private activityOpen = false;
+  private roomId = '';
+  /** callId → nome da função. O SDK exige o `name` de volta no `functionResponse`. */
+  private readonly pendingToolCalls = new Map<string, string>();
 
   constructor(private readonly config: AppConfig) {}
 
@@ -56,6 +64,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
   async connect(sessionConfig: ProviderSessionConfig): Promise<void> {
     const ai = new GoogleGenAI({ apiKey: this.config.geminiApiKey });
     const automaticActivityDetection = this.buildActivityDetection();
+    this.roomId = sessionConfig.roomId;
 
     this.session = await ai.live.connect({
       model: this.config.geminiLiveModel,
@@ -64,8 +73,13 @@ export class GeminiLiveAdapter implements IAudioProvider {
         systemInstruction: sessionConfig.systemPrompt,
         inputAudioTranscription: {},
         outputAudioTranscription: {},
-        // TODO(LUNA-306): mapear `sessionConfig.tools` para
-        // `tools: [{ functionDeclarations: [...] }]` e tratar `message.toolCall`.
+        ...(sessionConfig.tools.length > 0
+          ? {
+              tools: [
+                { functionDeclarations: toGeminiFunctionDeclarations(sessionConfig.tools) },
+              ],
+            }
+          : {}),
         ...(automaticActivityDetection
           ? { realtimeInputConfig: { automaticActivityDetection } }
           : {}),
@@ -127,11 +141,34 @@ export class GeminiLiveAdapter implements IAudioProvider {
     this.toolCallCb = callback;
   }
 
-  sendToolResult(_callId: string, _result: unknown): void {
-    throw new Error('GeminiLiveAdapter.sendToolResult não implementado (LUNA-306)');
+  sendToolResult(callId: string, result: unknown): void {
+    const name = this.pendingToolCalls.get(callId);
+
+    // Sem o `name` o SDK rejeita o functionResponse. Um callId desconhecido é
+    // bug de correlação, mas lançar aqui derrubaria o turno inteiro do usuário.
+    if (!this.session || !name) {
+      getLogger().warn(
+        { room_id: this.roomId, call_id: callId },
+        'sendToolResult para callId desconhecido ou sessão fechada',
+      );
+      return;
+    }
+
+    this.pendingToolCalls.delete(callId);
+
+    // A API exige um objeto JSON; primitivos vão sob a chave "output".
+    const response =
+      typeof result === 'object' && result !== null && !Array.isArray(result)
+        ? (result as Record<string, unknown>)
+        : { output: result };
+
+    this.session.sendToolResponse({
+      functionResponses: [{ id: callId, name, response }],
+    });
   }
 
   async disconnect(): Promise<void> {
+    this.pendingToolCalls.clear();
     if (this.session) {
       this.session.close();
       this.session = null;
@@ -139,6 +176,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
   }
 
   private handleMessage(message: {
+    toolCall?: RawToolCall;
     serverContent?: {
       inputTranscription?: { text?: string };
       outputTranscription?: { text?: string };
@@ -153,6 +191,19 @@ export class GeminiLiveAdapter implements IAudioProvider {
         { raw: JSON.stringify(message).slice(0, 300) },
         'DEBUG mensagem Gemini',
       );
+    }
+
+    // `toolCall` chega na raiz da mensagem, fora de `serverContent` — precisa
+    // ser tratado antes do early return abaixo.
+    if (message.toolCall) {
+      for (const call of normalizeToolCalls(message.toolCall)) {
+        this.pendingToolCalls.set(call.callId, call.name);
+        getLogger().info(
+          { event: 'tool_call', room_id: this.roomId, name: call.name, call_id: call.callId },
+          `Tool call recebida: ${call.name}`,
+        );
+        this.toolCallCb?.(call);
+      }
     }
 
     const serverContent = message.serverContent;

@@ -159,6 +159,11 @@ function handleServerEnvelope(type: string, pcm: Buffer): void {
     return;
   }
 
+  if (type === 'command_result') {
+    console.log('[command_result] comando de automação despachado');
+    return;
+  }
+
   if (type === 'speaking_end') {
     lastAudioSentAt = null;
     flushResponseWav('speaking_end');

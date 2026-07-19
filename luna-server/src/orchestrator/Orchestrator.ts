@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import type { RoomManager } from '../rooms/RoomManager.js';
 import type { CompletedTurn } from '../providers/types.js';
+import { isControlDeviceCall } from '../providers/types.js';
 import { getLogger } from '../logging/logger.js';
 import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
@@ -117,6 +118,51 @@ export class Orchestrator {
       }
 
       tracker.reset();
+    });
+
+    provider.onToolCall((call) => {
+      // Fronteira de confiança: `args` é texto gerado pelo modelo.
+      if (!isControlDeviceCall(call)) {
+        getLogger().error(
+          { event: 'tool_call', room_id: roomId, name: call.name, args: call.args },
+          'Tool call inválida ou desconhecida',
+        );
+        provider.sendToolResult(call.callId, {
+          success: false,
+          error: 'argumentos inválidos',
+        });
+        return;
+      }
+
+      const { device, action } = call.args;
+
+      // O `room_id` do modelo é descartado: ele alucina o cômodo (visto em
+      // teste, sessão em sala_de_estar gerando room_id "cozinha") e os args
+      // continuariam válidos pelo type guard — acionaria o cômodo errado sem
+      // erro nenhum. O servidor sabe de onde veio o áudio; essa é a verdade.
+      const suggestedRoomId = call.args.room_id;
+
+      getLogger().info(
+        {
+          event: 'tool_call',
+          room_id: roomId,
+          device_id: deviceId,
+          name: call.name,
+          device,
+          action,
+          ...(suggestedRoomId !== roomId ? { discarded_room_id: suggestedRoomId } : {}),
+        },
+        `Comando de automação: ${device} → ${action} em ${roomId}`,
+      );
+
+      sendToClient(
+        serializeControlMessage(createEnvelope('command_result', roomId)),
+      );
+
+      // TODO(LUNA-308): despachar para a API do Home Assistant usando `roomId`
+      // (não `call.args.room_id`) e refletir o resultado real aqui, mantendo
+      // este mesmo formato de retorno.
+      provider.sendToolResult(call.callId, { success: true });
     });
 
     provider.onError((err) => {

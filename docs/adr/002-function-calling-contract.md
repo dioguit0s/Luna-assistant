@@ -69,6 +69,8 @@ interface IAudioProvider {
 
 A definição vive em `CONTROL_DEVICE_TOOL` (`luna-server/src/providers/types.ts`) e a validação em `isControlDeviceCall()`, no mesmo módulo.
 
+`room_id` é declarado na tool para dar contexto ao modelo, mas **o orquestrador descarta o valor gerado e usa o `roomId` da sessão**. Validado em teste na LUNA-306: uma sessão em `sala_de_estar` produziu `room_id: "cozinha"`. O modelo não tem como saber de qual cômodo veio o áudio, e o valor alucinado passa pelo type guard sem erro — acionaria o dispositivo errado silenciosamente. O servidor conhece a origem do áudio com certeza; ela prevalece.
+
 `room_id` segue os `area_id` do Home Assistant como fonte de verdade — `sala_de_estar`, `cozinha`, `quarto`, conforme [`infra/README.md`](../../infra/README.md). A mesma string atravessa todo o sistema sem tradução: `area_id` no HA, `ROOM_ID` no firmware, `room_id` no envelope WebSocket, chave de `ROOM_LABELS` no prompt e campo `room_id` desta tool. Qualquer ponto que invente um apelido próprio quebra a correlação silenciosamente, sem erro de compilação — cômodo novo se cria como área no HA primeiro, e o `area_id` gerado é replicado nos demais pontos.
 
 ### Responsabilidades por camada
