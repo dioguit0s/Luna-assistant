@@ -77,6 +77,34 @@ describe('buildLunaSystemPrompt', () => {
     assert.match(prompt, /Nunca mencione IA/);
   });
 
+  it('descreve a tool control_device e quando não usá-la', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
+    assert.match(prompt, /# Automação da casa/);
+    assert.match(prompt, /control_device/);
+    assert.match(prompt, /não é comando/);
+  });
+
+  it('manda preencher room_id com o area_id cru da sessão', () => {
+    // O rótulo falável ("a cozinha") não serve como argumento: o `room_id` precisa
+    // ser o `area_id` do HA. Os dois têm que aparecer, cada um no seu papel.
+    const prompt = buildLunaSystemPrompt('cozinha', [], at(10));
+    assert.match(prompt, /preencha room_id com "cozinha"/);
+    assert.match(prompt, /sempre daqui, a cozinha/);
+  });
+
+  it('pede confirmação curta no passado após sucesso', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
+    assert.match(prompt, /confirme curto e no passado/);
+    assert.match(prompt, /Nunca narre o que você vai fazer/);
+  });
+
+  it('orienta fala natural para aparelho desconhecido e casa fora do ar', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
+    assert.match(prompt, /Aparelho que não existe ou não está neste cômodo/);
+    assert.match(prompt, /A casa não respondeu/);
+    assert.match(prompt, /Nunca diga que ligou ou desligou algo sem ter recebido a confirmação/);
+  });
+
   it('inclui os exemplos few-shot de estilo', () => {
     const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
     assert.match(prompt, /# Exemplos de estilo/);
