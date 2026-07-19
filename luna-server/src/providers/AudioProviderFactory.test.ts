@@ -13,6 +13,8 @@ describe('AudioProviderFactory', () => {
     logLevel: 'info',
     geminiLiveModel: 'gemini-test',
     openaiRealtimeModel: 'gpt-test',
+    haUrl: '',
+    haToken: '',
   };
 
   it('instancia GeminiLiveAdapter', () => {

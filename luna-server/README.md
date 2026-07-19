@@ -38,6 +38,12 @@ npm test
 | `WS_AUTH_SECRET` | Segredo HMAC para autenticação de satélites |
 | `WS_PORT` | Porta WebSocket (default: 8080) |
 | `LOG_LEVEL` | Nível de log pino (default: info) |
+| `HA_URL` | URL do Home Assistant (Épico 3, ex: `http://192.168.0.10:8123`) |
+| `HA_TOKEN` | Long-Lived Access Token do Home Assistant (Épico 3) |
+
+O `HA_TOKEN` é gerado na UI do Home Assistant: perfil do usuário → aba
+*Segurança* → **Long-Lived Access Tokens** → *Criar token*. O valor só é exibido
+uma vez. Ver [`infra/README.md`](../infra/README.md) para a subida do serviço.
 
 ## Homologação Épico 1
 

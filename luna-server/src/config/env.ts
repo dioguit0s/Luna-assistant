@@ -13,6 +13,8 @@ export interface AppConfig {
   logLevel: string;
   geminiLiveModel: string;
   openaiRealtimeModel: string;
+  haUrl: string;
+  haToken: string;
 }
 
 function requireEnv(name: string): string {
@@ -44,6 +46,8 @@ export function loadConfig(): AppConfig {
       process.env.GEMINI_LIVE_MODEL ?? 'gemini-2.5-flash-native-audio-preview-12-2025',
     openaiRealtimeModel:
       process.env.OPENAI_REALTIME_MODEL ?? 'gpt-4o-realtime-preview-2024-12-17',
+    haUrl: process.env.HA_URL ?? '',
+    haToken: process.env.HA_TOKEN ?? '',
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {
