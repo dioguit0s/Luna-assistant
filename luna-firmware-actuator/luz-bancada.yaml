@@ -1,0 +1,63 @@
+# ============================================================================
+# Luna — Firmware do ESP32 atuador (Épico 3, LUNA-303)
+# Placa: ESP32 DevKit v1 (chip ESP32-WROOM-32, não o S3 do satélite)
+#
+# A carga é o LED azul embutido (GPIO2), simulando a luz de bancada. Não há
+# relay nem fiação externa: o objetivo é validar o caminho
+# luna-server -> Home Assistant -> ESP32 sem hardware de potência no meio.
+# ============================================================================
+
+esphome:
+  name: luz-bancada # vira o hostname mDNS: luz-bancada.local
+  # `friendly_name` está deliberadamente ausente. Quando ele existe, o HA
+  # prefixa o entity_id de toda entidade do node (switch.luz_de_bancada_
+  # luz_bancada). Sem ele, o entity_id sai exatamente `switch.luz_bancada` —
+  # a string que o function calling da LUNA-305 envia no campo "device".
+  # Mesma invariante do ROOM_ID <-> area_id: o nome é contrato, não rótulo.
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+
+# API nativa do ESPHome — o HA fala este protocolo, não MQTT.
+# Sem `encryption` o tráfego vai em claro na LAN e o HA aceita qualquer cliente.
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # AP de resgate. Se o Wi-Fi da casa cair ou a senha mudar, o node sobe uma
+  # rede própria e continua acessível — sem isso, um erro de credencial gravado
+  # por OTA só se resolve com o cabo USB de volta.
+  ap:
+    ssid: "luz-bancada-fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+switch:
+  - platform: gpio
+    # GPIO2 = LED azul onboard do DevKit v1. Nada precisa ser ligado à placa.
+    #
+    # GPIO2 também é strapping pin (define o modo de boot), e o ESPHome avisa
+    # sobre isso a cada build. Aqui é seguro e o aviso é suprimido de propósito:
+    # o LED onboard já vem com resistor para GND, que é justamente o nível que
+    # o boot normal exige. O risco só existiria com um pull-up externo no pino.
+    pin:
+      number: GPIO2
+      ignore_strapping_warning: true
+    name: "luz_bancada"
+    id: luz_bancada
+    # Após queda de energia a luz volta apagada. RESTORE_DEFAULT_ON deixaria a
+    # bancada acesa sozinha depois de um pico de energia às 3h da manhã.
+    restore_mode: RESTORE_DEFAULT_OFF

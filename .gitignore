@@ -35,6 +35,10 @@ coverage/
 luna-firmware/.pio/
 luna-firmware/include/secrets.h
 
+# ESPHome (atuador) — segredos e cache de build
+luna-firmware-actuator/secrets.yaml
+luna-firmware-actuator/.esphome/
+
 # Infra / Docker (dados persistentes dos containers)
 infra/homeassistant/config/
 infra/redis/data/
