@@ -3,6 +3,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { AppConfig } from '../config/env.js';
 import type { RoomManager } from '../rooms/RoomManager.js';
 import { Orchestrator } from '../orchestrator/Orchestrator.js';
+import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import { validateAuthToken } from './auth.js';
 import { parseAudioMessage } from './messageParser.js';
 import {
@@ -28,7 +29,11 @@ export class WsServer {
     private readonly config: AppConfig,
     private readonly roomManager: RoomManager,
   ) {
-    this.orchestrator = new Orchestrator(config, roomManager);
+    this.orchestrator = new Orchestrator(
+      config,
+      roomManager,
+      new HomeAssistantClient(config),
+    );
   }
 
   start(): void {

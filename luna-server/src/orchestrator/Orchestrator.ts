@@ -6,6 +6,7 @@ import { getLogger } from '../logging/logger.js';
 import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
 import type { AppConfig } from '../config/env.js';
+import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import {
   createEnvelope,
   serializeControlMessage,
@@ -18,6 +19,7 @@ export class Orchestrator {
   constructor(
     private readonly config: AppConfig,
     private readonly roomManager: RoomManager,
+    private readonly haClient: HomeAssistantClient,
   ) {}
 
   async handleAudioChunk(
@@ -155,14 +157,16 @@ export class Orchestrator {
         `Comando de automação: ${device} → ${action} em ${roomId}`,
       );
 
-      sendToClient(
-        serializeControlMessage(createEnvelope('command_result', roomId)),
-      );
-
-      // TODO(LUNA-308): despachar para a API do Home Assistant usando `roomId`
-      // (não `call.args.room_id`) e refletir o resultado real aqui, mantendo
-      // este mesmo formato de retorno.
-      provider.sendToolResult(call.callId, { success: true });
+      // O callback do port é síncrono; a chamada ao HA é async e o client
+      // nunca lança, então basta não deixar a promise solta.
+      void this.haClient
+        .callService('switch', action === 'on' ? 'turn_on' : 'turn_off', `switch.${device}`)
+        .then((result) => {
+          sendToClient(
+            serializeControlMessage(createEnvelope('command_result', roomId)),
+          );
+          provider.sendToolResult(call.callId, result);
+        });
     });
 
     provider.onError((err) => {
