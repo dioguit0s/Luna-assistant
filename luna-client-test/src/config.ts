@@ -17,7 +17,7 @@ export interface ClientConfig {
 export function loadClientConfig(): ClientConfig {
   return {
     serverUrl: process.env.WS_SERVER_URL ?? 'ws://localhost:8080',
-    roomId: process.env.ROOM_ID ?? 'sala-teste',
+    roomId: process.env.ROOM_ID ?? 'sala_de_estar',
     deviceId: process.env.DEVICE_ID ?? 'test-client-001',
     authSecret: process.env.WS_AUTH_SECRET ?? 'dev-secret-change-me',
     wavFile: process.env.WAV_FILE,
