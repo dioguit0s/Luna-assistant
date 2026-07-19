@@ -14,12 +14,42 @@ RELEASES_DIR="$LUNA_ROOT/releases"
 CURRENT_LINK="$LUNA_ROOT/current"
 NEW_RELEASE="$RELEASES_DIR/$SHA"
 
-HEALTH_PORT="${WS_PORT:-8080}"
-HEALTH_URL="http://127.0.0.1:$HEALTH_PORT/health"
+LUNA_ENV_FILE="${LUNA_ENV_FILE:-/etc/luna-server.env}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-20}"
 KEEP_RELEASES="${KEEP_RELEASES:-5}"
 
 log() { echo "[activate] $*"; }
+
+# A porta e definida em $LUNA_ENV_FILE, que o systemd injeta no processo — o
+# runner nao a tem no ambiente. Ler dali evita que uma troca de WS_PORT no
+# servidor faca o health check bater na porta errada e provocar rollback falso.
+# Lemos so a chave WS_PORT em vez de dar `source`: o arquivo contem segredos.
+resolve_health_port() {
+  if [[ -n "${WS_PORT:-}" ]]; then
+    echo "$WS_PORT"
+    return
+  fi
+
+  if [[ -r "$LUNA_ENV_FILE" ]]; then
+    local port
+    port="$(sed -n 's/^[[:space:]]*WS_PORT[[:space:]]*=[[:space:]]*["'\'']\?\([0-9]\+\).*/\1/p' \
+      "$LUNA_ENV_FILE" | tail -n1)"
+    if [[ -n "$port" ]]; then
+      echo "$port"
+      return
+    fi
+    echo 8080
+    return
+  fi
+
+  log "AVISO: $LUNA_ENV_FILE ilegivel por $(id -un) — assumindo porta 8080."
+  log "       Se WS_PORT for outra, o health check falha e provoca rollback falso."
+  log "       Corrija com: sudo usermod -aG luna $(id -un)"
+  echo 8080
+}
+
+HEALTH_PORT="$(resolve_health_port)"
+HEALTH_URL="http://127.0.0.1:$HEALTH_PORT/health"
 
 if [[ ! -d "$NEW_RELEASE" ]]; then
   log "ERRO: release nao encontrada em $NEW_RELEASE"
@@ -55,7 +85,7 @@ health_ok() {
   return 1
 }
 
-log "ativando release $SHA"
+log "ativando release $SHA (health check em $HEALTH_URL)"
 swap_to "$NEW_RELEASE"
 sudo systemctl restart luna-server
 

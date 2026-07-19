@@ -14,7 +14,8 @@ aberta no roteador.
    Se os testes falharem, o job para aqui e **a versão em produção continua no ar**.
 2. A build é copiada para `/opt/luna/releases/<sha>` e recebe `npm ci --omit=dev`.
 3. [`activate.sh`](./activate.sh) troca atomicamente o symlink `/opt/luna/current`,
-   reinicia o serviço e valida `GET http://127.0.0.1:8080/health` por até 20s.
+   reinicia o serviço e valida `GET /health` por até 20s. A porta é lida do
+   `WS_PORT` em `/etc/luna-server.env` — ver [Porta](#porta) abaixo.
 4. Se o health check falhar, o symlink volta para a release anterior, o serviço é
    reiniciado e o job falha (vermelho na aba Actions).
 5. Releases antigas são podadas, mantendo as 5 mais recentes.
@@ -63,6 +64,15 @@ sudo chmod 0640 /etc/luna-server.env
 > (`luna-firmware/include/secrets.h`). Trocar aqui sem reflashar os satélites
 > derruba a autenticação deles.
 
+O runner precisa ler esse arquivo para descobrir a `WS_PORT` no health check:
+
+```bash
+sudo usermod -aG luna ash   # o grupo dá leitura via modo 0640 root:luna
+```
+
+Aplique com `sudo systemctl restart actions.runner.*` (ou reboot) — o runner só
+enxerga o novo grupo depois de reiniciar.
+
 ### 4. Serviço systemd
 
 ```bash
@@ -97,8 +107,24 @@ sudo visudo -f /etc/sudoers.d/luna-deploy
 ### 7. Firewall
 
 ```bash
-sudo ufw allow from 192.168.0.0/24 to any port 8080 proto tcp
+sudo ufw allow from 192.168.0.0/24 to any port "$WS_PORT" proto tcp
 ```
+
+## Porta
+
+`WS_PORT` em `/etc/luna-server.env` é a **única** fonte de verdade do lado do
+servidor — o `activate.sh` lê dali para montar a URL do health check, então
+trocar a porta não exige mexer em nenhum arquivo do repositório.
+
+Mas a porta também aparece, hardcoded, em dois lugares fora do servidor:
+
+| Onde | O que fazer ao trocar a porta |
+|---|---|
+| `luna-firmware/include/secrets.h` (`LUNA_PORT`) | Editar e **reflashar** cada satélite — o valor é compile-time |
+| `luna-client-test/.env` (`WS_SERVER_URL`) | Editar a URL |
+
+Trocar `WS_PORT` sem atualizar o firmware deixa os satélites tentando conectar
+na porta antiga indefinidamente. Também lembre da regra `ufw` para a porta nova.
 
 ### 8. Primeiro deploy
 
@@ -116,7 +142,7 @@ sudo systemctl status luna-server
 ls -l /opt/luna/current
 
 # Health check
-curl -s http://127.0.0.1:8080/health
+curl -s "http://127.0.0.1:$WS_PORT/health"
 
 # Trocar segredos (exige restart manual — deploy não recarrega o env sozinho)
 sudo nano /etc/luna-server.env && sudo systemctl restart luna-server

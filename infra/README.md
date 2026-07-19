@@ -42,7 +42,7 @@ docker compose pull && docker compose up -d   # atualizar imagem
 |-------|---------|-----|
 | 8123 | Home Assistant | UI web e API REST/WebSocket consumida pelo `luna-server` |
 | 5353/udp | mDNS | Descoberta automática dos dispositivos ESPHome |
-| 8080 | `luna-server` | WebSocket dos satélites e `GET /health`. Serviço systemd, fora do compose — ver [luna-server/deploy](../luna-server/deploy/README.md) |
+| `WS_PORT` (8086 nesta casa) | `luna-server` | WebSocket dos satélites e `GET /health`. Serviço systemd, fora do compose — ver [luna-server/deploy](../luna-server/deploy/README.md) |
 | 6379 | Redis | **Desativado** — serviço comentado, previsto no Épico 4 |
 
 Em `network_mode: host` não há mapeamento de portas: o Home Assistant escuta
@@ -53,7 +53,7 @@ Se o `ufw` estiver ativo no Ubuntu, libere o necessário:
 ```bash
 sudo ufw allow from 192.168.0.0/24 to any port 8123 proto tcp
 sudo ufw allow from 192.168.0.0/24 to any port 5353 proto udp
-sudo ufw allow from 192.168.0.0/24 to any port 8080 proto tcp
+sudo ufw allow from 192.168.0.0/24 to any port 8086 proto tcp   # WS_PORT do luna-server
 ```
 
 ## `luna-server`
