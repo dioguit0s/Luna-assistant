@@ -14,6 +14,55 @@ export interface HaServiceResult {
 const DEFAULT_TIMEOUT_MS = 3000;
 
 /**
+ * Domínios que a Luna pode acionar. Sem essa allowlist, `automation.*`,
+ * `update.*` e sensores entrariam no vocabulário da IA junto com as luzes.
+ */
+const ACTIONABLE_DOMAINS = ['switch', 'light', 'fan'];
+
+/**
+ * Renderiza no HA o mapa (área, entidade) que o registro de dispositivos
+ * precisa. A REST API não expõe o registro de áreas diretamente — só a API
+ * WebSocket — mas `/api/template` roda Jinja com `areas()`/`area_entities()`,
+ * o que resolve tudo em uma chamada.
+ *
+ * `namespace` + `tojson` em vez de montar JSON por concatenação: uma área sem
+ * entidades deixaria vírgula sobrando e quebraria o parse.
+ */
+const AREA_ENTITIES_TEMPLATE = `
+{%- set ns = namespace(rows=[]) -%}
+{%- for a in areas() -%}
+  {%- for e in area_entities(a) -%}
+    {%- if e.split('.')[0] in ${JSON.stringify(ACTIONABLE_DOMAINS)} -%}
+      {%- set ns.rows = ns.rows + [{'device': e.split('.')[1], 'room_id': a,
+          'entity_id': e, 'name': state_attr(e, 'friendly_name')}] -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endfor -%}
+{{ ns.rows | tojson }}
+`;
+
+/** Uma entidade acionável descoberta no HA. */
+export interface DiscoveredEntity {
+  device: string;
+  room_id: string;
+  entity_id: string;
+  name?: string;
+}
+
+function isDiscoveredEntity(row: unknown): row is DiscoveredEntity {
+  if (typeof row !== 'object' || row === null) return false;
+  const { device, room_id: roomId, entity_id: entityId } = row as Record<string, unknown>;
+  return (
+    typeof device === 'string' &&
+    device.length > 0 &&
+    typeof roomId === 'string' &&
+    roomId.length > 0 &&
+    typeof entityId === 'string' &&
+    entityId.includes('.')
+  );
+}
+
+/**
  * Cliente REST do Home Assistant.
  *
  * Nenhum método lança. O HA fora do ar não pode derrubar o turno do usuário —
@@ -165,6 +214,101 @@ export class HomeAssistantClient {
       );
       return null;
     }
+  }
+
+  /**
+   * Lista as entidades acionáveis agrupadas por área do HA, ou `null` se não
+   * foi possível descobrir. O HA é a fonte de verdade: dispositivo novo
+   * cadastrado lá e atribuído a uma área aparece aqui sem tocar em código.
+   */
+  async listAreaEntities(): Promise<DiscoveredEntity[] | null> {
+    if (!this.isConfigured()) {
+      return null;
+    }
+
+    const url = `${this.baseUrl()}/api/template`;
+    const startedAt = Date.now();
+
+    try {
+      const res = await this.fetchImpl(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.config.haToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ template: AREA_ENTITIES_TEMPLATE }),
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+
+      const latencyMs = Date.now() - startedAt;
+
+      if (!res.ok) {
+        getLogger().warn(
+          { event: 'ha_list_entities', status: res.status, latency_ms: latencyMs },
+          `Home Assistant respondeu ${res.status} ao renderizar o template de áreas`,
+        );
+        return null;
+      }
+
+      // `/api/template` devolve o texto renderizado, não JSON estruturado.
+      const entities = this.parseDiscovered(await res.text());
+      if (entities === null) return null;
+
+      getLogger().info(
+        { event: 'ha_list_entities', count: entities.length, latency_ms: latencyMs },
+        `Home Assistant: ${entities.length} entidades acionáveis descobertas`,
+      );
+      return entities;
+    } catch (err) {
+      getLogger().warn(
+        {
+          event: 'ha_list_entities',
+          latency_ms: Date.now() - startedAt,
+          err: this.describeFailure(err),
+        },
+        'Falha ao descobrir entidades no Home Assistant',
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Entrada malformada é descartada individualmente: uma entidade estranha não
+   * pode zerar o vocabulário inteiro da Luna. Já um corpo que nem é lista é
+   * falha de verdade — devolve `null` e o chamador mantém o snapshot anterior.
+   */
+  private parseDiscovered(body: string): DiscoveredEntity[] | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      getLogger().warn(
+        { event: 'ha_list_entities', body: body.slice(0, 200) },
+        'Template de áreas não devolveu JSON',
+      );
+      return null;
+    }
+
+    if (!Array.isArray(parsed)) {
+      getLogger().warn(
+        { event: 'ha_list_entities' },
+        'Template de áreas não devolveu uma lista',
+      );
+      return null;
+    }
+
+    const entities: DiscoveredEntity[] = [];
+    for (const row of parsed) {
+      if (!isDiscoveredEntity(row)) {
+        getLogger().warn(
+          { event: 'ha_list_entities', row },
+          'Entidade descoberta com forma inesperada: descartada',
+        );
+        continue;
+      }
+      entities.push(row);
+    }
+    return entities;
   }
 
   /** `haUrl`/`haToken` têm default vazio no env; sem eles não há o que chamar. */

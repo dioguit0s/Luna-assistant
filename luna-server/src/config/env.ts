@@ -15,6 +15,10 @@ export interface AppConfig {
   openaiRealtimeModel: string;
   haUrl: string;
   haToken: string;
+  /** Overrides do registro de dispositivos. O catálogo em si vem do HA. */
+  devicesConfigPath: string;
+  /** Intervalo de revalidação do registro: dispositivo novo sem restart. */
+  deviceRegistryTtlMs: number;
   geminiVadSilenceMs: number | null;
   geminiVadEndSensitivity: EndSensitivityName | null;
   geminiManualActivity: boolean;
@@ -72,6 +76,8 @@ export function loadConfig(): AppConfig {
       process.env.OPENAI_REALTIME_MODEL ?? 'gpt-4o-realtime-preview-2024-12-17',
     haUrl: process.env.HA_URL ?? '',
     haToken: process.env.HA_TOKEN ?? '',
+    devicesConfigPath: process.env.DEVICES_CONFIG_PATH ?? 'config/devices.json',
+    deviceRegistryTtlMs: parseOptionalNumber('DEVICE_REGISTRY_TTL_MS') ?? 300_000,
     geminiVadSilenceMs: parseOptionalNumber('GEMINI_VAD_SILENCE_MS'),
     geminiVadEndSensitivity: parseEndSensitivity(process.env.GEMINI_VAD_END_SENSITIVITY),
     geminiManualActivity: process.env.GEMINI_MANUAL_ACTIVITY === 'true',

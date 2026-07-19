@@ -1,0 +1,11 @@
+{
+  "_comment": "Camada de correção sobre a descoberta automática do Home Assistant. O catálogo de dispositivos é o HA: cadastre o dispositivo lá e atribua uma área, e a Luna o reconhece no próximo refresh, sem tocar neste arquivo. Use 'aliases' para nomes que a IA fala diferente do object_id, 'exclude' para entidades que ela não pode acionar, e 'devices' para o que não está em nenhuma área.",
+  "_comment_aliases": "O ESP32 da bancada expõe switch.luz_bancada_luz_bancada (o ESPHome concatena nome do device e da entidade). Nenhum modelo fala isso. A correção definitiva é renomear a entidade no HA ou no firmware; até lá, os apelidos abaixo cobrem o que a Luna realmente ouve.",
+  "aliases": {
+    "luz": "luz_bancada_luz_bancada",
+    "luz_bancada": "luz_bancada_luz_bancada",
+    "luz_da_bancada": "luz_bancada_luz_bancada"
+  },
+  "exclude": [],
+  "devices": []
+}

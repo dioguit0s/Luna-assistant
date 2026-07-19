@@ -15,6 +15,8 @@ const baseConfig: AppConfig = {
   openaiRealtimeModel: 'test-model',
   haUrl: 'http://ha.local:8123',
   haToken: 'token-de-teste',
+  devicesConfigPath: 'config/devices.json',
+  deviceRegistryTtlMs: 300_000,
   geminiVadSilenceMs: null,
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,

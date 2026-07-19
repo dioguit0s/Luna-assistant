@@ -15,6 +15,8 @@ describe('AudioProviderFactory', () => {
     openaiRealtimeModel: 'gpt-test',
     haUrl: '',
     haToken: '',
+    devicesConfigPath: 'config/devices.json',
+    deviceRegistryTtlMs: 300_000,
     geminiVadSilenceMs: null,
     geminiVadEndSensitivity: null,
     geminiManualActivity: false,

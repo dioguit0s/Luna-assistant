@@ -20,7 +20,8 @@ function periodOfDay(hour: number): PeriodOfDay {
   return 'noite';
 }
 
-function roomLabel(roomId: string): string {
+/** Rótulo falável do cômodo, com artigo. Usado no prompt e nos erros verbalizados. */
+export function roomLabel(roomId: string): string {
   return ROOM_LABELS[roomId] ?? `o ambiente "${roomId}"`;
 }
 

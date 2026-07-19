@@ -3,7 +3,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { AppConfig } from '../config/env.js';
 import type { RoomManager } from '../rooms/RoomManager.js';
 import { Orchestrator } from '../orchestrator/Orchestrator.js';
-import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import { validateAuthToken } from './auth.js';
 import { parseAudioMessage } from './messageParser.js';
 import {
@@ -28,12 +29,12 @@ export class WsServer {
   constructor(
     private readonly config: AppConfig,
     private readonly roomManager: RoomManager,
+    haClient: HomeAssistantClient,
+    deviceRegistry: DeviceRegistrySource,
   ) {
-    this.orchestrator = new Orchestrator(
-      config,
-      roomManager,
-      new HomeAssistantClient(config),
-    );
+    // O client do HA e o registro são construídos em `index.ts`: o registro tem
+    // ciclo de vida próprio (start/stop) e ambos compartilham o mesmo client.
+    this.orchestrator = new Orchestrator(config, roomManager, haClient, deviceRegistry);
   }
 
   start(): void {

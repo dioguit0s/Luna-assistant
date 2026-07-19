@@ -7,6 +7,7 @@ import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
 import type { AppConfig } from '../config/env.js';
 import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import {
   createEnvelope,
   serializeControlMessage,
@@ -20,6 +21,7 @@ export class Orchestrator {
     private readonly config: AppConfig,
     private readonly roomManager: RoomManager,
     private readonly haClient: HomeAssistantClient,
+    private readonly deviceRegistry: DeviceRegistrySource,
   ) {}
 
   async handleAudioChunk(
@@ -157,10 +159,37 @@ export class Orchestrator {
         `Comando de automação: ${device} → ${action} em ${roomId}`,
       );
 
+      // `current()` a cada chamada, nunca em campo: o registro é revalidado em
+      // background e uma referência guardada congelaria o vocabulário no boot.
+      const resolution = this.deviceRegistry.current().resolve(device, roomId);
+
+      if (!resolution.ok) {
+        getLogger().warn(
+          {
+            event: 'device_unresolved',
+            room_id: roomId,
+            device_id: deviceId,
+            device,
+            reason: resolution.reason,
+          },
+          `Dispositivo não resolvido: ${device} em ${roomId} (${resolution.reason})`,
+        );
+        // Sem `command_result`: nada foi acionado. O erro é escrito para ser
+        // falado — é assim que a IA diz "não encontrei esse dispositivo" em vez
+        // de encerrar o turno em silêncio.
+        provider.sendToolResult(call.callId, {
+          success: false,
+          error: resolution.error,
+        });
+        return;
+      }
+
+      const { domain, entityId } = resolution.entry;
+
       // O callback do port é síncrono; a chamada ao HA é async e o client
       // nunca lança, então basta não deixar a promise solta.
       void this.haClient
-        .callService('switch', action === 'on' ? 'turn_on' : 'turn_off', `switch.${device}`)
+        .callService(domain, action === 'on' ? 'turn_on' : 'turn_off', entityId)
         .then((result) => {
           sendToClient(
             serializeControlMessage(createEnvelope('command_result', roomId)),

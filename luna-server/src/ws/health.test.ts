@@ -4,6 +4,8 @@ import type { AppConfig } from '../config/env.js';
 import { createLogger } from '../logging/logger.js';
 import { ConversationRingBuffer } from '../rooms/ConversationRingBuffer.js';
 import { RoomManager } from '../rooms/RoomManager.js';
+import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import { WsServer } from './WsServer.js';
 
 const config: AppConfig = {
@@ -17,6 +19,8 @@ const config: AppConfig = {
   openaiRealtimeModel: 'test-model',
   haUrl: '',
   haToken: '',
+  devicesConfigPath: 'config/devices.json',
+  deviceRegistryTtlMs: 300_000,
   geminiVadSilenceMs: null,
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
@@ -33,7 +37,8 @@ describe('GET /health', () => {
     createLogger(config);
     ringBuffer = new ConversationRingBuffer();
     roomManager = new RoomManager(config, ringBuffer);
-    server = new WsServer(config, roomManager);
+    const haClient = new HomeAssistantClient(config);
+    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient));
     server.start();
 
     while (server.port === null) {
