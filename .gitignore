@@ -32,3 +32,7 @@ coverage/
 # PlatformIO / firmware
 luna-firmware/.pio/
 luna-firmware/include/secrets.h
+
+# Infra / Docker (dados persistentes dos containers)
+infra/homeassistant/config/
+infra/redis/data/

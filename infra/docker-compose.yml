@@ -1,0 +1,27 @@
+services:
+  homeassistant:
+    image: ghcr.io/home-assistant/home-assistant:stable
+    container_name: luna-homeassistant
+    restart: unless-stopped
+    # host: necessário para descoberta dos dispositivos ESPHome via mDNS.
+    # Em host mode as portas não são publicadas — o HA escuta direto na 8123 do servidor.
+    network_mode: host
+    privileged: true
+    volumes:
+      - ./homeassistant/config:/config
+      - /etc/localtime:/etc/localtime:ro
+      - /run/dbus:/run/dbus:ro
+    environment:
+      - TZ=America/Sao_Paulo
+
+  # Redis — previsto apenas no Épico 4 (persistência de contexto entre restarts).
+  # Manter comentado até lá.
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: luna-redis
+  #   restart: unless-stopped
+  #   command: ["redis-server", "--appendonly", "yes"]
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - ./redis/data:/data
