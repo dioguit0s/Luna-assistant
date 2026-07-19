@@ -169,7 +169,8 @@ luna/
 
 * Implantação do Home Assistant via Docker (`infra/docker-compose.yml`).
 * Configuração do ESP32 atuador com **ESPHome** (substitui Arduino Uno + cabo serial), expondo entidades de switch/relay ao Home Assistant via Wi-Fi.
-* Implementação de Function Calling no provider de IA para reconhecimento de intenções de comando (ex: `{"function":"control_device","device":"luz_bancada","action":"on","room_id":"oficina"}`).
+* Implementação de Function Calling no provider de IA para reconhecimento de intenções de comando (ex: `{"function":"control_device","device":"luz_bancada","action":"on","room_id":"sala_de_estar"}`).
+* Áreas do Home Assistant definidas como fonte de verdade dos `room_id`: `sala_de_estar`, `cozinha` e `quarto`. O `area_id` do HA e o `ROOM_ID` do firmware precisam ser a mesma string — ver [`infra/README.md`](../infra/README.md).
 * Integração do servidor Node.js com a API do Home Assistant para despacho dos comandos.
 
 **Critério de Aceite:** Dizer "Luna, ligar luz de teste" e o relay do ESP32 atuador ser acionado de forma automatizada, sem cabo físico entre servidor e atuador.
