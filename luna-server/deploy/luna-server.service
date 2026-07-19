@@ -1,0 +1,41 @@
+[Unit]
+Description=Luna Server (orquestrador central)
+Documentation=https://github.com/dioguit0s/Luna-assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=luna
+Group=luna
+
+# Symlink trocado atomicamente pelo activate.sh a cada deploy.
+WorkingDirectory=/opt/luna/current
+ExecStart=/usr/bin/node dist/index.js
+
+# Segredos ficam fora do repositorio.
+EnvironmentFile=/etc/luna-server.env
+Environment=NODE_ENV=production
+
+Restart=always
+RestartSec=5
+
+# src/index.ts trata SIGTERM com shutdown gracioso.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=luna-server
+
+# Hardening. O processo nao escreve em disco: nenhum ReadWritePaths necessario.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

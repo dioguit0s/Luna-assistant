@@ -1,0 +1,54 @@
+name: Deploy luna-server
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'luna-server/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-luna-server
+  cancel-in-progress: false # nunca cancelar um deploy no meio
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, linux, luna]
+
+    defaults:
+      run:
+        working-directory: luna-server
+
+    env:
+      LUNA_ROOT: /opt/luna
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Testes
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Montar release
+        run: |
+          RELEASE_DIR="$LUNA_ROOT/releases/$GITHUB_SHA"
+          rm -rf "$RELEASE_DIR"
+          mkdir -p "$RELEASE_DIR"
+          cp -r dist "$RELEASE_DIR/"
+          cp package.json package-lock.json "$RELEASE_DIR/"
+          npm ci --omit=dev --prefix "$RELEASE_DIR"
+
+      - name: Ativar release
+        # `bash ...` em vez de `./...`: o repo e editado no Windows, onde o
+        # bit de execucao nao e preservado.
+        run: bash ./deploy/activate.sh "$GITHUB_SHA"
+
+      - name: Diagnostico em caso de falha
+        if: failure()
+        run: sudo systemctl status luna-server --no-pager --lines=50 || true

@@ -1,3 +1,4 @@
+import { createServer, type Server as HttpServer } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AppConfig } from '../config/env.js';
 import type { RoomManager } from '../rooms/RoomManager.js';
@@ -19,6 +20,7 @@ interface ClientState {
 
 export class WsServer {
   private wss: WebSocketServer | null = null;
+  private httpServer: HttpServer | null = null;
   private readonly clients = new Map<WebSocket, ClientState>();
   private readonly orchestrator: Orchestrator;
 
@@ -30,7 +32,25 @@ export class WsServer {
   }
 
   start(): void {
-    this.wss = new WebSocketServer({ port: this.config.wsPort });
+    // Servidor HTTP próprio para expor GET /health ao lado do WebSocket.
+    // O deploy usa esse endpoint para validar a release antes de efetivá-la.
+    this.httpServer = createServer((req, res) => {
+      if (req.method === 'GET' && req.url === '/health') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            status: 'ok',
+            provider: this.config.audioProvider,
+            clients: this.clients.size,
+            uptime_s: Math.floor(process.uptime()),
+          }),
+        );
+        return;
+      }
+      res.writeHead(404).end();
+    });
+
+    this.wss = new WebSocketServer({ server: this.httpServer });
 
     this.wss.on('connection', (ws) => {
       getLogger().info({ event: 'ws_connect' }, 'Cliente WebSocket conectado');
@@ -48,7 +68,15 @@ export class WsServer {
       });
     });
 
+    this.httpServer.listen(this.config.wsPort);
+
     getLogger().info({ port: this.config.wsPort, event: 'ws_listen' }, 'Servidor WebSocket ativo');
+  }
+
+  /** Porta efetivamente aberta. Difere de config.wsPort quando ela é 0 (testes). */
+  get port(): number | null {
+    const addr = this.httpServer?.address();
+    return addr && typeof addr === 'object' ? addr.port : null;
   }
 
   async stop(): Promise<void> {
@@ -58,6 +86,12 @@ export class WsServer {
     this.clients.clear();
     this.wss?.close();
     this.wss = null;
+
+    const httpServer = this.httpServer;
+    this.httpServer = null;
+    if (httpServer) {
+      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+    }
   }
 
   private async handleMessage(

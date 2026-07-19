@@ -42,6 +42,7 @@ docker compose pull && docker compose up -d   # atualizar imagem
 |-------|---------|-----|
 | 8123 | Home Assistant | UI web e API REST/WebSocket consumida pelo `luna-server` |
 | 5353/udp | mDNS | Descoberta automática dos dispositivos ESPHome |
+| 8080 | `luna-server` | WebSocket dos satélites e `GET /health`. Serviço systemd, fora do compose — ver [luna-server/deploy](../luna-server/deploy/README.md) |
 | 6379 | Redis | **Desativado** — serviço comentado, previsto no Épico 4 |
 
 Em `network_mode: host` não há mapeamento de portas: o Home Assistant escuta
@@ -52,7 +53,66 @@ Se o `ufw` estiver ativo no Ubuntu, libere o necessário:
 ```bash
 sudo ufw allow from 192.168.0.0/24 to any port 8123 proto tcp
 sudo ufw allow from 192.168.0.0/24 to any port 5353 proto udp
+sudo ufw allow from 192.168.0.0/24 to any port 8080 proto tcp
 ```
+
+## `luna-server`
+
+O `luna-server` **não** roda neste compose: ele é um serviço systemd no mesmo
+host, atualizado automaticamente a cada push na `main`. Setup e operação em
+[`luna-server/deploy/README.md`](../luna-server/deploy/README.md).
+
+## Áreas e `room_id` (LUNA-302)
+
+As áreas do Home Assistant são a fonte de verdade para os `room_id` do projeto.
+O orquestrador isola contexto conversacional por `room_id` e o satélite envia
+esse valor em cada pacote, então **o `area_id` no HA e o `ROOM_ID` no firmware
+precisam ser idênticos** — string exata, incluindo underscores.
+
+Áreas definidas na casa:
+
+| `area_id` (= `room_id`) | Nome no HA |
+|-------------------------|------------|
+| `sala_de_estar` | Sala de estar |
+| `cozinha` | Cozinha |
+| `quarto` | Quarto |
+
+Essas três foram criadas no onboarding e são as áreas definitivas — não há
+`oficina`. Ao adicionar um cômodo novo, crie a área no HA primeiro
+(*Configurações → Áreas e zonas*) e use o `area_id` gerado como `ROOM_ID` do
+satélite, nunca o inverso: o HA deriva o `area_id` do nome (slug com
+underscores) e não aceita alteração posterior sem recriar a área.
+
+Conferir os `area_id` atuais:
+
+```bash
+curl -s -H "Authorization: Bearer $HA_TOKEN" \
+  http://192.168.0.10:8123/api/template \
+  -X POST -d '{"template": "{{ areas() }}"}'
+# ['sala_de_estar', 'cozinha', 'quarto']
+```
+
+Trocar por `{{ areas() | map("area_name") | list }}` devolve os nomes legíveis
+em vez dos ids.
+
+## Token de acesso (LUNA-302)
+
+O `luna-server` autentica na API do HA com um Long-Lived Access Token. Gere em:
+perfil do usuário → aba **Segurança** → **Long-Lived Access Tokens** → *Criar
+token*. O valor é exibido uma única vez; cole em `luna-server/.env` como
+`HA_TOKEN`.
+
+O token não expira, mas é invalidado se o usuário que o criou for removido ou se
+for revogado na mesma tela. Validar:
+
+```bash
+curl -H "Authorization: Bearer $HA_TOKEN" http://192.168.0.10:8123/api/
+# {"message": "API running."}
+```
+
+Um `401: Unauthorized` aqui significa token inválido ou revogado — o `HA_URL`
+pode ser conferido à parte com `curl http://192.168.0.10:8123/api/onboarding`,
+que responde sem autenticação.
 
 ## Persistência
 
