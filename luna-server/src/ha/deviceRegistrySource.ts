@@ -33,8 +33,11 @@ export function loadDeviceOverrides(filePath: string): DeviceOverrides {
   try {
     raw = readFileSync(filePath, 'utf8');
   } catch {
-    getLogger().debug(
-      { event: 'device_overrides', path: filePath },
+    // `info`, não `debug`: ausente é caso válido, mas quando o arquivo *deveria*
+    // estar lá (release sem `config/`, path errado) o sintoma aparece longe daqui
+    // — como um `unknown_device` para um alias que existe no repositório.
+    getLogger().info(
+      { event: 'device_overrides_absent', path: filePath, cwd: process.cwd() },
       'Sem devices.json: usando apenas a descoberta do Home Assistant',
     );
     return EMPTY_OVERRIDES;

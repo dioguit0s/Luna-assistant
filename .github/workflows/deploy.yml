@@ -41,6 +41,11 @@ jobs:
           rm -rf "$RELEASE_DIR"
           mkdir -p "$RELEASE_DIR"
           cp -r dist "$RELEASE_DIR/"
+          # `config/` acompanha a release: o `devicesConfigPath` e relativo ao
+          # WorkingDirectory do servico, entao sem esta copia o devices.json
+          # some em producao e os aliases do registry deixam de existir --
+          # silenciosamente, porque arquivo ausente e caso valido.
+          cp -r config "$RELEASE_DIR/"
           cp package.json package-lock.json "$RELEASE_DIR/"
           npm ci --omit=dev --prefix "$RELEASE_DIR"
 
