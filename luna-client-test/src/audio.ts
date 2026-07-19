@@ -126,6 +126,8 @@ export function stopMicrophone(): void {
   micStop = null;
 }
 
+const CHUNK_MS = 20;
+
 export async function streamWavFile(
   ws: WebSocket,
   roomId: string,
@@ -133,7 +135,10 @@ export async function streamWavFile(
   onChunkSent: () => void,
   getSeq: () => number,
   incSeq: () => void,
+  startedAt = performance.now(),
 ): Promise<void> {
+  let index = 0;
+
   for (let offset = 0; offset < pcm.length; offset += CHUNK_BYTES) {
     const chunk = pcm.subarray(offset, Math.min(offset + CHUNK_BYTES, pcm.length));
     if (chunk.length < CHUNK_BYTES) {
@@ -147,7 +152,15 @@ export async function streamWavFile(
       incSeq();
       ws.send(buildAudioMessage(roomId, getSeq(), chunk));
     }
-    await sleep(20);
+
+    // Agenda contra um marco fixo: sleep(20) por chunk acumula o overshoot do
+    // setTimeout (~31ms na resolução de 15.6ms do Windows) e faz o cliente
+    // streamar ~1.5x mais lento que tempo real, o que não simula o satélite.
+    index++;
+    const delay = startedAt + index * CHUNK_MS - performance.now();
+    if (delay > 0) {
+      await sleep(delay);
+    }
   }
 }
 

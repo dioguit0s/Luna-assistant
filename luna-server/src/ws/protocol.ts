@@ -3,6 +3,7 @@ export const AUDIO_CHUNK_SIZE = 640;
 export type MessageType =
   | 'auth'
   | 'audio_chunk'
+  | 'activity_end'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'

@@ -33,6 +33,7 @@ export function parseArgs(argv: string[]): Partial<ClientConfig> & { useMic?: bo
     if (arg === '--server' && next) result.serverUrl = next;
     if (arg === '--room-id' && next) result.roomId = next;
     if (arg === '--device-id' && next) result.deviceId = next;
+    // Aceita lista separada por vírgula para conversa multi-turno na mesma sessão.
     if (arg === '--wav' && next) result.wavFile = next;
     if (arg === '--output' && next) result.outputFile = next;
     if (arg === '--mic') result.useMic = true;

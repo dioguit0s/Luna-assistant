@@ -15,6 +15,10 @@ describe('AudioProviderFactory', () => {
     openaiRealtimeModel: 'gpt-test',
     haUrl: '',
     haToken: '',
+    geminiVadSilenceMs: null,
+    geminiVadEndSensitivity: null,
+    geminiManualActivity: false,
+    geminiDebugMessages: false,
   };
 
   it('instancia GeminiLiveAdapter', () => {

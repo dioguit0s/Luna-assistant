@@ -9,6 +9,7 @@ export type MessageType =
   | 'auth_ok'
   | 'auth_error'
   | 'audio_chunk'
+  | 'activity_end'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'

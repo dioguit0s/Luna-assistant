@@ -16,9 +16,29 @@ const cfg = { ...loadClientConfig(), ...args };
 
 let seq = 0;
 let lastAudioSentAt: number | null = null;
+let speechEndedAt: number | null = null;
 let ttfabLogged = false;
+let turnIndex = 0;
+let turnEndResolve: (() => void) | null = null;
 let responsePcm = Buffer.alloc(0);
 let playback: { write: (pcm: Buffer) => void; quit: () => void; live: boolean } | null = null;
+
+/** Resolve quando a resposta do turno termina (speaking_end ou silêncio). */
+function waitForTurnEnd(timeoutMs = 25000): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      turnEndResolve = null;
+      console.log(`[turno ${turnIndex}] sem resposta (timeout)`);
+      resolve();
+    }, timeoutMs);
+
+    turnEndResolve = () => {
+      clearTimeout(timer);
+      turnEndResolve = null;
+      resolve();
+    };
+  });
+}
 
 const wavFile = args.wavFile;
 const useMic = args.useMic ?? !wavFile;
@@ -35,12 +55,48 @@ function markChunkSent(): void {
   lastAudioSentAt = performance.now();
 }
 
+async function playTurn(ws: WebSocket, file: string): Promise<void> {
+  const pcm = readWavPcm16(file);
+  await streamWavFile(ws, cfg.roomId, pcm, markChunkSent, getSeq, incSeq);
+
+  // Âncora real da medição: fim da fala, antes do padding de silêncio.
+  speechEndedAt = performance.now();
+
+  // Equivale ao botão sendo solto no satélite. O servidor só repassa como
+  // activityEnd se o provider estiver em modo manual; caso contrário ignora.
+  ws.send(serializeControlMessage(createEnvelope('activity_end', cfg.roomId)));
+
+  // Push-to-talk para de transmitir ao soltar o botão. Continuar mandando
+  // silêncio aqui reabriria a atividade e interromperia a resposta.
+  if (process.env.MANUAL_ACTIVITY === 'true') {
+    return;
+  }
+
+  const trailingSilenceMs = Number(process.env.TRAILING_SILENCE_MS ?? 500);
+  await streamWavFile(
+    ws,
+    cfg.roomId,
+    generateSilence(trailingSilenceMs),
+    markChunkSent,
+    getSeq,
+    incSeq,
+  );
+}
+
 async function startAudioSource(ws: WebSocket): Promise<void> {
   if (wavFile) {
-    console.log(`Modo arquivo: ${wavFile}`);
-    const pcm = readWavPcm16(wavFile);
-    await streamWavFile(ws, cfg.roomId, pcm, markChunkSent, getSeq, incSeq);
-    await streamWavFile(ws, cfg.roomId, generateSilence(500), markChunkSent, getSeq, incSeq);
+    const files = wavFile.split(',').map((f) => f.trim()).filter(Boolean);
+    console.log(`Modo arquivo: ${files.length} turno(s)`);
+
+    for (const file of files) {
+      turnIndex++;
+      await playTurn(ws, file);
+      // Mesma sessão para todos os turnos: é assim que o uso real acontece,
+      // e sessão fria era o que inflava todas as medições anteriores.
+      await waitForTurnEnd();
+    }
+
+    ws.close();
     return;
   }
 
@@ -56,7 +112,10 @@ function flushResponseWav(reason: string): void {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  if (responsePcm.length === 0) return;
+  if (responsePcm.length === 0) {
+    turnEndResolve?.();
+    return;
+  }
 
   if (!playback?.live) {
     playPcm16(responsePcm);
@@ -71,6 +130,7 @@ function flushResponseWav(reason: string): void {
   }
 
   responsePcm = Buffer.alloc(0);
+  turnEndResolve?.();
 }
 
 function scheduleResponseSave(): void {
@@ -86,8 +146,11 @@ function handleServerEnvelope(type: string, pcm: Buffer): void {
 
   if (type === 'audio_response' && pcm.length > 0) {
     if (!ttfabLogged && lastAudioSentAt !== null) {
-      const ttfab = Math.round(performance.now() - lastAudioSentAt);
-      console.log(`[TTFAB client] ${ttfab}ms`);
+      const now = performance.now();
+      console.log(`[TTFAB client] ${Math.round(now - lastAudioSentAt)}ms`);
+      if (speechEndedAt !== null) {
+        console.log(`[turno ${turnIndex}] EOS→áudio ${Math.round(now - speechEndedAt)}ms`);
+      }
       ttfabLogged = true;
     }
     responsePcm = Buffer.concat([responsePcm, pcm]);

@@ -82,6 +82,12 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
     });
   }
 
+  signalActivityEnd(): void {
+    // A sessão é criada com turn detection do lado do servidor; sem desligá-la
+    // no session.update, um commit manual conflita com o VAD da OpenAI.
+    // Implementado como no-op até que o caminho manual seja habilitado aqui.
+  }
+
   onAudioResponse(callback: (chunk: Buffer) => void): void {
     this.audioResponseCb = callback;
   }

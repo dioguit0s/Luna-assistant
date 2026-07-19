@@ -137,6 +137,12 @@ export class WsServer {
         this.handleAuth(ws, envelope);
         break;
 
+      case 'activity_end':
+        if (state?.authenticated) {
+          await this.orchestrator.handleActivityEnd(state.roomId);
+        }
+        break;
+
       case 'ping':
         if (state?.authenticated) {
           ws.send(serializeControlMessage(createEnvelope('pong', envelope.room_id)));

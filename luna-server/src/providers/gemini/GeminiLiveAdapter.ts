@@ -1,4 +1,5 @@
-import { GoogleGenAI, Modality } from '@google/genai';
+import { GoogleGenAI, Modality, EndSensitivity } from '@google/genai';
+import type { AutomaticActivityDetection } from '@google/genai';
 import type { AppConfig } from '../../config/env.js';
 import type { IAudioProvider } from '../IAudioProvider.js';
 import type { CompletedTurn, ProviderSessionConfig } from '../types.js';
@@ -16,11 +17,44 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private errorCb: ((err: Error) => void) | null = null;
   private userTranscript = '';
   private assistantTranscript = '';
+  private activityOpen = false;
 
   constructor(private readonly config: AppConfig) {}
 
+  /**
+   * Janela de silêncio do VAD entra direto no caminho crítico do TTFAB: o Gemini
+   * só começa a gerar depois de confirmar o fim da fala. Sem override, o default
+   * do SDK é END_SENSITIVITY_LOW (fecha o turno mais tarde).
+   */
+  private buildActivityDetection(): AutomaticActivityDetection | undefined {
+    const { geminiVadSilenceMs, geminiVadEndSensitivity, geminiManualActivity } = this.config;
+
+    // Push-to-talk: o satélite sabe o instante exato em que o botão foi solto,
+    // então não faz sentido pagar o endpointing por áudio do servidor.
+    if (geminiManualActivity) {
+      return { disabled: true };
+    }
+
+    if (geminiVadSilenceMs === null && geminiVadEndSensitivity === null) {
+      return undefined;
+    }
+
+    return {
+      ...(geminiVadSilenceMs !== null ? { silenceDurationMs: geminiVadSilenceMs } : {}),
+      ...(geminiVadEndSensitivity !== null
+        ? {
+            endOfSpeechSensitivity:
+              geminiVadEndSensitivity === 'HIGH'
+                ? EndSensitivity.END_SENSITIVITY_HIGH
+                : EndSensitivity.END_SENSITIVITY_LOW,
+          }
+        : {}),
+    };
+  }
+
   async connect(sessionConfig: ProviderSessionConfig): Promise<void> {
     const ai = new GoogleGenAI({ apiKey: this.config.geminiApiKey });
+    const automaticActivityDetection = this.buildActivityDetection();
 
     this.session = await ai.live.connect({
       model: this.config.geminiLiveModel,
@@ -29,6 +63,9 @@ export class GeminiLiveAdapter implements IAudioProvider {
         systemInstruction: sessionConfig.systemPrompt,
         inputAudioTranscription: {},
         outputAudioTranscription: {},
+        ...(automaticActivityDetection
+          ? { realtimeInputConfig: { automaticActivityDetection } }
+          : {}),
       },
       callbacks: {
         onmessage: (message) => this.handleMessage(message),
@@ -49,12 +86,26 @@ export class GeminiLiveAdapter implements IAudioProvider {
       throw new Error('GeminiLiveAdapter não conectado');
     }
 
+    // Sem VAD do servidor, o turno só abre se marcarmos o início explicitamente.
+    if (this.config.geminiManualActivity && !this.activityOpen) {
+      this.session.sendRealtimeInput({ activityStart: {} });
+      this.activityOpen = true;
+    }
+
     this.session.sendRealtimeInput({
       audio: {
         data: pcm16kHz.toString('base64'),
         mimeType: 'audio/pcm;rate=16000',
       },
     });
+  }
+
+  signalActivityEnd(): void {
+    if (!this.session || !this.config.geminiManualActivity || !this.activityOpen) {
+      return;
+    }
+    this.session.sendRealtimeInput({ activityEnd: {} });
+    this.activityOpen = false;
   }
 
   onAudioResponse(callback: (chunk: Buffer) => void): void {
@@ -84,6 +135,15 @@ export class GeminiLiveAdapter implements IAudioProvider {
       turnComplete?: boolean;
     };
   }): void {
+    // Diagnóstico de sessão (foi assim que apareceu o `interrupted` do modo
+    // manual). Expõe transcrição da fala do usuário no log — só em depuração.
+    if (this.config.geminiDebugMessages) {
+      getLogger().info(
+        { raw: JSON.stringify(message).slice(0, 300) },
+        'DEBUG mensagem Gemini',
+      );
+    }
+
     const serverContent = message.serverContent;
 
     if (!serverContent) return;

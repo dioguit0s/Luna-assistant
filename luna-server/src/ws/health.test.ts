@@ -17,6 +17,10 @@ const config: AppConfig = {
   openaiRealtimeModel: 'test-model',
   haUrl: '',
   haToken: '',
+  geminiVadSilenceMs: null,
+  geminiVadEndSensitivity: null,
+  geminiManualActivity: false,
+  geminiDebugMessages: false,
 };
 
 describe('GET /health', () => {

@@ -36,6 +36,22 @@ export class Orchestrator {
     provider.sendAudio(pcm);
   }
 
+  /**
+   * Fim de fala explícito (botão solto no satélite). Além de fechar o turno no
+   * provider, reancora o TTFAB: medir a partir do último chunk recebido não
+   * funciona com o satélite streamando contínuo — o marco vira sempre "agora".
+   *
+   * A reancoragem só vale quando o cliente para de transmitir aqui. Com VAD
+   * automático o áudio continua chegando e `handleAudioChunk` move o marco de
+   * volta a cada chunk, então nesse modo o TTFAB segue subestimado.
+   */
+  async handleActivityEnd(roomId: string): Promise<void> {
+    this.getTtfabTracker(roomId).markClientAudioReceived();
+
+    const provider = await this.roomManager.getOrCreateProvider(roomId);
+    provider.signalActivityEnd();
+  }
+
   private readonly boundProviders = new WeakSet<object>();
 
   private bindProviderCallbacksOnce(
