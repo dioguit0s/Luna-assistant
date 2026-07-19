@@ -2,13 +2,20 @@
 
 Infraestrutura de automação residencial do Projeto Luna — Épico 3 (LUNA-301).
 
-## Pré-requisitos
+## Host alvo
+
+Servidor Ubuntu Server dedicado em `192.168.0.10`. Todo o restante deste
+documento assume esse host.
+
+Requisitos:
 
 - Docker Engine >= 24 com plugin `docker compose`
-- **Host Linux** — `network_mode: host` só funciona em Linux. No Docker Desktop
-  (Windows/macOS) o container não enxerga a rede da LAN e a descoberta mDNS dos
-  dispositivos ESPHome falha. Ver [Rodando fora do Linux](#rodando-fora-do-linux).
-- Servidor na **mesma rede L2/VLAN** dos ESP32 com ESPHome (mDNS não atravessa roteador).
+- **Linux** — `network_mode: host` só funciona em Linux. Docker Desktop
+  (Windows/macOS) não expõe a LAN ao container e a descoberta mDNS falha.
+- Servidor e satélites ESPHome na **mesma rede L2/VLAN** (mDNS não atravessa
+  roteador). Ambos em `192.168.0.0/24`.
+- IP fixo no servidor — o `luna-server` aponta para `192.168.0.10:8123` e uma
+  troca via DHCP quebraria a integração.
 
 ## Subir
 
@@ -17,7 +24,7 @@ cd infra
 docker compose up -d
 ```
 
-Acesse `http://<ip-do-servidor>:8123` e conclua o onboarding do Home Assistant
+Acesse `http://192.168.0.10:8123` e conclua o onboarding do Home Assistant
 (criação do usuário administrador).
 
 ## Comandos úteis
@@ -40,6 +47,13 @@ docker compose pull && docker compose up -d   # atualizar imagem
 Em `network_mode: host` não há mapeamento de portas: o Home Assistant escuta
 diretamente nas interfaces do servidor.
 
+Se o `ufw` estiver ativo no Ubuntu, libere o necessário:
+
+```bash
+sudo ufw allow from 192.168.0.0/24 to any port 8123 proto tcp
+sudo ufw allow from 192.168.0.0/24 to any port 5353 proto udp
+```
+
 ## Persistência
 
 A configuração vive em `infra/homeassistant/config` (bind mount para `/config`),
@@ -49,29 +63,30 @@ preserva usuários, integrações e automações.
 Esse diretório **não é versionado** — contém segredos e o banco de estado
 (`home-assistant_v2.db`). Faça backup dele separadamente.
 
+## Hardware USB
+
+O compose não usa `privileged` nem monta `/run/dbus`, porque os satélites do
+Épico 3 falam ESPHome sobre Wi-Fi. Caso entre um adaptador Zigbee/Z-Wave USB no
+servidor, adicione ao serviço:
+
+```yaml
+    privileged: true
+    volumes:
+      - /run/dbus:/run/dbus:ro
+```
+
 ## Redis (Épico 4)
 
 O serviço está declarado e comentado no `docker-compose.yml`. Quando o Épico 4
 substituir o `Map` em memória do orquestrador, basta descomentar o bloco e subir
 novamente com `docker compose up -d`.
 
-## Rodando fora do Linux
-
-Para desenvolvimento em Windows/macOS, troque `network_mode: host` por
-publicação de porta:
-
-```yaml
-    ports:
-      - "8123:8123"
-```
-
-A UI fica acessível, mas a descoberta mDNS dos ESPHome não funciona — os
-dispositivos precisam ser adicionados manualmente por IP. Para a homologação do
-Épico 3, use um host Linux.
-
 ## Verificação (critério de aceite LUNA-301)
 
-1. `docker compose up -d`
-2. Abrir `http://<ip-do-servidor>:8123` e concluir o onboarding
-3. `docker compose restart homeassistant`
-4. Recarregar a página — o login criado no passo 2 continua válido
+No servidor:
+
+1. `cd infra && docker compose up -d`
+2. `docker compose ps` — serviço em estado `running`
+3. De outra máquina da LAN, abrir `http://192.168.0.10:8123` e concluir o onboarding
+4. `docker compose restart homeassistant`
+5. Recarregar a página — o login criado no passo 3 continua válido
