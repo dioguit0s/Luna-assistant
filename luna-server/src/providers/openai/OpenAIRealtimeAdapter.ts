@@ -19,6 +19,7 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
   private toolCallCb: ((call: ToolCall) => void) | null = null;
+  private userSpeechCb: (() => void) | null = null;
   private userTranscript = '';
   private assistantTranscript = '';
 
@@ -95,6 +96,10 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
     this.audioResponseCb = callback;
   }
 
+  onUserSpeech(callback: () => void): void {
+    this.userSpeechCb = callback;
+  }
+
   onTurnComplete(callback: (turn: CompletedTurn) => void): void {
     this.turnCompleteCb = callback;
   }
@@ -138,6 +143,12 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
           const pcm16k = resample24kTo16k(pcm24k);
           this.audioResponseCb?.(pcm16k);
         }
+        break;
+
+      // O VAD da OpenAI publica o fim de fala explicitamente — âncora exata do
+      // TTFAB, melhor que o proxy por transcrição usado no Gemini.
+      case 'input_audio_buffer.speech_stopped':
+        this.userSpeechCb?.();
         break;
 
       case 'conversation.item.input_audio_transcription.completed':

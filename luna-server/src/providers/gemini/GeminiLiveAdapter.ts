@@ -21,6 +21,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
   private toolCallCb: ((call: ToolCall) => void) | null = null;
+  private userSpeechCb: (() => void) | null = null;
   private userTranscript = '';
   private assistantTranscript = '';
   private activityOpen = false;
@@ -129,6 +130,10 @@ export class GeminiLiveAdapter implements IAudioProvider {
     this.audioResponseCb = callback;
   }
 
+  onUserSpeech(callback: () => void): void {
+    this.userSpeechCb = callback;
+  }
+
   onTurnComplete(callback: (turn: CompletedTurn) => void): void {
     this.turnCompleteCb = callback;
   }
@@ -212,6 +217,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
 
     if (serverContent.inputTranscription?.text) {
       this.userTranscript += serverContent.inputTranscription.text;
+      this.userSpeechCb?.();
     }
 
     if (serverContent.outputTranscription?.text) {

@@ -78,8 +78,14 @@ export function loadConfig(): AppConfig {
     haToken: process.env.HA_TOKEN ?? '',
     devicesConfigPath: process.env.DEVICES_CONFIG_PATH ?? 'config/devices.json',
     deviceRegistryTtlMs: parseOptionalNumber('DEVICE_REGISTRY_TTL_MS') ?? 300_000,
-    geminiVadSilenceMs: parseOptionalNumber('GEMINI_VAD_SILENCE_MS'),
-    geminiVadEndSensitivity: parseEndSensitivity(process.env.GEMINI_VAD_END_SENSITIVITY),
+    // Sem override, o SDK usa END_SENSITIVITY_LOW e uma janela de silêncio
+    // longa: o Gemini só começa a gerar bem depois de o usuário calar. Isso
+    // entra inteiro no atraso percebido entre o comando e a luz acender.
+    // HIGH + 500ms fecha o turno assim que a fala para. Se estiver cortando
+    // frases no meio (pausa para pensar vira fim de turno), suba o silêncio
+    // via GEMINI_VAD_SILENCE_MS antes de voltar para LOW.
+    geminiVadSilenceMs: parseOptionalNumber('GEMINI_VAD_SILENCE_MS') ?? 500,
+    geminiVadEndSensitivity: parseEndSensitivity(process.env.GEMINI_VAD_END_SENSITIVITY) ?? 'HIGH',
     geminiManualActivity: process.env.GEMINI_MANUAL_ACTIVITY === 'true',
     geminiDebugMessages: process.env.GEMINI_DEBUG_MESSAGES === 'true',
   };

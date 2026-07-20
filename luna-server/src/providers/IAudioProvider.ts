@@ -10,6 +10,13 @@ export interface IAudioProvider {
    */
   signalActivityEnd(): void;
   onAudioResponse(callback: (chunk: Buffer) => void): void;
+  /**
+   * Dispara a cada fragmento de transcrição da fala do usuário. É o melhor
+   * proxy disponível de "o usuário ainda estava falando agora": quando para de
+   * disparar, a fala acabou. Usado para ancorar o TTFAB no fim da fala, não no
+   * último chunk de áudio recebido (que em open-mic é sempre "agora").
+   */
+  onUserSpeech(callback: () => void): void;
   onTurnComplete(callback: (turn: CompletedTurn) => void): void;
   onError(callback: (err: Error) => void): void;
   /** Notifica que a IA decidiu invocar uma das tools declaradas em `connect`. */

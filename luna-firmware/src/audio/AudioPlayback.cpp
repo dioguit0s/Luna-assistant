@@ -9,6 +9,15 @@ static i2s_chan_handle_t txHandle = nullptr;
 
 bool begin() {
   i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+
+  // A fila DMA entra direto na latência percebida: `playbackTask` injeta
+  // silêncio sempre que não há resposta, então o DMA vive cheio e o primeiro
+  // byte de áudio real toca só depois de escoar tudo que já está enfileirado.
+  // O default (6 x 240 = 1440 frames) custa 90ms fixos a cada resposta.
+  // 4 x 120 = 480 frames = 30ms: ainda folgado contra underrun.
+  chanCfg.dma_desc_num = 4;
+  chanCfg.dma_frame_num = 120;
+
   if (i2s_new_channel(&chanCfg, &txHandle, nullptr) != ESP_OK) {
     return false;
   }

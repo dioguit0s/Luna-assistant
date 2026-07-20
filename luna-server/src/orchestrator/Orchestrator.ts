@@ -42,16 +42,12 @@ export class Orchestrator {
   }
 
   /**
-   * Fim de fala explícito (botão solto no satélite). Além de fechar o turno no
-   * provider, reancora o TTFAB: medir a partir do último chunk recebido não
-   * funciona com o satélite streamando contínuo — o marco vira sempre "agora".
-   *
-   * A reancoragem só vale quando o cliente para de transmitir aqui. Com VAD
-   * automático o áudio continua chegando e `handleAudioChunk` move o marco de
-   * volta a cada chunk, então nesse modo o TTFAB segue subestimado.
+   * Fim de fala explícito (botão solto no satélite): âncora exata do TTFAB.
+   * No modo open-mic a âncora vem da transcrição de entrada do provider —
+   * ver `TtfabTracker`.
    */
   async handleActivityEnd(roomId: string): Promise<void> {
-    this.getTtfabTracker(roomId).markClientAudioReceived();
+    this.getTtfabTracker(roomId).markUserSpeech();
 
     const provider = await this.roomManager.getOrCreateProvider(roomId);
     provider.signalActivityEnd();
@@ -71,8 +67,10 @@ export class Orchestrator {
     const tracker = this.getTtfabTracker(roomId);
     const providerName = getActiveProviderName(this.config);
 
+    provider.onUserSpeech(() => tracker.markUserSpeech());
+
     provider.onAudioResponse((chunk) => {
-      const latencyMs = tracker.markFirstResponseSent(roomId, providerName);
+      const latencyMs = tracker.markFirstResponseSent();
       if (latencyMs !== null) {
         getLogger().info(
           {
@@ -142,6 +140,9 @@ export class Orchestrator {
       // devolvida. O `latency_ms` do HomeAssistantClient mede só o HTTP; o que
       // o usuário sente é este intervalo, que inclui resolução no registro.
       const toolStartedAt = Date.now();
+      // Latência do modelo: fim da fala → decisão de chamar a tool. É o termo
+      // dominante do atraso percebido; o despacho no HA fica na casa dos 15ms.
+      const modelDecisionMs = tracker.elapsedSinceAnchor();
 
       const { device, action } = call.args;
 
@@ -208,8 +209,10 @@ export class Orchestrator {
               entity_id: entityId,
               success: result.success,
               latency_ms: latencyMs,
+              ...(modelDecisionMs !== null ? { model_decision_ms: modelDecisionMs } : {}),
             },
-            `Comando despachado: ${device} → ${action} (${latencyMs}ms)`,
+            `Comando despachado: ${device} → ${action} (${latencyMs}ms` +
+              (modelDecisionMs !== null ? `, modelo: ${modelDecisionMs}ms)` : ')'),
           );
 
           // `success` reflete o resultado real: o satélite não pode tratar um

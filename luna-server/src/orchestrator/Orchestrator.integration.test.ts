@@ -80,6 +80,7 @@ class FakeAudioProvider implements IAudioProvider {
   }
 
   onAudioResponse(_callback: (chunk: Buffer) => void): void {}
+  onUserSpeech(_callback: () => void): void {}
   onTurnComplete(_callback: (turn: CompletedTurn) => void): void {}
   onError(_callback: (err: Error) => void): void {}
 
