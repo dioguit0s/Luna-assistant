@@ -8,6 +8,7 @@ export function createLogger(config: AppConfig): pino.Logger {
 
   loggerInstance = pino({
     level: config.logLevel,
+    timestamp: pino.stdTimeFunctions.isoTime,
     ...(isDev && {
       transport: {
         target: 'pino-pretty',
