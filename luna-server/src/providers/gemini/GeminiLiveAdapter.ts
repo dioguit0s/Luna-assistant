@@ -182,11 +182,14 @@ export class GeminiLiveAdapter implements IAudioProvider {
 
   private handleMessage(message: {
     toolCall?: RawToolCall;
+    goAway?: { timeLeft?: string };
     serverContent?: {
       inputTranscription?: { text?: string };
       outputTranscription?: { text?: string };
       modelTurn?: { parts?: Array<{ inlineData?: { data?: string } }> };
       turnComplete?: boolean;
+      interrupted?: boolean;
+      generationComplete?: boolean;
     };
   }): void {
     // Diagnóstico de sessão (foi assim que apareceu o `interrupted` do modo
@@ -195,6 +198,35 @@ export class GeminiLiveAdapter implements IAudioProvider {
       getLogger().info(
         { raw: JSON.stringify(message).slice(0, 300) },
         'DEBUG mensagem Gemini',
+      );
+    }
+
+    // Investigação da fala duplicada num único turno (ver commit da retry de
+    // HA): se `interrupted`/`goAway`/`generationComplete` aparecerem perto de
+    // um `outputTranscription` repetido, é o servidor do Gemini reiniciando a
+    // geração, não um bug nosso de reenvio. Fica ligado sempre (barato,
+    // dispara raro) até confirmarmos a causa.
+    if (message.goAway) {
+      getLogger().warn(
+        { event: 'gemini_go_away', room_id: this.roomId, time_left: message.goAway.timeLeft },
+        `Gemini avisou goAway (tempo restante: ${message.goAway.timeLeft ?? 'desconhecido'})`,
+      );
+    }
+    if (message.serverContent?.interrupted) {
+      getLogger().warn(
+        { event: 'gemini_interrupted', room_id: this.roomId },
+        'Gemini reportou serverContent.interrupted',
+      );
+    }
+    if (message.serverContent?.outputTranscription?.text) {
+      getLogger().info(
+        {
+          event: 'assistant_transcript_delta',
+          room_id: this.roomId,
+          text: message.serverContent.outputTranscription.text,
+          generation_complete: message.serverContent.generationComplete ?? null,
+        },
+        `Delta de transcrição da Luna: "${message.serverContent.outputTranscription.text}"`,
       );
     }
 
