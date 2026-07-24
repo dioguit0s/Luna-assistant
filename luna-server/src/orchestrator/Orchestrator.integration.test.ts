@@ -254,6 +254,50 @@ describe('Orchestrator: despacho de comandos de automação', () => {
     assert.equal(results[0]!.entity_id, 'switch.luz_bancada');
   });
 
+  it('reconexão do satélite: respostas seguem a conexão atual, não a original', async () => {
+    // O provider (RoomManager) sobrevive à reconexão — é o próprio cenário do
+    // bug: uma queda abrupta (energia, cabo USB) não manda close frame, o
+    // servidor não percebe, e o cômodo segue com o mesmo provider quando o
+    // satélite volta com uma conexão (e um sendToClient) novos.
+    const sentFirstConnection: Array<Buffer | string> = [];
+    const sentSecondConnection: Array<Buffer | string> = [];
+
+    await harness.orchestrator.handleAudioChunk(
+      ROOM_ID,
+      DEVICE_ID,
+      Buffer.alloc(640),
+      (data) => sentFirstConnection.push(data),
+    );
+    await harness.orchestrator.handleAudioChunk(
+      ROOM_ID,
+      DEVICE_ID,
+      Buffer.alloc(640),
+      (data) => sentSecondConnection.push(data),
+    );
+
+    await harness.provider.emitToolCall(
+      toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }),
+    );
+
+    const resultsOnDeadConnection = controlMessages(sentFirstConnection).filter(
+      (msg) => msg.type === 'command_result',
+    );
+    assert.equal(
+      resultsOnDeadConnection.length,
+      0,
+      'a conexão original (morta) não deveria receber nada',
+    );
+
+    const resultsOnCurrentConnection = controlMessages(sentSecondConnection).filter(
+      (msg) => msg.type === 'command_result',
+    );
+    assert.equal(
+      resultsOnCurrentConnection.length,
+      1,
+      'command_result deveria sair pela conexão atual',
+    );
+  });
+
   it('desliga mapeia para turn_off', async () => {
     await feedAudio(harness);
 

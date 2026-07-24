@@ -16,6 +16,15 @@ import {
 export class Orchestrator {
   private readonly ttfabByRoom = new Map<string, TtfabTracker>();
   private readonly speakingByRoom = new Map<string, boolean>();
+  // Provider é cacheado por cômodo (RoomManager) e sobrevive à reconexão do
+  // satélite; a conexão WS, não. Se o dispositivo cair sem handshake de close
+  // (queda de energia, cabo USB arrancado — não manda close frame) e o
+  // servidor não perceber, `bindProviderCallbacksOnce` roda só uma vez por
+  // provider e prenderia a resposta para sempre no `sendToClient` da conexão
+  // morta. Indireção por cômodo: cada chunk de áudio atualiza a entrada, e as
+  // respostas saem sempre pela conexão mais recente, não pela que existia
+  // quando o provider foi criado.
+  private readonly sendToClientByRoom = new Map<string, (data: Buffer | string) => void>();
 
   constructor(
     private readonly config: AppConfig,
@@ -33,10 +42,11 @@ export class Orchestrator {
     const tracker = this.getTtfabTracker(roomId);
     tracker.markClientAudioReceived();
 
+    this.sendToClientByRoom.set(roomId, sendToClient);
     this.roomManager.getRingBuffer().touch(roomId);
 
     const provider = await this.roomManager.getOrCreateProvider(roomId);
-    this.bindProviderCallbacksOnce(roomId, deviceId, provider, sendToClient);
+    this.bindProviderCallbacksOnce(roomId, deviceId, provider);
 
     provider.sendAudio(pcm);
   }
@@ -59,13 +69,19 @@ export class Orchestrator {
     roomId: string,
     deviceId: string,
     provider: import('../providers/IAudioProvider.js').IAudioProvider,
-    sendToClient: (data: Buffer | string) => void,
   ): void {
     if (this.boundProviders.has(provider)) return;
     this.boundProviders.add(provider);
 
     const tracker = this.getTtfabTracker(roomId);
     const providerName = getActiveProviderName(this.config);
+
+    // Nunca captura o `sendToClient` do momento do bind (só acontece uma vez,
+    // na primeira mensagem do cômodo): resolve pela entrada mais recente do
+    // mapa a cada envio, para sobreviver a reconexões do satélite.
+    const sendToClient = (data: Buffer | string): void => {
+      this.sendToClientByRoom.get(roomId)?.(data);
+    };
 
     provider.onUserSpeech(() => tracker.markUserSpeech());
 

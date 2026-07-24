@@ -42,18 +42,29 @@ static void onAuthOk() {
 }
 
 static uint32_t responseBytes = 0;
+static volatile bool waitingForPlaybackDrain = false;
 
 static void onSpeakingStart() {
   // AEC: para de transmitir e descarta o backlog de captura (evita eco).
   StateMachine::onSpeakingStart();
   if (txQueue) xQueueReset(txQueue);
   responseBytes = 0;
+  waitingForPlaybackDrain = false; // nova resposta supera a espera da anterior
   Serial.println("[luna] respondendo (captura suspensa)");
 }
 
 static void onSpeakingEnd() {
-  StateMachine::onSpeakingEnd();
-  Serial.printf("[luna] fim da resposta (%u bytes)\n", (unsigned)responseBytes);
+  // Não chama StateMachine::onSpeakingEnd() ainda: esse evento é "o modelo
+  // terminou de gerar", que chega em rajada — o servidor despeja >100KB de
+  // áudio em ~1s, muito mais rápido que os ~16KB/s em que o playbackTask
+  // realmente reproduz. Numa resposta longa, o turno server-side acaba
+  // segundos antes do alto-falante. Se a captura voltasse aqui, o
+  // microfone pegaria a própria resposta ainda tocando — eco reenviado ao
+  // modelo, virando um loop. loop() só libera a retomada quando o buffer de
+  // playback (PSRAM) realmente esvaziar.
+  waitingForPlaybackDrain = true;
+  Serial.printf("[luna] fim da resposta (%u bytes) — aguardando playback esvaziar\n",
+                (unsigned)responseBytes);
 }
 
 static void onAudioResponse(const uint8_t *pcm, size_t len) {
@@ -158,6 +169,16 @@ void loop() {
   }
 
   if (wsStarted) LunaWsClient::loop();
+
+  // Só entrega o "fim de resposta" à FSM quando o buffer de playback (PSRAM)
+  // esvaziou de verdade — ver o porquê em onSpeakingEnd() acima. A partir daí
+  // o AEC_RESUME_DELAY_MS de StateMachine cobre o resíduo de ~30ms que ainda
+  // está na fila DMA do I2S mais um acomodo do ambiente.
+  if (waitingForPlaybackDrain && playbackBuffer && xStreamBufferIsEmpty(playbackBuffer)) {
+    waitingForPlaybackDrain = false;
+    StateMachine::onSpeakingEnd();
+  }
+
   StateMachine::update();
 
   // Drena a fila de captura, mas com orçamento de tempo. Um `while` sem limite

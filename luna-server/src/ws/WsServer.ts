@@ -18,11 +18,24 @@ interface ClientState {
   roomId: string;
   deviceId: string;
   authenticated: boolean;
+  lastSeenAt: number;
 }
+
+// O satélite manda um "ping" de aplicação a cada 10s (PING_INTERVAL_MS no
+// firmware) enquanto autenticado. Uma queda abrupta — energia ou cabo USB
+// arrancado — não manda close frame nenhum; sem isso, `ws` nunca dispara
+// 'close' sozinho e a conexão fica "viva" para sempre do lado do servidor.
+// Isso prende o cômodo com uma sessão zumbi: RoomManager mantém o provider
+// (e a IA continua respondendo às falas), mas as respostas saem pelo
+// `sendToClient` da conexão morta — o satélite novo, reconectado, nunca ouve
+// nada. 2.5x o intervalo de ping tolera um ciclo perdido sem falso positivo.
+const STALE_CONNECTION_TIMEOUT_MS = 25_000;
+const STALE_CHECK_INTERVAL_MS = 5_000;
 
 export class WsServer {
   private wss: WebSocketServer | null = null;
   private httpServer: HttpServer | null = null;
+  private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
   private readonly clients = new Map<WebSocket, ClientState>();
   private readonly orchestrator: Orchestrator;
 
@@ -76,7 +89,27 @@ export class WsServer {
 
     this.httpServer.listen(this.config.wsPort);
 
+    this.staleCheckTimer = setInterval(() => this.reapStaleConnections(), STALE_CHECK_INTERVAL_MS);
+
     getLogger().info({ port: this.config.wsPort, event: 'ws_listen' }, 'Servidor WebSocket ativo');
+  }
+
+  /**
+   * `ws.terminate()`, não `close()`: força o encerramento do socket e dispara
+   * 'close' de imediato, liberando a sala (RoomManager.unregisterClient) sem
+   * esperar um handshake que uma conexão morta nunca vai mandar.
+   */
+  private reapStaleConnections(): void {
+    const now = Date.now();
+    for (const [ws, state] of this.clients) {
+      if (state.authenticated && now - state.lastSeenAt > STALE_CONNECTION_TIMEOUT_MS) {
+        getLogger().warn(
+          { room_id: state.roomId, device_id: state.deviceId, event: 'ws_stale_disconnect' },
+          `Conexão sem sinal de vida há mais de ${STALE_CONNECTION_TIMEOUT_MS}ms: encerrando`,
+        );
+        ws.terminate();
+      }
+    }
   }
 
   /** Porta efetivamente aberta. Difere de config.wsPort quando ela é 0 (testes). */
@@ -86,6 +119,11 @@ export class WsServer {
   }
 
   async stop(): Promise<void> {
+    if (this.staleCheckTimer) {
+      clearInterval(this.staleCheckTimer);
+      this.staleCheckTimer = null;
+    }
+
     for (const ws of this.clients.keys()) {
       ws.close();
     }
@@ -106,6 +144,7 @@ export class WsServer {
     isBinary: boolean,
   ): Promise<void> {
     const state = this.clients.get(ws);
+    if (state) state.lastSeenAt = Date.now();
     const buf = Buffer.from(data as Buffer);
 
     if (state?.authenticated && isBinary) {
@@ -186,7 +225,12 @@ export class WsServer {
       return;
     }
 
-    this.clients.set(ws, { roomId: room_id, deviceId: device_id, authenticated: true });
+    this.clients.set(ws, {
+      roomId: room_id,
+      deviceId: device_id,
+      authenticated: true,
+      lastSeenAt: Date.now(),
+    });
     this.roomManager.registerClient(room_id);
 
     ws.send(serializeControlMessage(createEnvelope('auth_ok', room_id, { device_id })));
