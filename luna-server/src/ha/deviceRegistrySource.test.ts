@@ -28,6 +28,7 @@ const baseConfig: AppConfig = {
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
   geminiDebugMessages: false,
+  userSilenceCutoffMs: 500,
 };
 
 /** Mock de `fetch` que devolve o corpo de `/api/template` que o teste quiser. */

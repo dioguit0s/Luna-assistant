@@ -21,6 +21,7 @@ const baseConfig: AppConfig = {
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
   geminiDebugMessages: false,
+  userSilenceCutoffMs: 500,
 };
 
 interface FetchCall {

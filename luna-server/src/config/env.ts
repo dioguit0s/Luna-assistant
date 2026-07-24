@@ -24,6 +24,14 @@ export interface AppConfig {
   geminiManualActivity: boolean;
   /** Loga mensagens cruas do Gemini, incluindo transcrições da fala do usuário. */
   geminiDebugMessages: boolean;
+  /**
+   * Silêncio (ms) sem novo fragmento de `onUserSpeech` até o Orchestrator
+   * assumir "usuário parou de falar" e mandar `speaking_start` ao satélite —
+   * sem esperar o primeiro áudio de resposta. Fecha a janela em que o LED
+   * continua aceso mesmo com o comando já capturado (STT/LLM/TTS ainda
+   * processando), evitando que o usuário fale por cima de um turno em voo.
+   */
+  userSilenceCutoffMs: number;
 }
 
 export type EndSensitivityName = 'HIGH' | 'LOW';
@@ -88,6 +96,11 @@ export function loadConfig(): AppConfig {
     geminiVadEndSensitivity: parseEndSensitivity(process.env.GEMINI_VAD_END_SENSITIVITY) ?? 'HIGH',
     geminiManualActivity: process.env.GEMINI_MANUAL_ACTIVITY === 'true',
     geminiDebugMessages: process.env.GEMINI_DEBUG_MESSAGES === 'true',
+    // Mesma ordem de grandeza do GEMINI_VAD_SILENCE_MS: no OpenAI o evento de
+    // fim de fala já é discreto (um único disparo), então o debounce só soma
+    // um atraso fixo pequeno; no Gemini é essencial — sem ele, cortaria no
+    // primeiro fragmento de transcrição, ainda no meio da frase.
+    userSilenceCutoffMs: parseOptionalNumber('USER_SILENCE_CUTOFF_MS') ?? 500,
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {

@@ -1,4 +1,4 @@
-import { describe, it, before, beforeEach, after } from 'node:test';
+import { describe, it, before, beforeEach, afterEach, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppConfig } from '../config/env.js';
 import { createLogger } from '../logging/logger.js';
@@ -33,6 +33,7 @@ const baseConfig: AppConfig = {
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
   geminiDebugMessages: false,
+  userSilenceCutoffMs: 500,
 };
 
 const ROOM_ID = 'sala_de_estar';
@@ -66,6 +67,9 @@ class FakeAudioProvider implements IAudioProvider {
   activityEndCount = 0;
 
   private toolCallCb: ((call: ToolCall) => void) | null = null;
+  private audioResponseCb: ((chunk: Buffer) => void) | null = null;
+  private userSpeechCb: (() => void) | null = null;
+  private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   /** Resolvida no próximo `sendToolResult` — evita sleep nos testes. */
   private nextResult: (() => void) | null = null;
 
@@ -79,10 +83,28 @@ class FakeAudioProvider implements IAudioProvider {
     this.activityEndCount += 1;
   }
 
-  onAudioResponse(_callback: (chunk: Buffer) => void): void {}
-  onUserSpeech(_callback: () => void): void {}
-  onTurnComplete(_callback: (turn: CompletedTurn) => void): void {}
+  onAudioResponse(callback: (chunk: Buffer) => void): void {
+    this.audioResponseCb = callback;
+  }
+  onUserSpeech(callback: () => void): void {
+    this.userSpeechCb = callback;
+  }
+  onTurnComplete(callback: (turn: CompletedTurn) => void): void {
+    this.turnCompleteCb = callback;
+  }
   onError(_callback: (err: Error) => void): void {}
+
+  emitUserSpeech(): void {
+    this.userSpeechCb?.();
+  }
+
+  emitAudioResponse(chunk: Buffer): void {
+    this.audioResponseCb?.(chunk);
+  }
+
+  emitTurnComplete(turn: CompletedTurn): void {
+    this.turnCompleteCb?.(turn);
+  }
 
   onToolCall(callback: (call: ToolCall) => void): void {
     this.toolCallCb = callback;
@@ -147,6 +169,15 @@ interface Harness {
  */
 const ringBuffers: ConversationRingBuffer[] = [];
 
+async function feedAudio(h: Harness): Promise<void> {
+  await h.orchestrator.handleAudioChunk(
+    ROOM_ID,
+    DEVICE_ID,
+    Buffer.alloc(640),
+    (data) => h.sent.push(data),
+  );
+}
+
 function buildHarness(
   respond: (call: FetchCall) => Response | Promise<Response>,
 ): Harness {
@@ -209,15 +240,6 @@ describe('Orchestrator: despacho de comandos de automação', () => {
   beforeEach(() => {
     harness = buildHarness(okFetch);
   });
-
-  async function feedAudio(h: Harness): Promise<void> {
-    await h.orchestrator.handleAudioChunk(
-      ROOM_ID,
-      DEVICE_ID,
-      Buffer.alloc(640),
-      (data) => h.sent.push(data),
-    );
-  }
 
   it('áudio → tool call → HA → sendToolResult → command_result', async () => {
     await feedAudio(harness);
@@ -390,6 +412,90 @@ describe('Orchestrator: despacho de comandos de automação', () => {
     assert.equal(
       controlMessages(harness.sent).filter((msg) => msg.type === 'command_result').length,
       0,
+    );
+  });
+});
+
+describe('Orchestrator: corte de silêncio antecipa speaking_start', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+  });
+
+  function speakingStarts(h: Harness): number {
+    return controlMessages(h.sent).filter((msg) => msg.type === 'speaking_start').length;
+  }
+
+  it('silêncio sustentado dispara speaking_start antes de qualquer áudio de resposta', async () => {
+    await feedAudio(harness);
+
+    harness.provider.emitUserSpeech();
+    mock.timers.tick(baseConfig.userSilenceCutoffMs - 1);
+    assert.equal(speakingStarts(harness), 0, 'não deveria antecipar antes do cutoff completar');
+
+    mock.timers.tick(1);
+    assert.equal(speakingStarts(harness), 1);
+  });
+
+  it('fragmentos repetidos de fala reagendam o timer (não corta no meio da frase)', async () => {
+    await feedAudio(harness);
+
+    harness.provider.emitUserSpeech();
+    mock.timers.tick(300);
+    harness.provider.emitUserSpeech(); // novo fragmento antes do cutoff: reagenda
+    mock.timers.tick(300);
+
+    assert.equal(speakingStarts(harness), 0, 'o segundo fragmento deveria ter adiado o corte');
+
+    mock.timers.tick(baseConfig.userSilenceCutoffMs - 300);
+    assert.equal(speakingStarts(harness), 1);
+  });
+
+  it('primeiro áudio de resposta vence a corrida e cancela o debounce pendente', async () => {
+    await feedAudio(harness);
+
+    harness.provider.emitUserSpeech();
+    mock.timers.tick(100);
+    harness.provider.emitAudioResponse(Buffer.alloc(4));
+
+    assert.equal(speakingStarts(harness), 1, 'áudio deveria disparar speaking_start imediatamente');
+
+    // Avança além do cutoff original: o timer cancelado não pode duplicar o envio.
+    mock.timers.tick(baseConfig.userSilenceCutoffMs);
+    assert.equal(speakingStarts(harness), 1);
+  });
+
+  it('turno fecha sem áudio (tool-only): cancela o debounce, sem speaking_start órfão', async () => {
+    await feedAudio(harness);
+
+    harness.provider.emitUserSpeech();
+    mock.timers.tick(100);
+    harness.provider.emitTurnComplete({});
+
+    mock.timers.tick(baseConfig.userSilenceCutoffMs);
+    assert.equal(
+      speakingStarts(harness),
+      0,
+      'o timer pendente deveria ter sido cancelado no fim do turno',
+    );
+    assert.equal(
+      controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length,
+      0,
+      'sem speaking_start correspondente, não deve mandar speaking_end',
     );
   });
 });

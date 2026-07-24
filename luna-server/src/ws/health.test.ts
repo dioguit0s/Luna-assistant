@@ -25,6 +25,7 @@ const config: AppConfig = {
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
   geminiDebugMessages: false,
+  userSilenceCutoffMs: 500,
 };
 
 describe('GET /health', () => {

@@ -21,6 +21,7 @@ describe('AudioProviderFactory', () => {
     geminiVadEndSensitivity: null,
     geminiManualActivity: false,
     geminiDebugMessages: false,
+    userSilenceCutoffMs: 500,
   };
 
   it('instancia GeminiLiveAdapter', () => {

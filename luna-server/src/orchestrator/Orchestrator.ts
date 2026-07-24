@@ -16,6 +16,10 @@ import {
 export class Orchestrator {
   private readonly ttfabByRoom = new Map<string, TtfabTracker>();
   private readonly speakingByRoom = new Map<string, boolean>();
+  // Debounce de "usuário parou de falar" (ver userSilenceCutoffMs): dispara
+  // speaking_start antes do primeiro áudio de resposta, para o LED apagar
+  // assim que o comando é capturado, não só quando a resposta começa a sair.
+  private readonly silenceTimerByRoom = new Map<string, NodeJS.Timeout>();
   // Provider é cacheado por cômodo (RoomManager) e sobrevive à reconexão do
   // satélite; a conexão WS, não. Se o dispositivo cair sem handshake de close
   // (queda de energia, cabo USB arrancado — não manda close frame) e o
@@ -83,7 +87,40 @@ export class Orchestrator {
       this.sendToClientByRoom.get(roomId)?.(data);
     };
 
-    provider.onUserSpeech(() => tracker.markUserSpeech());
+    const clearSilenceTimer = (): void => {
+      const timer = this.silenceTimerByRoom.get(roomId);
+      if (timer) {
+        clearTimeout(timer);
+        this.silenceTimerByRoom.delete(roomId);
+      }
+    };
+
+    // Único ponto que efetivamente manda speaking_start: tanto o debounce de
+    // silêncio quanto o primeiro áudio de resposta passam por aqui, com a
+    // flag `speakingByRoom` evitando o envio duplicado — o mais rápido dos
+    // dois vence.
+    const startSpeaking = (): void => {
+      if (this.speakingByRoom.get(roomId)) return;
+      this.speakingByRoom.set(roomId, true);
+      sendToClient(serializeControlMessage(createEnvelope('speaking_start', roomId)));
+    };
+
+    provider.onUserSpeech(() => {
+      tracker.markUserSpeech();
+
+      // Reagenda a cada fragmento: só assume "parou de falar" depois de
+      // silêncio sustentado. No Gemini isso dispara a cada pedaço de
+      // transcrição (ainda falando); no OpenAI é um único evento discreto
+      // (fala já parou), então o timer só soma um atraso fixo pequeno.
+      clearSilenceTimer();
+      this.silenceTimerByRoom.set(
+        roomId,
+        setTimeout(() => {
+          this.silenceTimerByRoom.delete(roomId);
+          startSpeaking();
+        }, this.config.userSilenceCutoffMs),
+      );
+    });
 
     provider.onAudioResponse((chunk) => {
       const latencyMs = tracker.markFirstResponseSent();
@@ -100,12 +137,11 @@ export class Orchestrator {
         );
       }
 
-      if (!this.speakingByRoom.get(roomId)) {
-        this.speakingByRoom.set(roomId, true);
-        sendToClient(
-          serializeControlMessage(createEnvelope('speaking_start', roomId)),
-        );
-      }
+      // Áudio já chegou: o corte por silêncio, se ainda pendente, perdeu a
+      // corrida — cancela para não disparar um speaking_start supérfluo
+      // (já sem efeito, guardado por speakingByRoom) depois do turno seguir.
+      clearSilenceTimer();
+      startSpeaking();
 
       // Fragmenta a resposta em frames pequenos. Satélites embarcados
       // (ESP32 / arduinoWebSockets) fecham a conexão ao receber um frame
@@ -122,6 +158,12 @@ export class Orchestrator {
     });
 
     provider.onTurnComplete((turn: CompletedTurn) => {
+      // Turno fechou (ex.: tool call sem confirmação falada): sem isso, um
+      // debounce ainda pendente dispararia speaking_start depois do turno já
+      // ter acabado, sem speaking_end correspondente no rastro — a luz
+      // apagaria e não voltaria a acender sozinha.
+      clearSilenceTimer();
+
       if (turn.userText || turn.assistantText) {
         this.roomManager
           .getRingBuffer()
