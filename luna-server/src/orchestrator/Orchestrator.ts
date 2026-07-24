@@ -164,6 +164,22 @@ export class Orchestrator {
       // apagaria e não voltaria a acender sozinha.
       clearSilenceTimer();
 
+      // Sem isto não dá pra distinguir, pelo log, um comando que gerou UM
+      // turno (fala + tool call juntos) de dois turnos separados (ex.: fala
+      // parcial antes do resultado da tool chegar, seguida de um segundo
+      // turno com a confirmação) — o segundo caso soa como a resposta
+      // tocando duas vezes no satélite.
+      getLogger().info(
+        {
+          event: 'turn_complete',
+          room_id: roomId,
+          device_id: deviceId,
+          had_audio: this.speakingByRoom.get(roomId) === true,
+          assistant_text: turn.assistantText ?? null,
+        },
+        `Turno concluído${turn.assistantText ? `: "${turn.assistantText}"` : ' (sem fala)'}`,
+      );
+
       if (turn.userText || turn.assistantText) {
         this.roomManager
           .getRingBuffer()
