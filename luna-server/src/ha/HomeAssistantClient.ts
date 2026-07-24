@@ -14,14 +14,15 @@ export interface HaServiceResult {
 const DEFAULT_TIMEOUT_MS = 3000;
 
 /**
- * Atraso entre novas leituras de estado após um `callService` sem confirmação
- * no corpo. Dispositivos reais (ESPHome via WiFi, Zigbee2mqtt, integrações na
- * nuvem) levam um round-trip para propagar o novo estado ao HA — uma única
- * leitura imediata (como era antes) corre contra esse atraso e declara falha
- * num comando que, na verdade, funcionou. Soma ~1s, bem abaixo do timeout de
- * áudio acima.
+ * Espera antes da leitura de estado que confirma um `callService` em
+ * background. Dispositivos reais (ESPHome via WiFi, Zigbee2mqtt, integrações
+ * na nuvem) levam um round-trip para propagar o novo estado ao HA — uma
+ * leitura imediata corre contra esse atraso e declara falha num comando que,
+ * na verdade, funcionou. A verificação fica fora do caminho crítico (o
+ * functionResponse ao modelo não espera por ela), então a folga pode ser
+ * generosa.
  */
-const STATE_CONFIRM_RETRY_DELAYS_MS = [150, 350, 500];
+const STATE_VERIFY_DELAY_MS = 1500;
 
 /**
  * Domínios que a Luna pode acionar. Sem essa allowlist, `automation.*`,
@@ -138,7 +139,8 @@ export class HomeAssistantClient {
       // (neste corpo) a lista de entidades que de fato mudaram de estado. Um
       // `entity_id` desatualizado (registro com TTL de 5min, entidade renomeada
       // ou removida no HA nesse meio-tempo) cai exatamente aqui: 200, êxito
-      // relatado, nada acionado. Confirma pela lista antes de declarar sucesso.
+      // relatado, nada acionado. A lista, quando confirma, poupa a verificação
+      // em background.
       const body: unknown = await res.json().catch(() => null);
       const changed = Array.isArray(body) ? (body as Array<{ entity_id?: unknown }>) : [];
       const confirmedByBody = changed.some((row) => row?.entity_id === entityId);
@@ -160,43 +162,25 @@ export class HomeAssistantClient {
 
       // Lista vazia é ambígua por natureza da API: tanto "já estava nesse
       // estado" (no-op legítimo) quanto "entidade não existe" (o footgun acima)
-      // voltam como `200 []`. Sem heurística para `service` fora do padrão
-      // on/off, confia no 200 — não há o que verificar.
-      const expectedState =
-        service === 'turn_on' ? 'on' : service === 'turn_off' ? 'off' : null;
-      if (expectedState === null) {
-        return { success: true };
-      }
-
-      let actualState = await this.getState(entityId);
-      if (actualState === expectedState) {
-        return { success: true };
-      }
-
-      for (const delayMs of STATE_CONFIRM_RETRY_DELAYS_MS) {
-        await this.sleepImpl(delayMs);
-        actualState = await this.getState(entityId);
-        if (actualState === expectedState) {
-          return { success: true };
-        }
-      }
-
-      getLogger().warn(
+      // voltam como `200 []`. Esperar o estado propagar para desambiguar
+      // custava o tempo de propagação do dispositivo (>1s num ESPHome via
+      // WiFi) dentro da resposta falada — e ainda errava, porque a propagação
+      // pode passar de qualquer espera razoável. Então o 200 vale como
+      // sucesso, e a desambiguação roda em background só para telemetria.
+      getLogger().info(
         {
           event: 'ha_call_service',
           domain,
           service,
           entity_id: entityId,
+          status: res.status,
           latency_ms: latencyMs,
-          actual_state: actualState,
+          confirmed_by_body: false,
         },
-        `Home Assistant aceitou ${domain}.${service} em ${entityId} mas o estado não mudou ` +
-          `para "${expectedState}" (atual: ${actualState ?? 'desconhecido'})`,
+        `Home Assistant aceitou ${domain}.${service} em ${entityId} (sem confirmação no corpo)`,
       );
-      return {
-        success: false,
-        error: `dispositivo não respondeu (estado atual: ${actualState ?? 'desconhecido'})`,
-      };
+      void this.verifyStateEventually(domain, service, entityId);
+      return { success: true };
     } catch (err) {
       const error = this.describeFailure(err);
       getLogger().error(
@@ -212,6 +196,46 @@ export class HomeAssistantClient {
       );
       return { success: false, error };
     }
+  }
+
+  /**
+   * Desambigua em background o `200 []` de `callService`: espera o estado
+   * propagar e faz uma única leitura. Só telemetria — o turno já foi
+   * respondido. É aqui que o footgun do `entity_id` obsoleto (200, êxito
+   * relatado, nada acionado) fica visível: `confirmed: false` recorrente numa
+   * entidade indica registro desatualizado, não dispositivo lento.
+   */
+  private async verifyStateEventually(
+    domain: string,
+    service: string,
+    entityId: string,
+  ): Promise<void> {
+    const expectedState =
+      service === 'turn_on' ? 'on' : service === 'turn_off' ? 'off' : null;
+    if (expectedState === null) {
+      return;
+    }
+
+    const startedAt = Date.now();
+    await this.sleepImpl(STATE_VERIFY_DELAY_MS);
+    const actualState = await this.getState(entityId);
+    const confirmed = actualState === expectedState;
+
+    getLogger()[confirmed ? 'info' : 'warn'](
+      {
+        event: 'ha_verify',
+        domain,
+        service,
+        entity_id: entityId,
+        confirmed,
+        actual_state: actualState,
+        elapsed_ms: Date.now() - startedAt,
+      },
+      confirmed
+        ? `Verificação: ${entityId} chegou a "${expectedState}"`
+        : `Verificação: ${entityId} não chegou a "${expectedState}" ` +
+          `(atual: ${actualState ?? 'desconhecido'}) — dispositivo lento ou entity_id obsoleto`,
+    );
   }
 
   /**

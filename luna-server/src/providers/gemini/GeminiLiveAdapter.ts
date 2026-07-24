@@ -84,6 +84,13 @@ export class GeminiLiveAdapter implements IAudioProvider {
         ...(automaticActivityDetection
           ? { realtimeInputConfig: { automaticActivityDetection } }
           : {}),
+        // Sem limite explícito, o native-audio pensa antes de responder — e o
+        // raciocínio inteiro acontece antes da tool call, dentro do atraso
+        // percebido. `null` omite o campo (modelos sem thinking rejeitam a
+        // sessão se ele estiver presente).
+        ...(this.config.geminiThinkingBudget !== null
+          ? { thinkingConfig: { thinkingBudget: this.config.geminiThinkingBudget } }
+          : {}),
       },
       callbacks: {
         onmessage: (message) => this.handleMessage(message),

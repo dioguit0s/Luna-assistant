@@ -30,11 +30,17 @@ async function main(): Promise<void> {
 
   wsServer.start();
 
+  // Fingerprint da config de latência: cada bloco de logs diz sozinho sob
+  // qual modelo/VAD/thinking as métricas (ttfab, model_decision_ms) valem —
+  // sem isso, comparação antes/depois vira arqueologia de deploys.
   getLogger().info(
     {
       provider: config.audioProvider,
       port: config.wsPort,
       devices: deviceRegistry.current().size,
+      model: config.geminiLiveModel,
+      vad_silence_ms: config.geminiVadSilenceMs,
+      thinking_budget: config.geminiThinkingBudget,
       event: 'server_start',
     },
     'Luna Server iniciado',

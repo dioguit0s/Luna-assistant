@@ -32,6 +32,7 @@ const baseConfig: AppConfig = {
   geminiVadSilenceMs: null,
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
+  geminiThinkingBudget: 0,
   geminiDebugMessages: false,
   userSilenceCutoffMs: 500,
 };
@@ -224,7 +225,7 @@ describe('Orchestrator: despacho de comandos de automação', () => {
 
   // Espelha o corpo real do HA: a entidade chamada volta na lista de
   // mudanças, confirmando a ação (ver HomeAssistantClient.callService — um
-  // `[]` sem a entidade é tratado como ambíguo e dispara um GET de estado).
+  // `[]` sem a entidade agendaria uma verificação de estado em background).
   const okFetch = (call: FetchCall) => {
     if (call.init.method === 'POST') {
       const { entity_id: entityId } = JSON.parse(String(call.init.body)) as {

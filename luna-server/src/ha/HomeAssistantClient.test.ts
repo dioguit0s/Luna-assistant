@@ -20,6 +20,7 @@ const baseConfig: AppConfig = {
   geminiVadSilenceMs: null,
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
+  geminiThinkingBudget: 0,
   geminiDebugMessages: false,
   userSilenceCutoffMs: 500,
 };
@@ -102,21 +103,49 @@ describe('HomeAssistantClient.callService', () => {
     assert.equal(calls[0]!.url, 'http://ha.local:8123/api/services/switch/turn_off');
   });
 
-  it('corpo 200 vazio: confirma sucesso lendo o estado (no-op idempotente)', async () => {
+  // A verificação em background é fire-and-forget: `callService` retorna
+  // antes dela rodar. Drena a cadeia sleep → getState → log antes de olhar
+  // as chamadas registradas.
+  const flushBackground = async () => {
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  };
+
+  it('corpo 200 vazio: sucesso imediato, sem leitura de estado no caminho crítico', async () => {
+    const sleeps: number[] = [];
+    // Sleep controlado pelo teste: enquanto não liberar, a verificação em
+    // background está "esperando a propagação" — janela para provar que o
+    // caminho crítico não fez leitura nenhuma.
+    let releaseSleep!: () => void;
+    const sleepGate = new Promise<void>((resolve) => {
+      releaseSleep = resolve;
+    });
     const { fetchImpl, calls } = mockFetch((call) => {
       if (call.url.includes('/api/services/')) return jsonResponse([]);
       return jsonResponse({ entity_id: 'switch.luz_bancada', state: 'on' });
     });
-    const client = new HomeAssistantClient(baseConfig, fetchImpl);
+    const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, (ms) => {
+      sleeps.push(ms);
+      return sleepGate;
+    });
 
     const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
 
+    // Só o POST aconteceu até aqui — a resposta falada não espera o estado.
     assert.deepEqual(result, { success: true });
+    assert.equal(calls.length, 1);
+
+    releaseSleep();
+    await flushBackground();
+
+    // A verificação rodou depois, com a folga de propagação.
+    assert.deepEqual(sleeps, [1500]);
     assert.equal(calls.length, 2);
     assert.equal(calls[1]!.url, 'http://ha.local:8123/api/states/switch.luz_bancada');
   });
 
-  it('corpo 200 vazio e estado que não mudou mesmo após novas tentativas: reporta falha (entidade inexistente/não respondeu)', async () => {
+  it('corpo 200 vazio e estado que não propagou: ainda é sucesso (verificação é telemetria)', async () => {
     const { fetchImpl, calls } = mockFetch((call) => {
       if (call.url.includes('/api/services/')) return jsonResponse([]);
       return jsonResponse({ entity_id: 'switch.luz_bancada', state: 'off' });
@@ -124,34 +153,14 @@ describe('HomeAssistantClient.callService', () => {
     const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, async () => {});
 
     const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
-
-    assert.equal(result.success, false);
-    assert.match(result.error ?? '', /estado atual: off/);
-    // 1 POST + 1 leitura imediata + 3 novas tentativas = 5 chamadas.
-    assert.equal(calls.length, 5);
-  });
-
-  it('corpo 200 vazio e estado que confirma só numa nova tentativa: reporta sucesso', async () => {
-    let stateReads = 0;
-    const { fetchImpl, calls } = mockFetch((call) => {
-      if (call.url.includes('/api/services/')) return jsonResponse([]);
-      stateReads += 1;
-      // Simula o round-trip real do dispositivo: só confirma na 3ª leitura.
-      return jsonResponse({
-        entity_id: 'switch.luz_bancada',
-        state: stateReads >= 3 ? 'on' : 'off',
-      });
-    });
-    const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, async () => {});
-
-    const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
+    await flushBackground();
 
     assert.deepEqual(result, { success: true });
-    // 1 POST + 3 leituras de estado (a 3ª confirma).
-    assert.equal(calls.length, 4);
+    // 1 POST + 1 única leitura em background, sem retries.
+    assert.equal(calls.length, 2);
   });
 
-  it('corpo 200 vazio e leitura de estado falha em todas as tentativas: reporta falha em vez de sucesso cego', async () => {
+  it('corpo 200 vazio e leitura de estado falha: sucesso mantido, sem lançar', async () => {
     const { fetchImpl } = mockFetch((call) => {
       if (call.url.includes('/api/services/')) return jsonResponse([]);
       return new Response('', { status: 404 });
@@ -159,9 +168,20 @@ describe('HomeAssistantClient.callService', () => {
     const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, async () => {});
 
     const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
+    await flushBackground();
 
-    assert.equal(result.success, false);
-    assert.match(result.error ?? '', /desconhecido/);
+    assert.deepEqual(result, { success: true });
+  });
+
+  it('serviço fora do padrão on/off não agenda verificação', async () => {
+    const { fetchImpl, calls } = mockFetch(() => jsonResponse([]));
+    const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, async () => {});
+
+    const result = await client.callService('switch', 'toggle', 'switch.luz_bancada');
+    await flushBackground();
+
+    assert.deepEqual(result, { success: true });
+    assert.equal(calls.length, 1);
   });
 
   for (const status of [401, 404, 500, 502]) {

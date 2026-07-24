@@ -268,6 +268,12 @@ export class Orchestrator {
 
       // O callback do port é síncrono; a chamada ao HA é async e o client
       // nunca lança, então basta não deixar a promise solta.
+      //
+      // O `sendToolResult` espera o HA de propósito: com a verificação de
+      // estado fora do caminho crítico, o await custa só o POST (~20-40ms) e
+      // preserva o único sinal de falha verdadeiro (HA fora do ar, 401,
+      // timeout). Responder otimista antes do POST faria a Luna confirmar em
+      // voz um comando que falhou de fato.
       void this.haClient
         .callService(domain, action === 'on' ? 'turn_on' : 'turn_off', entityId)
         .then((result) => {

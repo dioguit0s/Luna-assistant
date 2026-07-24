@@ -22,6 +22,14 @@ export interface AppConfig {
   geminiVadSilenceMs: number | null;
   geminiVadEndSensitivity: EndSensitivityName | null;
   geminiManualActivity: boolean;
+  /**
+   * `thinkingBudget` da sessão Live: `0` desabilita o thinking, `-1` deixa o
+   * modelo decidir (default dos native-audio preview — e o raciocínio roda
+   * inteiro antes da tool call, direto no atraso percebido), `null` omite o
+   * campo (obrigatório em modelos que rejeitam `thinkingConfig`, como os
+   * half-cascade).
+   */
+  geminiThinkingBudget: number | null;
   /** Loga mensagens cruas do Gemini, incluindo transcrições da fala do usuário. */
   geminiDebugMessages: boolean;
   /**
@@ -53,6 +61,22 @@ function parseOptionalNumber(name: string): number | null {
   return parsed;
 }
 
+/**
+ * `parseOptionalNumber` não serve aqui: `-1` (automático) é valor válido.
+ * Aceita inteiro >= -1 ou o literal "off" para omitir o campo da sessão.
+ */
+function parseThinkingBudget(value: string | undefined): number | null | undefined {
+  if (value === undefined || value === '') return undefined;
+  if (value.toLowerCase() === 'off') return null;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < -1) {
+    throw new Error(
+      `GEMINI_THINKING_BUDGET inválido: "${value}". Use um inteiro >= -1 ou "off".`,
+    );
+  }
+  return parsed;
+}
+
 function requireEnv(name: string): string {
   const value = process.env[name];
   if (!value) {
@@ -70,6 +94,7 @@ function parseAudioProvider(value: string): AudioProviderName {
 
 export function loadConfig(): AppConfig {
   const audioProvider = parseAudioProvider(process.env.AUDIO_PROVIDER ?? 'gemini');
+  const thinkingBudget = parseThinkingBudget(process.env.GEMINI_THINKING_BUDGET);
 
   const config: AppConfig = {
     audioProvider,
@@ -95,6 +120,10 @@ export function loadConfig(): AppConfig {
     geminiVadSilenceMs: parseOptionalNumber('GEMINI_VAD_SILENCE_MS') ?? 500,
     geminiVadEndSensitivity: parseEndSensitivity(process.env.GEMINI_VAD_END_SENSITIVITY) ?? 'HIGH',
     geminiManualActivity: process.env.GEMINI_MANUAL_ACTIVITY === 'true',
+    // Default 0: para um vocabulário de uma tool on/off, o thinking não paga
+    // o ~1s que custa dentro do model_decision_ms. `-1` restaura o dinâmico.
+    // `??` não serve: "off" vira `null` e precisa sobreviver até a sessão.
+    geminiThinkingBudget: thinkingBudget === undefined ? 0 : thinkingBudget,
     geminiDebugMessages: process.env.GEMINI_DEBUG_MESSAGES === 'true',
     // Mesma ordem de grandeza do GEMINI_VAD_SILENCE_MS: no OpenAI o evento de
     // fim de fala já é discreto (um único disparo), então o debounce só soma
