@@ -66,8 +66,10 @@ describe('HomeAssistantClient.callService', () => {
     createLogger(baseConfig);
   });
 
-  it('monta a requisição e retorna sucesso em 200', async () => {
-    const { fetchImpl, calls } = mockFetch(() => jsonResponse([]));
+  it('monta a requisição e retorna sucesso em 200 com a entidade confirmada no corpo', async () => {
+    const { fetchImpl, calls } = mockFetch(() =>
+      jsonResponse([{ entity_id: 'switch.luz_bancada', state: 'on' }]),
+    );
     const client = new HomeAssistantClient(baseConfig, fetchImpl);
 
     const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
@@ -86,7 +88,9 @@ describe('HomeAssistantClient.callService', () => {
   });
 
   it('remove barra final do HA_URL', async () => {
-    const { fetchImpl, calls } = mockFetch(() => jsonResponse([]));
+    const { fetchImpl, calls } = mockFetch(() =>
+      jsonResponse([{ entity_id: 'switch.luz_bancada', state: 'off' }]),
+    );
     const client = new HomeAssistantClient(
       { ...baseConfig, haUrl: 'http://ha.local:8123/' },
       fetchImpl,
@@ -95,6 +99,46 @@ describe('HomeAssistantClient.callService', () => {
     await client.callService('switch', 'turn_off', 'switch.luz_bancada');
 
     assert.equal(calls[0]!.url, 'http://ha.local:8123/api/services/switch/turn_off');
+  });
+
+  it('corpo 200 vazio: confirma sucesso lendo o estado (no-op idempotente)', async () => {
+    const { fetchImpl, calls } = mockFetch((call) => {
+      if (call.url.includes('/api/services/')) return jsonResponse([]);
+      return jsonResponse({ entity_id: 'switch.luz_bancada', state: 'on' });
+    });
+    const client = new HomeAssistantClient(baseConfig, fetchImpl);
+
+    const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
+
+    assert.deepEqual(result, { success: true });
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1]!.url, 'http://ha.local:8123/api/states/switch.luz_bancada');
+  });
+
+  it('corpo 200 vazio e estado que não mudou: reporta falha (entidade inexistente/não respondeu)', async () => {
+    const { fetchImpl } = mockFetch((call) => {
+      if (call.url.includes('/api/services/')) return jsonResponse([]);
+      return jsonResponse({ entity_id: 'switch.luz_bancada', state: 'off' });
+    });
+    const client = new HomeAssistantClient(baseConfig, fetchImpl);
+
+    const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
+
+    assert.equal(result.success, false);
+    assert.match(result.error ?? '', /estado atual: off/);
+  });
+
+  it('corpo 200 vazio e leitura de estado falha: reporta falha em vez de sucesso cego', async () => {
+    const { fetchImpl } = mockFetch((call) => {
+      if (call.url.includes('/api/services/')) return jsonResponse([]);
+      return new Response('', { status: 404 });
+    });
+    const client = new HomeAssistantClient(baseConfig, fetchImpl);
+
+    const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
+
+    assert.equal(result.success, false);
+    assert.match(result.error ?? '', /desconhecido/);
   });
 
   for (const status of [401, 404, 500, 502]) {

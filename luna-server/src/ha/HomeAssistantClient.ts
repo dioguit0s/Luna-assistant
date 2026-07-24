@@ -120,18 +120,63 @@ export class HomeAssistantClient {
         return { success: false, error: `Home Assistant respondeu ${res.status}` };
       }
 
-      getLogger().info(
+      // `res.ok` não prova que algo foi acionado: o HA aceita `POST
+      // /api/services/<domain>/<service>` com 200 mesmo quando `entity_id` não
+      // corresponde a nenhuma entidade real — não valida o alvo, só devolve
+      // (neste corpo) a lista de entidades que de fato mudaram de estado. Um
+      // `entity_id` desatualizado (registro com TTL de 5min, entidade renomeada
+      // ou removida no HA nesse meio-tempo) cai exatamente aqui: 200, êxito
+      // relatado, nada acionado. Confirma pela lista antes de declarar sucesso.
+      const body: unknown = await res.json().catch(() => null);
+      const changed = Array.isArray(body) ? (body as Array<{ entity_id?: unknown }>) : [];
+      const confirmedByBody = changed.some((row) => row?.entity_id === entityId);
+
+      if (confirmedByBody) {
+        getLogger().info(
+          {
+            event: 'ha_call_service',
+            domain,
+            service,
+            entity_id: entityId,
+            status: res.status,
+            latency_ms: latencyMs,
+          },
+          `Home Assistant: ${domain}.${service} em ${entityId}`,
+        );
+        return { success: true };
+      }
+
+      // Lista vazia é ambígua por natureza da API: tanto "já estava nesse
+      // estado" (no-op legítimo) quanto "entidade não existe" (o footgun acima)
+      // voltam como `200 []`. Sem heurística para `service` fora do padrão
+      // on/off, confia no 200 — não há o que verificar.
+      const expectedState =
+        service === 'turn_on' ? 'on' : service === 'turn_off' ? 'off' : null;
+      if (expectedState === null) {
+        return { success: true };
+      }
+
+      const actualState = await this.getState(entityId);
+      if (actualState === expectedState) {
+        return { success: true };
+      }
+
+      getLogger().warn(
         {
           event: 'ha_call_service',
           domain,
           service,
           entity_id: entityId,
-          status: res.status,
           latency_ms: latencyMs,
+          actual_state: actualState,
         },
-        `Home Assistant: ${domain}.${service} em ${entityId}`,
+        `Home Assistant aceitou ${domain}.${service} em ${entityId} mas o estado não mudou ` +
+          `para "${expectedState}" (atual: ${actualState ?? 'desconhecido'})`,
       );
-      return { success: true };
+      return {
+        success: false,
+        error: `dispositivo não respondeu (estado atual: ${actualState ?? 'desconhecido'})`,
+      };
     } catch (err) {
       const error = this.describeFailure(err);
       getLogger().error(

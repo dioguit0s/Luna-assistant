@@ -191,7 +191,20 @@ describe('Orchestrator: despacho de comandos de automação', () => {
 
   let harness: Harness;
 
-  const okFetch = () => new Response('[]', { status: 200 });
+  // Espelha o corpo real do HA: a entidade chamada volta na lista de
+  // mudanças, confirmando a ação (ver HomeAssistantClient.callService — um
+  // `[]` sem a entidade é tratado como ambíguo e dispara um GET de estado).
+  const okFetch = (call: FetchCall) => {
+    if (call.init.method === 'POST') {
+      const { entity_id: entityId } = JSON.parse(String(call.init.body)) as {
+        entity_id: string;
+      };
+      return new Response(JSON.stringify([{ entity_id: entityId, state: 'on' }]), {
+        status: 200,
+      });
+    }
+    return new Response('[]', { status: 200 });
+  };
 
   beforeEach(() => {
     harness = buildHarness(okFetch);

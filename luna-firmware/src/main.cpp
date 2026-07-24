@@ -160,13 +160,20 @@ void loop() {
   if (wsStarted) LunaWsClient::loop();
   StateMachine::update();
 
-  // Drena a fila de captura por completo. O limite anterior de 4 chunks por
-  // iteração (80ms de áudio) só se sustentava enquanto o loop rodasse a cada
-  // 80ms; qualquer engasgo do ws.loop()/Wi-Fi acumulava backlog, e o áudio
-  // chegava ao Gemini atrasado — ou era descartado pela fila de profundidade
-  // TX_QUEUE_DEPTH, cortando a fala.
+  // Drena a fila de captura, mas com orçamento de tempo. Um `while` sem limite
+  // aqui reintroduz um travamento pior que o que ele resolveu: sendAudioChunk()
+  // chama ws.sendBIN(), que escreve na socket TCP e pode bloquear por bem mais
+  // que os ~20ms de um chunk quando o Wi-Fi degrada (sem cair de vez). Com a
+  // fila de profundidade TX_QUEUE_DEPTH cheia, isso é até 12 envios bloqueantes
+  // em sequência sem devolver o controle — ws.loop()/WifiManager::loop() não
+  // rodam, a queda de conexão não é percebida, e a Luna "trava": para de
+  // responder à voz até a socket estourar timeout sozinha. O orçamento limita
+  // o estrago a ~1 envio lento por iteração; o resto sai na próxima chamada de
+  // loop(), que já roda de novo em menos de 2ms (delay(1) no fim do loop).
   AudioChunk out;
-  while (xQueueReceive(txQueue, &out, 0) == pdTRUE) {
+  const uint32_t drainDeadline = millis() + 15;
+  while ((int32_t)(millis() - drainDeadline) < 0 &&
+         xQueueReceive(txQueue, &out, 0) == pdTRUE) {
     LunaWsClient::sendAudioChunk(seqCounter++, (const uint8_t *)out.samples,
                                  (size_t)out.count * sizeof(int16_t));
   }
