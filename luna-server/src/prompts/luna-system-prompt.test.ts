@@ -84,6 +84,15 @@ describe('buildLunaSystemPrompt', () => {
     assert.match(prompt, /não é comando/);
   });
 
+  it('manda ficar em silêncio até o resultado da tool voltar (evita fala duplicada do Gemini)', () => {
+    // A Live API do Gemini tem o hábito documentado de gerar uma fala
+    // concorrente à chamada da tool e depois repetir a confirmação quando o
+    // resultado chega — sem essa instrução explícita, o usuário ouve a
+    // mesma frase duas vezes.
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
+    assert.match(prompt, /não fale nada antes do resultado voltar/);
+  });
+
   it('manda preencher room_id com o area_id cru da sessão', () => {
     // O rótulo falável ("a cozinha") não serve como argumento: o `room_id` precisa
     // ser o `area_id` do HA. Os dois têm que aparecer, cada um no seu papel.
