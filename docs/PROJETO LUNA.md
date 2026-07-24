@@ -47,7 +47,7 @@ O servidor mantém um **ring buffer por&#x20;****`room_id`** com os últimos 10 
 | Componente                    | Tecnologia Escolhida                                                               | Justificativa Técnica                                                                                                                         |
 | ----------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | **Orquestrador Central**      | Node.js (TypeScript) + `ws`                                                        | Event Loop ideal para I/O assíncrono intensivo e streams binários. `ws` puro elimina overhead do socket.io e é compatível com firmware ESP32. |
-| **Nó de Borda (Satélite)**    | ESP32-S3 (C++ / PlatformIO)                                                        | Aceleração vetorial e PSRAM nativa para ESP-SR (Wake Word) e pipeline de áudio dual-mode.                                                     |
+| **Nó de Borda (Satélite)**    | ESP32-S3 (C++ / PlatformIO)                                                        | Aceleração vetorial (esp-nn) e PSRAM nativa para a inferência da Wake Word e o pipeline de áudio dual-mode.                                   |
 | **Protocolo de Áudio Físico** | I2S — 16 kHz, 16-bit PCM mono                                                      | Protocolo digital serial para áudio. Imunidade a ruídos eletromagnéticos. Chunks de 20ms (640 bytes).                                         |
 | **Processamento de IA**       | Interface `IAudioProvider` com adapters para Gemini Live API e OpenAI Realtime API | Abstração de provider garante fallback sem refatoração. Latência inferida < 800ms TTFAB.                                                      |
 | **Hub de Automação**          | Home Assistant (Docker)                                                            | Abstração de dispositivos e protocolos. Integrado ao orquestrador via REST/WebSocket.                                                         |
@@ -181,7 +181,7 @@ luna/
 
 **Objetivo:** Eliminar interações físicas e distribuir o ecossistema por múltiplos ambientes.
 
-* Substituição do trigger de botão pelo **ESP-SR Wake Word** ("Luna") rodando localmente no ESP32-S3, aproveitando a FSM dual-mode já implementada no Épico 2 — apenas o trigger muda, não a estrutura.
+* Substituição do trigger de botão pela **Wake Word "Hey Luna"** rodando localmente no ESP32-S3, aproveitando a FSM dual-mode já implementada no Épico 2 — apenas o trigger muda, não a estrutura. A engine é o **microWakeWord** (TFLite-micro), e não o ESP-SR originalmente previsto: o WakeNet não tem modelo para "Luna" nem suporte a português, e customizá-lo é serviço pago. Ver [ADR 003](./adr/003-wake-word-engine.md).
 * Ajustes finos nos ring buffers de rede para mitigar perdas de pacotes Wi-Fi.
 * Replicação do hardware para um segundo satélite independente, validando:
   * Comutação de contexto entre cômodos (sessões isoladas por `room_id`).
@@ -189,7 +189,7 @@ luna/
   * Logs com métricas diferenciadas por `room_id` e `device_id`.
 * Substituição do `Map` em memória por **Redis** para persistência de contexto entre restarts.
 
-**Critério de Aceite:** Chamar "Luna" à distância sem botão, em dois cômodos diferentes, e obter respostas contextualizadas ao ambiente físico de origem.
+**Critério de Aceite:** Chamar "Hey Luna" à distância sem botão, em dois cômodos diferentes, e obter respostas contextualizadas ao ambiente físico de origem.
 
 ***
 

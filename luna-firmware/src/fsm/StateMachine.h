@@ -2,20 +2,21 @@
 #include <Arduino.h>
 
 // Máquina de estados dual-mode do satélite.
-// Estrutura preservada para o Épico 4 (Wake Word/botão): apenas o "trigger"
-// muda. Nesta rodada o trigger é sempre verdadeiro (open-mic).
+// O trigger de IDLE_LISTENING -> ACTIVE_STREAMING é a wake word local
+// ("Hey Luna", ver src/wake/WakeWord.h). Com WAKE_WORD_ENABLED=0 o trigger volta
+// a ser sempre verdadeiro (open-mic), como era antes do Épico 4.
 namespace StateMachine {
 
 enum class State {
-  IDLE_LISTENING,   // aguarda trigger (nesta rodada: avança imediatamente)
+  IDLE_LISTENING,   // microfone aberto localmente, nada sai pela rede
   ACTIVE_STREAMING, // captura + transmite; LED ON
   RESPONDING,       // Luna falando: TX suspenso (AEC), LED OFF
 };
 
 void begin();
 
-// Recoloca a FSM em captura (LED on). Chamar a cada (re)autenticação para
-// não ficar preso em RESPONDING se a conexão cair no meio de uma resposta.
+// Recoloca a FSM em escuta passiva. Chamar a cada (re)autenticação para não
+// ficar preso em RESPONDING se a conexão cair no meio de uma resposta.
 void reset();
 
 // Chamar no loop principal: cuida das transições temporizadas (AEC/trigger).
@@ -26,8 +27,24 @@ State current();
 // Verdadeiro quando a captura deve ser enfileirada para envio.
 bool shouldStream();
 
+// Verdadeiro quando o áudio deve alimentar o detector de wake word.
+// Falso em RESPONDING de propósito: senão a própria voz da Luna dizendo "Luna"
+// reacorda o satélite no meio da resposta.
+bool shouldDetectWake();
+
+// Desliga o trigger de wake word em runtime e volta ao open-mic. Chamado quando
+// o detector não consegue subir — melhor degradado que mudo.
+void setWakeWordAvailable(bool available);
+
+// Trigger da wake word -> ACTIVE_STREAMING (LED on, volta a transmitir).
+void onWakeWord();
+
+// Alimenta o pico de captura (0..32767) a cada chunk. Usado para fechar a janela
+// de escuta pós-wake por silêncio. Chamar do captureTask.
+void noteCapturePeak(int16_t peak);
+
 // Eventos vindos do servidor.
 void onSpeakingStart(); // -> RESPONDING (LED off, para TX)
-void onSpeakingEnd();   // agenda retorno a ACTIVE_STREAMING após AEC_RESUME_DELAY_MS
+void onSpeakingEnd();   // agenda retorno a IDLE_LISTENING após AEC_RESUME_DELAY_MS
 
 } // namespace StateMachine

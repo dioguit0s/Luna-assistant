@@ -14,6 +14,7 @@
 #include "audio/AudioPlayback.h"
 #include "fsm/StateMachine.h"
 #include "ui/StatusLed.h"
+#include "wake/WakeWord.h"
 #include "ws/LunaWsClient.h"
 #include "ws/SecretStore.h"
 #include "ws/WifiManager.h"
@@ -26,19 +27,22 @@ struct AudioChunk {
 
 static QueueHandle_t txQueue = nullptr;          // captura -> envio WS
 static StreamBufferHandle_t playbackBuffer = nullptr; // recepção WS -> speaker
+static StreamBufferHandle_t wakeBuffer = nullptr;     // captura -> detector de wake word
+static TaskHandle_t wakeTaskHandle = nullptr;
 
 static uint32_t seqCounter = 0;
 static bool wsStarted = false;
 static uint32_t lastPingMs = 0;
 static uint32_t lastAuthedMs = 0;
 static uint32_t lastWarnMs = 0;
+static uint32_t lastWakeStatsMs = 0;
 
 // ============================================================================
 // Callbacks do servidor (executam no contexto do loop principal via ws.loop())
 // ============================================================================
 static void onAuthOk() {
   StateMachine::reset(); // recupera se a conexão caiu durante RESPONDING
-  Serial.println("[luna] autenticado — capturando");
+  Serial.println("[luna] autenticado — aguardando wake word");
 }
 
 static uint32_t responseBytes = 0;
@@ -81,12 +85,102 @@ static void onAudioResponse(const uint8_t *pcm, size_t len) {
 // ============================================================================
 // Tasks
 // ============================================================================
+// Pré-buffer circular dos últimos WAKE_PREROLL_MS de captura, na PSRAM.
+// Só o captureTask mexe nele — não precisa de lock.
+static AudioChunk *preroll = nullptr;
+static size_t prerollHead = 0;  // próxima posição a escrever
+static size_t prerollCount = 0; // quantos chunks válidos
+
+static void prerollPush(const AudioChunk &chunk) {
+  if (!preroll) return;
+  preroll[prerollHead] = chunk;
+  prerollHead = (prerollHead + 1) % WAKE_PREROLL_CHUNKS;
+  if (prerollCount < WAKE_PREROLL_CHUNKS) prerollCount++;
+}
+
+// Despeja o pré-buffer na fila de envio, do mais antigo para o mais novo.
+static void prerollFlush() {
+  if (!preroll || prerollCount == 0) return;
+  size_t idx = (prerollHead + WAKE_PREROLL_CHUNKS - prerollCount) % WAKE_PREROLL_CHUNKS;
+  for (size_t i = 0; i < prerollCount; i++) {
+    xQueueSend(txQueue, &preroll[idx], 0);
+    idx = (idx + 1) % WAKE_PREROLL_CHUNKS;
+  }
+  prerollCount = 0;
+}
+
 static void captureTask(void *) {
   AudioChunk chunk;
+  bool wasStreaming = false;
+
   for (;;) {
     chunk.count = AudioCapture::readChunk(chunk.samples); // bloqueia ~20ms
-    if (chunk.count > 0 && StateMachine::shouldStream()) {
+    if (chunk.count == 0) continue;
+
+    // Alimenta a janela de escuta pós-wake com a energia do chunk (fecha por
+    // silêncio se o servidor não responder).
+    StateMachine::noteCapturePeak(AudioCapture::lastPeak());
+
+    // O detector precisa do áudio mesmo (e principalmente) quando nada está
+    // sendo transmitido — é justamente esse o estado de escuta passiva.
+    if (wakeBuffer && StateMachine::shouldDetectWake()) {
+      // Sem espera: se o wakeTask atrasou, é melhor perder um chunk de detecção
+      // do que segurar o I2S e furar o tempo real da captura.
+      xStreamBufferSend(wakeBuffer, chunk.samples, (size_t)chunk.count * sizeof(int16_t), 0);
+    }
+
+    const bool streaming = StateMachine::shouldStream();
+    if (streaming && !wasStreaming) {
+      // Acabou de acordar: manda primeiro o que já estava no pré-buffer, senão
+      // o provider recebe o comando sem o começo.
+      prerollFlush();
+    }
+    wasStreaming = streaming;
+
+    if (streaming) {
       xQueueSend(txQueue, &chunk, 0); // descarta se a fila encher
+    } else {
+      prerollPush(chunk);
+    }
+  }
+}
+
+// Empurra o bipe de confirmação pelo caminho normal de playback. Escrever no
+// I2S1 daqui disputaria o barramento com o playbackTask.
+static void queueWakeChirp() {
+  if (!playbackBuffer) return;
+  static int16_t chirp[SAMPLE_RATE * WAKE_CHIRP_MS / 1000];
+  const size_t n = AudioPlayback::renderTone(chirp, sizeof(chirp) / sizeof(chirp[0]),
+                                             WAKE_CHIRP_FREQ_HZ, WAKE_CHIRP_MS);
+  xStreamBufferSend(playbackBuffer, chirp, n * sizeof(int16_t), 0);
+}
+
+static void wakeTask(void *) {
+  static int16_t buf[CHUNK_SAMPLES];
+  bool wasDetecting = false;
+
+  for (;;) {
+    // O rearme mora aqui, e não no loop principal, porque só esta task toca no
+    // estado do detector — assim não há corrida com o feed().
+    const bool detecting = StateMachine::shouldDetectWake();
+    if (detecting && !wasDetecting) {
+      // Voltou à escuta passiva: descarta o áudio parado no buffer e zera a
+      // média móvel. Sem isso as probabilidades do turno anterior sobrevivem e
+      // a Luna acorda sozinha logo depois de terminar de falar.
+      xStreamBufferReset(wakeBuffer);
+      WakeWord::rearm();
+    }
+    wasDetecting = detecting;
+
+    const size_t n = xStreamBufferReceive(wakeBuffer, buf, sizeof(buf), pdMS_TO_TICKS(100));
+    if (n >= sizeof(int16_t)) {
+      WakeWord::feed(buf, n / sizeof(int16_t));
+    }
+
+    if (WakeWord::takeDetection()) {
+      StateMachine::onWakeWord();
+      queueWakeChirp();
+      Serial.println("[luna] wake word — capturando");
     }
   }
 }
@@ -141,6 +235,27 @@ void setup() {
     playbackBuffer = xStreamBufferCreate(24576, 1);
   }
 
+  // Pré-buffer de captura na PSRAM: a RAM interna fica reservada para as arenas
+  // de inferência, onde a latência importa.
+  preroll = (AudioChunk *)heap_caps_malloc(sizeof(AudioChunk) * WAKE_PREROLL_CHUNKS,
+                                           MALLOC_CAP_SPIRAM);
+  if (!preroll) {
+    preroll = (AudioChunk *)malloc(sizeof(AudioChunk) * WAKE_PREROLL_CHUNKS);
+  }
+
+#if WAKE_WORD_ENABLED
+  wakeBuffer = xStreamBufferCreate(CHUNK_BYTES * 8, sizeof(int16_t));
+  if (!wakeBuffer || !WakeWord::begin()) {
+    // Sem detector o satélite não pode ficar mudo para sempre: cai no open-mic,
+    // que é degradado mas utilizável, até alguém olhar o log.
+    Serial.println("[erro] WakeWord::begin falhou — voltando ao open-mic");
+    wakeBuffer = nullptr;
+    StateMachine::setWakeWordAvailable(false);
+  }
+#else
+  Serial.println("[luna] wake word desativada em config.h — open-mic");
+#endif
+
   StateMachine::begin();
 
   LunaWsClient::onAuthOk(onAuthOk);
@@ -152,6 +267,12 @@ void setup() {
 
   xTaskCreatePinnedToCore(captureTask, "capture", 4096, nullptr, 3, nullptr, 1);
   xTaskCreatePinnedToCore(playbackTask, "playback", 4096, nullptr, 3, nullptr, 0);
+
+  // Inferência no core 0, com prioridade ABAIXO do playback: se a CPU apertar,
+  // quem atrasa é a detecção, não o áudio que está tocando.
+  if (wakeBuffer) {
+    xTaskCreatePinnedToCore(wakeTask, "wake", 4096, nullptr, 2, &wakeTaskHandle, 0);
+  }
 
   lastAuthedMs = millis();
 }
@@ -214,6 +335,22 @@ void loop() {
     Serial.println("[luna] servidor offline > 30s — tom de aviso");
     AudioPlayback::playTone(880, 150);
     lastWarnMs = now;
+  }
+
+  // Custo de manter a escuta ligada (critério de aceite do Épico 4).
+  if (wakeTaskHandle && now - lastWakeStatsMs >= WAKE_STATS_INTERVAL_MS) {
+    lastWakeStatsMs = now;
+    Serial.printf("[wake] infer avg=%uus max=%uus load=%.1f%% p=%.2f | "
+                  "heap_int=%u psram=%u stack_hwm=%u\n",
+                  (unsigned)WakeWord::avgInferenceUs(), (unsigned)WakeWord::maxInferenceUs(),
+                  WakeWord::cpuLoadPct(), WakeWord::lastProbability(),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  (unsigned)uxTaskGetStackHighWaterMark(wakeTaskHandle));
+    char dbg[128];
+    if (WakeWord::debugSnapshot(dbg, sizeof(dbg))) Serial.printf("[wake] %s\n", dbg);
+    WakeWord::debugDumpFeatures();
+    WakeWord::resetStats(); // média por janela, não desde o boot
   }
 
   delay(1); // cede CPU sem travar o ws.loop()

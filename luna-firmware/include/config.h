@@ -32,10 +32,92 @@
 #define MIC_SAMPLE_SHIFT 14
 
 // --- Buffers / filas ---
-#define TX_QUEUE_DEPTH 12          // chunks de captura aguardando envio
+// Profundidade dimensionada para absorver o despejo do pré-buffer no wake
+// (WAKE_PREROLL_CHUNKS de uma vez) sem descartar os chunks que chegam em seguida.
+#define TX_QUEUE_DEPTH 24          // chunks de captura aguardando envio
 // Reprodução: o Gemini despeja a resposta em rajada (>100 KB em ~1s), muito mais
 // rápido que o tempo real (16 KB/s). Buffer grande na PSRAM absorve a rajada.
 #define PLAYBACK_BUFFER_BYTES (512 * 1024) // ~16 s @ 16k, alocado na PSRAM
+
+// --- Wake word local ("Hey Luna") ---
+// Detecção roda no ESP32-S3 via microWakeWord (TFLite-micro). Enquanto não houver
+// wake word, o microfone continua aberto LOCALMENTE mas nada sai pela rede.
+// Ver src/wake/WakeWord.h e models/README.md.
+#define WAKE_WORD_ENABLED 1 // 0 = volta ao open-mic (transmite sempre)
+
+// Frase da wake word gravada no header src/wake/models/hey_luna_model_data.h.
+// PROVISÓRIO: okay_nabu (modelo oficial, validado no microfone real — dispara
+// em 0.95-1.00). Os hey_luna_v* da comunidade são fracos e não disparam neste
+// hardware; ver models/README.md e docs/adr/003. TODO: treinar "Ei Luna" pt-BR.
+#define WAKE_PHRASE "Okay Nabu"
+
+// Constantes do manifesto do modelo em uso — trocar o modelo exige revisar.
+// O cutoff do manifesto do okay_nabu é 0.97; 0.90 dá margem. Afinar pelo
+// raw_max do log de debug no microfone real.
+#define WAKE_PROB_CUTOFF 0.90f    // média da janela deslizante que dispara
+#define WAKE_SLIDING_WINDOW 5     // nº de probabilidades na média móvel
+#define WAKE_FEATURE_STEP_MS 10   // stride entre features (160 amostras @16k)
+// Manifesto diz 30000, mas na prática o AllocateTensors usa ~30604 — com folga
+// para não cair no realoc dobrado (que pede 30k+60k de pico) no boot.
+#define WAKE_ARENA_BYTES 34000
+
+// Janela de 30ms que o preprocessador consome por feature (480 amostras @16k).
+#define WAKE_WINDOW_SAMPLES 480
+#define WAKE_FEATURE_SIZE 40 // features int8 por slice
+#define WAKE_STEP_SAMPLES (SAMPLE_RATE * WAKE_FEATURE_STEP_MS / 1000)
+
+// Arena do preprocessador. Se o AllocateTensors falhar, o WakeWord tenta o dobro
+// automaticamente e loga o tamanho efetivo — ajuste aqui depois de ver o log.
+#define WAKE_PREPROC_ARENA_BYTES 16384
+
+// Após um disparo, ignora este tanto de janelas de inferência antes de poder
+// disparar de novo. Evita que o mesmo "Hey Luna" acione duas vezes. Com stride 2
+// há ~50 inferências/s, então 50 ~= 1s de cool-off.
+#define WAKE_REARM_WINDOWS 50
+
+// Cooldown ao voltar para IDLE (rearm): suprime detecção por estas janelas
+// enquanto o modelo recém-resetado vê áudio fresco e o eco da resposta morre.
+// Sem isto, uma corrida entre captureTask e wakeTask deixa o modelo ainda-quente
+// disparar sozinho logo após uma resposta. ~15 janelas * 30ms (stride 3) = ~450ms.
+#define WAKE_SETTLE_WINDOWS 15
+
+// Pré-buffer despejado ao servidor no instante do wake. A detecção só conclui
+// depois da palavra terminar, então sem isto o início do comando ("Hey Luna,
+// ACENDE a luz") chega cortado no provider. Vive na PSRAM.
+#define WAKE_PREROLL_MS 240
+#define WAKE_PREROLL_CHUNKS (WAKE_PREROLL_MS / 20) // chunks de 20ms
+
+// Bipe curto de confirmação, empurrado pelo buffer de playback (não pelo I2S
+// direto) para não disputar o barramento com o playbackTask.
+#define WAKE_CHIRP_FREQ_HZ 1200
+#define WAKE_CHIRP_MS 80
+
+// Periodicidade do log de custo (CPU/RAM) do detector.
+#define WAKE_STATS_INTERVAL_MS 5000
+
+// Janela de escuta após o wake word. Sem isto, se o servidor não enfileira uma
+// resposta (você falou algo que ele ignorou, ou ficou em silêncio), a FSM fica
+// presa em ACTIVE_STREAMING transmitindo pra sempre. A janela fecha e volta a
+// exigir o wake word quando:
+//   - houver WAKE_LISTEN_SILENCE_MS de silêncio (pico < WAKE_LISTEN_VOICE_PEAK), ou
+//   - passar de WAKE_LISTEN_MAX_MS desde o wake (teto absoluto, cobre ruído alto).
+// O caso normal nem chega aqui: o servidor manda speaking_start e a FSM vai para
+// RESPONDING antes. Só vale como rede de segurança. WAKE_LISTEN_VOICE_PEAK deve
+// ficar ACIMA do ruído de fundo do mic (ver audio_peak no log em silêncio).
+#define WAKE_LISTEN_VOICE_PEAK 10000 // pico (0..32767) que conta como fala
+#define WAKE_LISTEN_SILENCE_MS 2500  // silêncio que fecha a janela
+#define WAKE_LISTEN_MAX_MS 12000     // teto absoluto da janela pós-wake
+
+// Diagnóstico do domínio de features: loga pico de áudio, min/max/média das
+// features e a probabilidade crua máxima. Só para depurar o "p sempre 0" —
+// desligar depois. Ver WakeWord::debugSnapshot().
+#define WAKE_DEBUG 1
+
+// Despeja as features via Serial (base64) a cada WAKE_STATS_INTERVAL_MS, para
+// rodar o modelo isolado no desktop. Só para depurar o "raw_max sempre 0" com
+// áudio real; desligar depois. ~3s de contexto.
+#define WAKE_DUMP_FEATURES 0
+#define WAKE_DUMP_SLICES 300
 
 // --- Timings de rede / FSM ---
 #define AEC_RESUME_DELAY_MS 150    // silêncio após speaking_end antes de recapturar

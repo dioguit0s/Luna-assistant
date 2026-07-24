@@ -89,4 +89,25 @@ void playTone(uint16_t freqHz, uint16_t durationMs) {
   }
 }
 
+size_t renderTone(int16_t *out, size_t maxSamples, uint16_t freqHz, uint16_t durationMs) {
+  const size_t total = min((size_t)SAMPLE_RATE * durationMs / 1000, maxSamples);
+  const float step = 2.0f * (float)M_PI * freqHz / SAMPLE_RATE;
+  // Rampa de ~5ms nas pontas: um seno que começa e termina no seco vira um
+  // "clique" audível no MAX98357A.
+  const size_t ramp = min((size_t)(SAMPLE_RATE / 200), total / 2);
+  float phase = 0.0f;
+
+  for (size_t i = 0; i < total; i++) {
+    float env = 1.0f;
+    if (ramp > 0) {
+      if (i < ramp) env = (float)i / ramp;
+      else if (i >= total - ramp) env = (float)(total - i) / ramp;
+    }
+    out[i] = (int16_t)(sinf(phase) * 8000.0f * env);
+    phase += step;
+    if (phase > 2.0f * (float)M_PI) phase -= 2.0f * (float)M_PI;
+  }
+  return total;
+}
+
 } // namespace AudioPlayback
