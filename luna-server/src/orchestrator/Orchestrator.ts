@@ -318,6 +318,14 @@ export class Orchestrator {
         'Erro no provider de áudio',
       );
     });
+
+    // Sessão morreu de ociosidade (ver GeminiLiveAdapter.handleGoAway): descarta
+    // o provider cacheado. O satélite continua conectado (senão seria
+    // `unregisterClient`), então sem isto a sala ficaria presa com um provider
+    // morto até o próximo reboot/queda do dispositivo.
+    provider.onSessionEnded(() => {
+      this.roomManager.evictRoom(roomId);
+    });
   }
 
   private getTtfabTracker(roomId: string): TtfabTracker {

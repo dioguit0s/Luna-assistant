@@ -15,17 +15,32 @@ type LiveSession = Awaited<
   ReturnType<InstanceType<typeof GoogleGenAI>['live']['connect']>
 >;
 
+// Sala fica aberta indefinidamente enquanto o satélite não desconectar (wake
+// word local: ele só pinga, nunca cai sozinho) — renovar a sessão a cada
+// `goAway` incondicionalmente manteria uma conexão Live paga rodando 24/7
+// mesmo sem ninguém falando. Só vale renovar (e pagar o custo de manter a
+// sessão viva) se a conversa está de fato em andamento; caso contrário deixa
+// morrer e recria sob demanda na próxima fala, como no primeiro `connect`.
+const ACTIVE_CONVERSATION_WINDOW_MS = 60_000;
+
 export class GeminiLiveAdapter implements IAudioProvider {
+  private ai: GoogleGenAI | null = null;
   private session: LiveSession | null = null;
+  private sessionConfig: ProviderSessionConfig | null = null;
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
   private toolCallCb: ((call: ToolCall) => void) | null = null;
   private userSpeechCb: (() => void) | null = null;
+  private sessionEndedCb: (() => void) | null = null;
+  private lastAudioAt: number | null = null;
   private userTranscript = '';
   private assistantTranscript = '';
   private activityOpen = false;
   private roomId = '';
+  private disposed = false;
+  /** Evita reconexões concorrentes: um `goAway` chegando durante outra reconexão em voo é no-op. */
+  private reconnecting = false;
   /** callId → nome da função. O SDK exige o `name` de volta no `functionResponse`. */
   private readonly pendingToolCalls = new Map<string, string>();
 
@@ -63,11 +78,22 @@ export class GeminiLiveAdapter implements IAudioProvider {
   }
 
   async connect(sessionConfig: ProviderSessionConfig): Promise<void> {
-    const ai = new GoogleGenAI({ apiKey: this.config.geminiApiKey });
-    const automaticActivityDetection = this.buildActivityDetection();
+    this.ai = new GoogleGenAI({ apiKey: this.config.geminiApiKey });
     this.roomId = sessionConfig.roomId;
+    this.sessionConfig = sessionConfig;
 
-    this.session = await ai.live.connect({
+    this.session = await this.openLiveSession(sessionConfig);
+
+    getLogger().info(
+      { room_id: sessionConfig.roomId, provider: 'gemini' },
+      'Sessão Gemini Live conectada',
+    );
+  }
+
+  private async openLiveSession(sessionConfig: ProviderSessionConfig): Promise<LiveSession> {
+    const automaticActivityDetection = this.buildActivityDetection();
+
+    return this.ai!.live.connect({
       model: this.config.geminiLiveModel,
       config: {
         responseModalities: [Modality.AUDIO],
@@ -99,17 +125,70 @@ export class GeminiLiveAdapter implements IAudioProvider {
         },
       },
     });
+  }
+
+  /**
+   * O Live API fecha a sessão sozinho ao fim de um limite de duração e avisa
+   * com `goAway` uns segundos antes. Sem isto, a sala fica com um provider
+   * "vivo" na cara do RoomManager apontando pra uma sessão que o Gemini já
+   * derrubou do lado dele — todo áudio depois disso cai num buraco negro, sem
+   * erro nenhum, até o satélite desconectar.
+   *
+   * Só renova por baixo do pano se há conversa ativa (fala recente): é o caso
+   * em que interromper seria perceptível. Ociosa, deixa morrer — recriar sob
+   * demanda na próxima fala evita manter uma sessão Live (custo/cota de API)
+   * rodando pra sempre enquanto o satélite só fica pingando em silêncio.
+   */
+  private handleGoAway(): void {
+    if (this.disposed) return;
+
+    const idleMs =
+      this.lastAudioAt === null ? Number.POSITIVE_INFINITY : Date.now() - this.lastAudioAt;
+
+    if (idleMs < ACTIVE_CONVERSATION_WINDOW_MS) {
+      void this.renewSession();
+      return;
+    }
 
     getLogger().info(
-      { room_id: sessionConfig.roomId, provider: 'gemini' },
-      'Sessão Gemini Live conectada',
+      { event: 'gemini_session_expired', room_id: this.roomId, idle_ms: idleMs },
+      'Sessão Gemini Live ociosa: deixando expirar em vez de renovar',
     );
+    this.session?.close();
+    this.session = null;
+    this.sessionEndedCb?.();
+  }
+
+  private async renewSession(): Promise<void> {
+    if (this.reconnecting || this.disposed || !this.sessionConfig || !this.ai) return;
+    this.reconnecting = true;
+
+    const oldSession = this.session;
+    try {
+      const newSession = await this.openLiveSession(this.sessionConfig);
+      this.session = newSession;
+      oldSession?.close();
+      getLogger().info(
+        { event: 'gemini_session_renewed', room_id: this.roomId },
+        'Sessão Gemini Live renovada antes do fechamento por goAway',
+      );
+    } catch (err) {
+      getLogger().error(
+        { event: 'gemini_session_renew_failed', room_id: this.roomId, err },
+        'Falha ao renovar sessão Gemini Live antes do goAway',
+      );
+      this.errorCb?.(err instanceof Error ? err : new Error('Falha ao renovar sessão Gemini Live'));
+    } finally {
+      this.reconnecting = false;
+    }
   }
 
   sendAudio(pcm16kHz: Buffer): void {
     if (!this.session) {
       throw new Error('GeminiLiveAdapter não conectado');
     }
+
+    this.lastAudioAt = Date.now();
 
     // Sem VAD do servidor, o turno só abre se marcarmos o início explicitamente.
     if (this.config.geminiManualActivity && !this.activityOpen) {
@@ -149,6 +228,10 @@ export class GeminiLiveAdapter implements IAudioProvider {
     this.errorCb = callback;
   }
 
+  onSessionEnded(callback: () => void): void {
+    this.sessionEndedCb = callback;
+  }
+
   onToolCall(callback: (call: ToolCall) => void): void {
     this.toolCallCb = callback;
   }
@@ -180,6 +263,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
   }
 
   async disconnect(): Promise<void> {
+    this.disposed = true;
     this.pendingToolCalls.clear();
     if (this.session) {
       this.session.close();
@@ -218,6 +302,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
         { event: 'gemini_go_away', room_id: this.roomId, time_left: message.goAway.timeLeft },
         `Gemini avisou goAway (tempo restante: ${message.goAway.timeLeft ?? 'desconhecido'})`,
       );
+      this.handleGoAway();
     }
     if (message.serverContent?.interrupted) {
       getLogger().warn(

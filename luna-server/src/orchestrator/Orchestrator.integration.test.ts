@@ -99,6 +99,8 @@ class FakeAudioProvider implements IAudioProvider {
   }
   onError(_callback: (err: Error) => void): void {}
 
+  onSessionEnded(_callback: () => void): void {}
+
   emitUserSpeech(): void {
     this.userSpeechCb?.();
   }

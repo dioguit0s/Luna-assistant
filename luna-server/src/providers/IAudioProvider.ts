@@ -19,6 +19,14 @@ export interface IAudioProvider {
   onUserSpeech(callback: () => void): void;
   onTurnComplete(callback: (turn: CompletedTurn) => void): void;
   onError(callback: (err: Error) => void): void;
+  /**
+   * A sessão do provider encerrou sozinha (limite de duração do lado do
+   * backend) e, por não haver conversa ativa, não foi renovada — manter uma
+   * sessão em espera indefinidamente custaria cota/API à toa. Quem consome
+   * este port deve descartar o provider cacheado: a próxima fala cria um novo
+   * do zero, pelo mesmo caminho de `connect` já testado.
+   */
+  onSessionEnded(callback: () => void): void;
   /** Notifica que a IA decidiu invocar uma das tools declaradas em `connect`. */
   onToolCall(callback: (call: ToolCall) => void): void;
   /**

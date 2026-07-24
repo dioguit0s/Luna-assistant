@@ -27,11 +27,13 @@ interface TurnDetectionConfig {
 export class OpenAIRealtimeAdapter implements IAudioProvider {
   private ws: WebSocket | null = null;
   private connected = false;
+  private disposed = false;
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
   private toolCallCb: ((call: ToolCall) => void) | null = null;
   private userSpeechCb: (() => void) | null = null;
+  private sessionEndedCb: (() => void) | null = null;
   private userTranscript = '';
   private assistantTranscript = '';
   private roomId = '';
@@ -117,6 +119,12 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
 
       this.ws.on('close', () => {
         this.connected = false;
+        // A Realtime API também tem limite de duração de sessão. Sem isto, a
+        // sala ficava presa com um provider morto até o satélite desconectar
+        // (mesma lacuna corrigida no GeminiLiveAdapter) — aqui não há renovação
+        // proativa por `goAway`, então todo fechamento orgânico precisa avisar
+        // o RoomManager pra recriar sob demanda na próxima fala.
+        if (!this.disposed) this.sessionEndedCb?.();
       });
     });
   }
@@ -159,6 +167,10 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
     this.toolCallCb = callback;
   }
 
+  onSessionEnded(callback: () => void): void {
+    this.sessionEndedCb = callback;
+  }
+
   sendToolResult(callId: string, result: unknown): void {
     // callId desconhecido é bug de correlação, mas lançar aqui derrubaria o
     // turno inteiro do usuário — mesma política do Gemini.
@@ -193,6 +205,7 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
   }
 
   async disconnect(): Promise<void> {
+    this.disposed = true;
     this.pendingToolCalls.clear();
     if (this.ws) {
       this.ws.close();
