@@ -23,6 +23,10 @@ describe('AudioProviderFactory', () => {
     geminiThinkingBudget: 0,
     geminiDebugMessages: false,
     userSilenceCutoffMs: 500,
+    openaiVadType: 'server_vad',
+    openaiVadSilenceMs: null,
+    openaiDebugMessages: false,
+    openaiVoice: 'marin',
   };
 
   it('instancia GeminiLiveAdapter', () => {

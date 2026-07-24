@@ -40,6 +40,16 @@ npm test
 | `LOG_LEVEL` | Nível de log pino (default: info) |
 | `HA_URL` | URL do Home Assistant (Épico 3, ex: `http://192.168.0.10:8123`) |
 | `HA_TOKEN` | Long-Lived Access Token do Home Assistant (Épico 3) |
+| `OPENAI_REALTIME_MODEL` | Modelo Realtime (default: `gpt-realtime`) |
+| `OPENAI_VAD_TYPE` | `server_vad` (corta por silêncio, default) ou `semantic_vad` (corta pelo conteúdo) |
+| `OPENAI_VAD_SILENCE_MS` | Janela de silêncio do `server_vad` (default: 500) |
+| `OPENAI_VOICE` | Voz da resposta (default: `marin`) |
+| `OPENAI_DEBUG_MESSAGES` | Loga mensagens cruas da Realtime, com transcrição da fala |
+
+O adapter da OpenAI fala a API Realtime **GA** (`session.type: 'realtime'`), não a
+beta — `gpt-4o-realtime-preview-*` não serve. Para comparar latência entre os dois
+providers de forma justa, mantenha `OPENAI_VAD_SILENCE_MS` igual ao
+`GEMINI_VAD_SILENCE_MS`: a janela de endpointing entra inteira no `ttfab`.
 
 O `HA_TOKEN` é gerado na UI do Home Assistant: perfil do usuário → aba
 *Segurança* → **Long-Lived Access Tokens** → *Criar token*. O valor só é exibido

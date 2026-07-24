@@ -35,6 +35,10 @@ const baseConfig: AppConfig = {
   geminiThinkingBudget: 0,
   geminiDebugMessages: false,
   userSilenceCutoffMs: 500,
+  openaiVadType: 'server_vad',
+  openaiVadSilenceMs: null,
+  openaiDebugMessages: false,
+  openaiVoice: 'marin',
 };
 
 const ROOM_ID = 'sala_de_estar';

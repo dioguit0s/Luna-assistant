@@ -30,6 +30,10 @@ const baseConfig: AppConfig = {
   geminiThinkingBudget: 0,
   geminiDebugMessages: false,
   userSilenceCutoffMs: 500,
+  openaiVadType: 'server_vad',
+  openaiVadSilenceMs: null,
+  openaiDebugMessages: false,
+  openaiVoice: 'marin',
 };
 
 /** Mock de `fetch` que devolve o corpo de `/api/template` que o teste quiser. */

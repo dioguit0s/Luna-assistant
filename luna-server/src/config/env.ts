@@ -40,9 +40,29 @@ export interface AppConfig {
    * processando), evitando que o usuário fale por cima de um turno em voo.
    */
   userSilenceCutoffMs: number;
+  /**
+   * `server_vad` corta o turno por silêncio (a janela entra no TTFAB, como o
+   * VAD do Gemini); `semantic_vad` decide pelo conteúdo e ignora
+   * `openaiVadSilenceMs`.
+   */
+  openaiVadType: OpenAIVadType;
+  openaiVadSilenceMs: number | null;
+  /** Loga mensagens cruas da Realtime, incluindo transcrições da fala. */
+  openaiDebugMessages: boolean;
+  openaiVoice: string;
 }
 
 export type EndSensitivityName = 'HIGH' | 'LOW';
+
+export type OpenAIVadType = 'server_vad' | 'semantic_vad';
+
+function parseVadType(value: string | undefined): OpenAIVadType | null {
+  if (!value) return null;
+  if (value === 'server_vad' || value === 'semantic_vad') return value;
+  throw new Error(
+    `OPENAI_VAD_TYPE inválido: "${value}". Use "server_vad" ou "semantic_vad".`,
+  );
+}
 
 function parseEndSensitivity(value: string | undefined): EndSensitivityName | null {
   if (!value) return null;
@@ -105,8 +125,7 @@ export function loadConfig(): AppConfig {
     logLevel: process.env.LOG_LEVEL ?? 'info',
     geminiLiveModel:
       process.env.GEMINI_LIVE_MODEL ?? 'gemini-2.5-flash-native-audio-preview-12-2025',
-    openaiRealtimeModel:
-      process.env.OPENAI_REALTIME_MODEL ?? 'gpt-4o-realtime-preview-2024-12-17',
+    openaiRealtimeModel: process.env.OPENAI_REALTIME_MODEL ?? 'gpt-realtime',
     haUrl: process.env.HA_URL ?? '',
     haToken: process.env.HA_TOKEN ?? '',
     devicesConfigPath: process.env.DEVICES_CONFIG_PATH ?? 'config/devices.json',
@@ -130,6 +149,12 @@ export function loadConfig(): AppConfig {
     // um atraso fixo pequeno; no Gemini é essencial — sem ele, cortaria no
     // primeiro fragmento de transcrição, ainda no meio da frase.
     userSilenceCutoffMs: parseOptionalNumber('USER_SILENCE_CUTOFF_MS') ?? 500,
+    // Mesmo default do GEMINI_VAD_SILENCE_MS: os dois providers precisam do
+    // mesmo endpointing para a comparação de TTFAB significar alguma coisa.
+    openaiVadType: parseVadType(process.env.OPENAI_VAD_TYPE) ?? 'server_vad',
+    openaiVadSilenceMs: parseOptionalNumber('OPENAI_VAD_SILENCE_MS') ?? 500,
+    openaiDebugMessages: process.env.OPENAI_DEBUG_MESSAGES === 'true',
+    openaiVoice: process.env.OPENAI_VOICE ?? 'marin',
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {
