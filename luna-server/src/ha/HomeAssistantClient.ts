@@ -14,6 +14,16 @@ export interface HaServiceResult {
 const DEFAULT_TIMEOUT_MS = 3000;
 
 /**
+ * Atraso entre novas leituras de estado após um `callService` sem confirmação
+ * no corpo. Dispositivos reais (ESPHome via WiFi, Zigbee2mqtt, integrações na
+ * nuvem) levam um round-trip para propagar o novo estado ao HA — uma única
+ * leitura imediata (como era antes) corre contra esse atraso e declara falha
+ * num comando que, na verdade, funcionou. Soma ~1s, bem abaixo do timeout de
+ * áudio acima.
+ */
+const STATE_CONFIRM_RETRY_DELAYS_MS = [150, 350, 500];
+
+/**
  * Domínios que a Luna pode acionar. Sem essa allowlist, `automation.*`,
  * `update.*` e sensores entrariam no vocabulário da IA junto com as luzes.
  */
@@ -75,6 +85,8 @@ export class HomeAssistantClient {
     private readonly config: AppConfig,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    private readonly sleepImpl: (ms: number) => Promise<void> = (ms) =>
+      new Promise((resolve) => setTimeout(resolve, ms)),
   ) {}
 
   /**
@@ -156,9 +168,17 @@ export class HomeAssistantClient {
         return { success: true };
       }
 
-      const actualState = await this.getState(entityId);
+      let actualState = await this.getState(entityId);
       if (actualState === expectedState) {
         return { success: true };
+      }
+
+      for (const delayMs of STATE_CONFIRM_RETRY_DELAYS_MS) {
+        await this.sleepImpl(delayMs);
+        actualState = await this.getState(entityId);
+        if (actualState === expectedState) {
+          return { success: true };
+        }
       }
 
       getLogger().warn(

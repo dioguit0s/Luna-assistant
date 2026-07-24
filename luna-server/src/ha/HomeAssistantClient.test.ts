@@ -116,25 +116,47 @@ describe('HomeAssistantClient.callService', () => {
     assert.equal(calls[1]!.url, 'http://ha.local:8123/api/states/switch.luz_bancada');
   });
 
-  it('corpo 200 vazio e estado que não mudou: reporta falha (entidade inexistente/não respondeu)', async () => {
-    const { fetchImpl } = mockFetch((call) => {
+  it('corpo 200 vazio e estado que não mudou mesmo após novas tentativas: reporta falha (entidade inexistente/não respondeu)', async () => {
+    const { fetchImpl, calls } = mockFetch((call) => {
       if (call.url.includes('/api/services/')) return jsonResponse([]);
       return jsonResponse({ entity_id: 'switch.luz_bancada', state: 'off' });
     });
-    const client = new HomeAssistantClient(baseConfig, fetchImpl);
+    const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, async () => {});
 
     const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
 
     assert.equal(result.success, false);
     assert.match(result.error ?? '', /estado atual: off/);
+    // 1 POST + 1 leitura imediata + 3 novas tentativas = 5 chamadas.
+    assert.equal(calls.length, 5);
   });
 
-  it('corpo 200 vazio e leitura de estado falha: reporta falha em vez de sucesso cego', async () => {
+  it('corpo 200 vazio e estado que confirma só numa nova tentativa: reporta sucesso', async () => {
+    let stateReads = 0;
+    const { fetchImpl, calls } = mockFetch((call) => {
+      if (call.url.includes('/api/services/')) return jsonResponse([]);
+      stateReads += 1;
+      // Simula o round-trip real do dispositivo: só confirma na 3ª leitura.
+      return jsonResponse({
+        entity_id: 'switch.luz_bancada',
+        state: stateReads >= 3 ? 'on' : 'off',
+      });
+    });
+    const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, async () => {});
+
+    const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
+
+    assert.deepEqual(result, { success: true });
+    // 1 POST + 3 leituras de estado (a 3ª confirma).
+    assert.equal(calls.length, 4);
+  });
+
+  it('corpo 200 vazio e leitura de estado falha em todas as tentativas: reporta falha em vez de sucesso cego', async () => {
     const { fetchImpl } = mockFetch((call) => {
       if (call.url.includes('/api/services/')) return jsonResponse([]);
       return new Response('', { status: 404 });
     });
-    const client = new HomeAssistantClient(baseConfig, fetchImpl);
+    const client = new HomeAssistantClient(baseConfig, fetchImpl, undefined, async () => {});
 
     const result = await client.callService('switch', 'turn_on', 'switch.luz_bancada');
 
