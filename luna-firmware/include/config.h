@@ -113,9 +113,21 @@
 // O caso normal nem chega aqui: o servidor manda speaking_start e a FSM vai para
 // RESPONDING antes. Só vale como rede de segurança. WAKE_LISTEN_VOICE_PEAK deve
 // ficar ACIMA do ruído de fundo do mic (ver audio_peak no log em silêncio).
-#define WAKE_LISTEN_VOICE_PEAK 10000 // pico (0..32767) que conta como fala
-#define WAKE_LISTEN_SILENCE_MS 2500  // silêncio que fecha a janela
-#define WAKE_LISTEN_MAX_MS 12000     // teto absoluto da janela pós-wake
+//
+// 2026-07-25: 2500ms disparava ANTES do servidor numa pergunta longa — uma
+// pausa natural para pensar no meio da frase (pico < WAKE_LISTEN_VOICE_PEAK
+// por só um instante) já fechava a janela localmente, cortando a captura sem
+// o servidor nunca ter recebido a frase completa. Subido para 5000ms; o teto
+// absoluto subiu junto para acomodar perguntas genuinamente longas.
+//
+// 2026-07-25 (cont.): mesmo com 5000ms, log real mostrou "pico max=15468,
+// limiar=10000" — ou seja, o pico CRUZOU o limiar (provavelmente na própria
+// "Hey Luna", dita com mais ênfase) e depois nunca mais, porque a frase
+// seguinte é falada num tom mais casual/baixo. 10000 (~30% da escala) exigia
+// volume de wake word, não de fala contínua normal. Baixado para 3000.
+#define WAKE_LISTEN_VOICE_PEAK 3000  // pico (0..32767) que conta como fala
+#define WAKE_LISTEN_SILENCE_MS 5000  // silêncio que fecha a janela
+#define WAKE_LISTEN_MAX_MS 20000     // teto absoluto da janela pós-wake
 
 // Diagnóstico do domínio de features: loga pico de áudio, min/max/média das
 // features e a probabilidade crua máxima. Cutoff já calibrado e validado
@@ -130,6 +142,14 @@
 #define WAKE_DUMP_SLICES 300
 
 // --- Timings de rede / FSM ---
+// Rede de segurança análoga ao WAKE_LISTEN_MAX_MS: se o servidor mandar
+// speaking_start e nunca mandar speaking_end (turno que não fecha no provider,
+// conexão que morre sem close frame, resposta perdida), a FSM ficaria presa em
+// RESPONDING para sempre — mic mudo (TX suspenso) e wake word desligada
+// (shouldDetectWake() exige IDLE_LISTENING). Sem este teto só uma reautenticação
+// (onAuthOk chama StateMachine::reset()) recupera o satélite.
+#define RESPONDING_TIMEOUT_MS 20000
+
 #define AEC_RESUME_DELAY_MS 150    // silêncio após speaking_end antes de recapturar
 #define PING_INTERVAL_MS 10000     // keep-alive
 #define OFFLINE_WARN_MS 30000      // tempo offline antes do tom de aviso

@@ -12,6 +12,13 @@ static volatile uint32_t resumeAt = 0; // 0 = sem retorno agendado
 static volatile uint32_t activeSince = 0;
 static volatile uint32_t lastVoiceMs = 0;
 
+// Maior pico visto desde o wake word — só para calibrar WAKE_LISTEN_VOICE_PEAK
+// pelo log (ver mensagem em "janela de escuta fechou"). Não afeta a FSM.
+static volatile int16_t maxPeakSinceWake = 0;
+
+// Início do RESPONDING atual, para a rede de segurança do RESPONDING_TIMEOUT_MS.
+static volatile uint32_t respondingSince = 0;
+
 // Se o detector não subir (modelo corrompido, memória insuficiente), o satélite
 // não pode ficar mudo para sempre: sem wake word disponível a FSM volta ao
 // open-mic, que é degradado mas utilizável, e o motivo fica no log.
@@ -47,14 +54,22 @@ void update() {
     const bool silencio = now - lastVoiceMs > WAKE_LISTEN_SILENCE_MS;
     const bool estourou = now - activeSince > WAKE_LISTEN_MAX_MS;
     if (silencio || estourou) {
-      Serial.printf("[luna] janela de escuta fechou (%s) — aguardando wake word\n",
-                    estourou ? "teto" : "silêncio");
+      Serial.printf(
+          "[luna] janela de escuta fechou (%s) — aguardando wake word (pico max=%d, limiar=%d)\n",
+          estourou ? "teto" : "silêncio", maxPeakSinceWake, WAKE_LISTEN_VOICE_PEAK);
       enter(State::IDLE_LISTENING);
     }
     break;
   }
   case State::RESPONDING:
     if (resumeAt != 0 && (int32_t)(millis() - resumeAt) >= 0) {
+      resumeAt = 0;
+      enter(State::IDLE_LISTENING);
+    } else if (millis() - respondingSince > RESPONDING_TIMEOUT_MS) {
+      // O servidor nunca mandou speaking_end (turno perdido/travado no
+      // provider). Sem isto o satélite fica mudo e surdo (wake word
+      // desligada) até alguém religar o dispositivo.
+      Serial.println("[luna] RESPONDING sem speaking_end — recuperando para IDLE_LISTENING");
       resumeAt = 0;
       enter(State::IDLE_LISTENING);
     }
@@ -77,17 +92,21 @@ void onWakeWord() {
   resumeAt = 0;
   activeSince = millis();
   lastVoiceMs = activeSince; // começa a contar silêncio a partir do wake
+  maxPeakSinceWake = 0;
   enter(State::ACTIVE_STREAMING);
 }
 
 void noteCapturePeak(int16_t peak) {
-  if (state == State::ACTIVE_STREAMING && peak >= WAKE_LISTEN_VOICE_PEAK) {
+  if (state != State::ACTIVE_STREAMING) return;
+  if (peak > maxPeakSinceWake) maxPeakSinceWake = peak;
+  if (peak >= WAKE_LISTEN_VOICE_PEAK) {
     lastVoiceMs = millis();
   }
 }
 
 void onSpeakingStart() {
   resumeAt = 0;
+  respondingSince = millis();
   enter(State::RESPONDING);
 }
 
