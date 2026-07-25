@@ -46,15 +46,24 @@
 #define WAKE_WORD_ENABLED 1 // 0 = volta ao open-mic (transmite sempre)
 
 // Frase da wake word gravada no header src/wake/models/hey_luna_model_data.h.
-// PROVISÓRIO: okay_nabu (modelo oficial, validado no microfone real — dispara
-// em 0.95-1.00). Os hey_luna_v* da comunidade são fracos e não disparam neste
-// hardware; ver models/README.md e docs/adr/003. TODO: treinar "Ei Luna" pt-BR.
-#define WAKE_PHRASE "Okay Nabu"
+// EM TESTE: hey_luna_trained (treinado localmente, ver wake-training/, mixednet
+// idêntico ao okay_nabu). Treino convergiu rápido (99.9%+ de acurácia desde o
+// passo 500), mas o AUC no split de teste ficou baixo (0.536) — sinal de
+// overfitting na única voz TTS usada para gerar as 2000 amostras positivas.
+// As métricas por corte (tflite_streaming_roc.txt) pareciam boas isoladamente,
+// mas isso não substitui o teste no microfone real. Se não disparar bem com
+// voz humana, o fallback validado é "Okay Nabu" — ver models/README.md e
+// docs/adr/003. Reverter: WAKE_PHRASE "Okay Nabu" + regerar o header a partir
+// de models/okay_nabu.tflite.
+#define WAKE_PHRASE "Hey Luna"
 
 // Constantes do manifesto do modelo em uso — trocar o modelo exige revisar.
-// O cutoff do manifesto do okay_nabu é 0.97; 0.90 dá margem. Afinar pelo
-// raw_max do log de debug no microfone real.
-#define WAKE_PROB_CUTOFF 0.90f    // média da janela deslizante que dispara
+// Cutoff escolhido a partir de trained_models/wakeword/.../tflite_streaming_roc.txt:
+// 0.98 => frr=0.05 faph=0.94 (~1 falso-aceite/hora); 0.94 => frr=0.04 faph=2.0.
+// Começando em 0.97 — ainda precisa calibrar pelo raw_max no microfone real
+// (WAKE_DEBUG), igual foi feito para o okay_nabu (manifesto dizia 0.97, o
+// hardware real pediu 0.90).
+#define WAKE_PROB_CUTOFF 0.97f    // média da janela deslizante que dispara
 #define WAKE_SLIDING_WINDOW 5     // nº de probabilidades na média móvel
 #define WAKE_FEATURE_STEP_MS 10   // stride entre features (160 amostras @16k)
 // Manifesto diz 30000, mas na prática o AllocateTensors usa ~30604 — com folga
@@ -109,9 +118,10 @@
 #define WAKE_LISTEN_MAX_MS 12000     // teto absoluto da janela pós-wake
 
 // Diagnóstico do domínio de features: loga pico de áudio, min/max/média das
-// features e a probabilidade crua máxima. Só para depurar o "p sempre 0" —
-// desligar depois. Ver WakeWord::debugSnapshot().
-#define WAKE_DEBUG 1
+// features e a probabilidade crua máxima. Cutoff já calibrado e validado
+// (hey_luna_trained, 0.97, zero falso-positivo em ~30min de TV/conversa) —
+// religar só se precisar recalibrar (troca de modelo, queixa de sensibilidade).
+#define WAKE_DEBUG 0
 
 // Despeja as features via Serial (base64) a cada WAKE_STATS_INTERVAL_MS, para
 // rodar o modelo isolado no desktop. Só para depurar o "raw_max sempre 0" com

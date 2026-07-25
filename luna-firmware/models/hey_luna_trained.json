@@ -1,0 +1,29 @@
+{
+  "type": "micro",
+  "wake_word": "Hey Luna",
+  "author": "treino local (microWakeWord, wake-training/)",
+  "website": "https://github.com/kahrendt/microWakeWord",
+  "model": "hey_luna_trained.tflite",
+  "trained_languages": ["en"],
+  "version": 2,
+  "micro": {
+    "probability_cutoff": 0.97,
+    "feature_step_size": 10,
+    "sliding_window_size": 5,
+    "tensor_arena_size": 34000,
+    "minimum_esphome_version": "2024.7.0"
+  },
+  "_notes": {
+    "architecture": "mixednet, idêntico ao okay_nabu (pointwise_filters 64,64,64,64; stride 3)",
+    "training_steps_efetivos": "~4500 (parado manualmente após convergência antecipada; ver wake-training/README.md)",
+    "test_auc": 0.53647,
+    "roc_cutoffs": {
+      "0.98": "frr=0.0500 faph=0.937",
+      "0.96": "frr=0.0450 faph=1.125",
+      "0.95": "frr=0.0400 faph=1.312",
+      "0.94": "frr=0.0400 faph=1.687"
+    },
+    "risco_conhecido": "AUC baixo no split de teste sugere overfitting na única voz TTS usada para gerar as 2000 amostras positivas. Validar com voz humana real antes de confiar nas métricas acima.",
+    "fallback": "okay_nabu.tflite — validado no hardware real, ver docs/adr/003-wake-word-engine.md"
+  }
+}

@@ -1,0 +1,6 @@
+# Dados e saídas do treino (grandes) — só os scripts são versionados
+work/
+*.tar
+*.zip
+*.pt
+__pycache__/

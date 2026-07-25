@@ -12,16 +12,31 @@ trocar qualquer `.tflite`:
 python tools/tflite_to_header.py models/hey_luna_v3.tflite src/wake/models/hey_luna_model_data.h g_hey_luna_model_data
 ```
 
-## Estado atual: `okay_nabu` provisório
+## Estado atual: `hey_luna_trained` em validação
 
-O header compilado (`../src/wake/models/hey_luna_model_data.h`) contém hoje o **`okay_nabu`**,
-não um modelo "Luna". Motivo: os três `hey_luna*` da comunidade são fracos e **não disparam neste
-hardware** (INMP441), enquanto o `okay_nabu` — modelo oficial do microWakeWord, fortemente
-aumentado no treino — dispara com folga (0.95-1.00) no mesmo microfone. Isso provou que o hardware
-está bom e que o problema era só a qualidade do modelo. Detalhes em [ADR 003](../../docs/adr/003-wake-word-engine.md).
+O header compilado (`../src/wake/models/hey_luna_model_data.h`) contém hoje o
+**`hey_luna_trained.tflite`** — treinado localmente (`../../wake-training/`, ver o README lá) com
+o pipeline do microWakeWord, mesma arquitetura do `okay_nabu` (mixednet, stride 3).
 
-`okay_nabu` fica como wake word **provisória** ("Okay Nabu") até um modelo "Ei Luna"/"Hey Luna"
-próprio, treinado com a mesma qualidade, ser gerado — ver [TRAINING.md](TRAINING.md).
+⚠️ **Risco conhecido**: o treino convergiu rápido (99,9%+ de acurácia desde o passo 500), mas o
+AUC no split de teste ficou baixo (**0,536** — perto de aleatório). Isso é sinal de overfitting:
+as 2000 amostras positivas vieram todas da mesma voz sintética (Piper `en_US-libritts_r-medium`),
+então o modelo pode ter decorado essa voz específica em vez de generalizar "hey luna". As métricas
+por corte de decisão (`tflite_streaming_roc.txt`, ver `hey_luna_trained.json`) pareciam boas
+isoladamente (cutoff 0,98 → 5% de rejeição, ~1 falso-aceite/hora), mas isso não substitui o teste
+com voz humana real no microfone. **Se não disparar bem, o fallback validado é o `okay_nabu`.**
+
+Histórico: os três `hey_luna*` da comunidade (`hey_luna.tflite`, `_v2`, `_v3`) são fracos e não
+disparam neste hardware (INMP441) — só o `okay_nabu` (modelo oficial) provou que o hardware está
+bom. Detalhes em [ADR 003](../../docs/adr/003-wake-word-engine.md) e [TRAINING.md](TRAINING.md).
+
+### Reverter para `okay_nabu` se o treinado não funcionar bem
+
+```bash
+python tools/tflite_to_header.py models/okay_nabu.tflite src/wake/models/hey_luna_model_data.h g_hey_luna_model_data
+```
+
+E em `include/config.h`: `WAKE_PHRASE "Okay Nabu"`, `WAKE_PROB_CUTOFF 0.90f`.
 
 | Arquivo | SHA-256 | Papel |
 |---|---|---|
