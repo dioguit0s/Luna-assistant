@@ -42,3 +42,10 @@ luna-firmware-actuator/.esphome/
 # Infra / Docker (dados persistentes dos containers)
 infra/homeassistant/config/
 infra/redis/data/
+
+# Electron (luna-desktop) — saídas de empacotamento.
+# Atenção no marco 5: o `build/` acima é ignorado, e é justamente o diretório de
+# entrada padrão do electron-builder (buildResources) — apontar para assets/.
+luna-desktop/out/
+luna-desktop/release/
+luna-desktop/dist-electron/

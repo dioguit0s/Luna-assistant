@@ -1,0 +1,24 @@
+{
+  "name": "luna-desktop",
+  "version": "0.1.0",
+  "description": "Satélite virtual da Luna — app de bandeja para Windows",
+  "type": "module",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "icons": "node scripts/generate-icons.mjs",
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "dev": "tsc && electron .",
+    "start": "electron .",
+    "test": "node --import tsx --test src/main/state.test.ts src/main/menu.test.ts"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "electron": "^43.4.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
