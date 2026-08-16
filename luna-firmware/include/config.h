@@ -133,7 +133,7 @@
 // features e a probabilidade crua máxima. Cutoff já calibrado e validado
 // (hey_luna_trained, 0.97, zero falso-positivo em ~30min de TV/conversa) —
 // religar só se precisar recalibrar (troca de modelo, queixa de sensibilidade).
-#define WAKE_DEBUG 0
+#define WAKE_DEBUG 1
 
 // Despeja as features via Serial (base64) a cada WAKE_STATS_INTERVAL_MS, para
 // rodar o modelo isolado no desktop. Só para depurar o "raw_max sempre 0" com
