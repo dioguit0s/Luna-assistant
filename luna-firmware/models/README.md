@@ -100,3 +100,10 @@ Roda inteiramente sobre kernels `tflite::tflm_signal` (`WINDOW`, `FFT_AUTO_SCALE
 `ENERGY`, `FILTER_BANK`, `FILTER_BANK_SQUARE_ROOT`, `FILTER_BANK_SPECTRAL_SUBTRACTION`, `PCAN`,
 `FILTER_BANK_LOG`) que **já vêm compilados** na `libespressif__esp-tflite-micro.a` do toolchain
 pioarduino — por isso o wake word não adiciona nenhuma dependência ao `platformio.ini`.
+
+**Fora do tflite-micro este `.tflite` não carrega** (runtimes normais como
+`tflite-runtime`/`ai-edge-litert`/`tensorflow` não têm esses kernels
+`tflm_signal`). O equivalente para o `luna-desktop` é `pymicro-features`
+(mesmo micro frontend em C++, wheel Python standalone) — ver
+[`luna-desktop/wakeword-sidecar/README.md`](../../luna-desktop/wakeword-sidecar/README.md)
+e [`docs/adr/004-wake-word-no-desktop.md`](../../docs/adr/004-wake-word-no-desktop.md).

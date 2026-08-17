@@ -41,3 +41,9 @@ A frase é **"Hey Luna"**, não "Luna": palavra única e curta de duas sílabas 
 - **ESP-SR com `wn9_hiesp` ("Hi ESP")**: funcionaria hoje, sem custo, mas mudaria o nome da assistente e ainda esbarraria na disputa pelo I2S0.
 - **Pagar um modelo `wn9` "Luna"** (~US$ 1.000 ou cotação Espressif): resolveria a palavra, mas não o problema do wrapper `ESP_SR` sobre o I2S, e não se justifica antes de o produto estar validado.
 - **AFE do ESP-SR alimentado manualmente** (`esp_afe_sr_iface`, sem o wrapper Arduino): daria NS/AGC/AEC de brinde e resolveria o I2S, mas custa ~740 KB de PSRAM e ~18% de CPU, e continua sem modelo para "Luna". Vale reconsiderar como fonte de AEC se o eco voltar a incomodar — é ortogonal a esta decisão.
+
+## Nota — extensão para o `luna-desktop`
+
+O satélite virtual (`luna-desktop`) reusa os mesmos modelos `.tflite` decididos
+aqui, mas não pode carregar o preprocessador de features do mesmo jeito (sem
+tflite-micro fora do firmware) — ver [ADR 004](004-wake-word-no-desktop.md).

@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>Luna Desktop — captura</title>
+  </head>
+  <body>
+    <!--
+      Só visível com LUNA_DEBUG_WINDOW=1 (ver window.ts). Em produção esta
+      janela nunca aparece — existe só para dar acesso a getUserMedia,
+      AudioWorklet e AudioContext ao processo principal via IPC.
+    -->
+    <p id="status">Iniciando captura…</p>
+    <script src="./renderer.js"></script>
+  </body>
+</html>
