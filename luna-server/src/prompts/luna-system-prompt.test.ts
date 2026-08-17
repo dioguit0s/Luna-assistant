@@ -107,7 +107,7 @@ describe('buildLunaSystemPrompt', () => {
     assert.match(prompt, /Nunca narre o que você vai fazer/);
   });
 
-  it('orienta fala natural para aparelho desconhecido e casa fora do ar', () => {
+  it('orienta fala precisa para aparelho desconhecido e casa fora do ar', () => {
     const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
     assert.match(prompt, /Aparelho que não existe ou não está neste cômodo/);
     assert.match(prompt, /A casa não respondeu/);
@@ -117,7 +117,7 @@ describe('buildLunaSystemPrompt', () => {
   it('inclui os exemplos few-shot de estilo', () => {
     const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
     assert.match(prompt, /# Exemplos de estilo/);
-    assert.match(prompt, /Luna: Não peguei direito/);
+    assert.match(prompt, /Luna: Não captei/);
   });
 
   it('não vaza marcação markdown nos exemplos de fala da Luna', () => {
