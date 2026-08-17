@@ -10,7 +10,8 @@
     "watch": "tsc --watch",
     "dev": "tsc && node scripts/copy-renderer.mjs && electron .",
     "start": "electron .",
-    "test": "node --import tsx --test src/main/state.test.ts src/main/menu.test.ts src/main/session.test.ts src/main/ws/protocol.test.ts src/shared/pcm.test.ts"
+    "test": "node --import tsx --test src/main/state.test.ts src/main/menu.test.ts src/main/session.test.ts src/main/mic-dump.test.ts src/main/ws/protocol.test.ts src/shared/pcm.test.ts src/shared/wav.test.ts",
+    "test:wakeword": "wakeword-sidecar\\.venv\\Scripts\\python.exe -m unittest discover -s wakeword-sidecar -t wakeword-sidecar -p \"*_test.py\""
   },
   "engines": {
     "node": ">=20.0.0"

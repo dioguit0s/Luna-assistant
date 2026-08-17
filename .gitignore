@@ -49,3 +49,17 @@ infra/redis/data/
 luna-desktop/out/
 luna-desktop/release/
 luna-desktop/dist-electron/
+
+# Sidecar de wake word (luna-desktop/wakeword-sidecar) — venv Python e cache.
+luna-desktop/wakeword-sidecar/.venv/
+__pycache__/
+*.pyc
+
+# Gravações longas de calibração do wake word (TV/conversa de fundo) — só as
+# fixtures curtas (okay-nabu.wav, hey-luna.wav) são commitadas.
+luna-desktop/wakeword-sidecar/fixtures/*-longa*.wav
+luna-desktop/wakeword-sidecar/fixtures/background-*.wav
+
+# Dump de microfone (LUNA_DUMP_MIC) — pode conter áudio da casa do usuário;
+# nunca commitar por acidente se gerado dentro do repo.
+luna-desktop/mic-dump-*.wav

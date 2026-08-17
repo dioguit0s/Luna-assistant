@@ -1,7 +1,7 @@
 # Luna Desktop — plano de implementação
 
-**Status:** Em andamento — marco 2 de 5 concluído (round-trip de áudio sem wake word)
-**Data:** 2026-08-16
+**Status:** Em andamento — marco 3 de 5 concluído (sidecar de wake word isolado, validado com voz real)
+**Data:** 2026-08-17
 
 ## Objetivo
 
@@ -28,11 +28,18 @@ Vantagem: zero addon nativo pra áudio, funciona com o Chromium embarcado do Ele
 
 ### 2. Wake word: sidecar Python, não binding TFLite em Node
 
-O contrato dos modelos (`.tflite` do preprocessador + do "Hey Luna") já está resolvido e documentado — ver [`luna-firmware/models/README.md`](../luna-firmware/models/README.md) e [`docs/adr/003-wake-word-engine.md`](adr/003-wake-word-engine.md): preprocessador `[1,480]` int16 → `[40]` int8, modelo wake `[1,2,40]` int8 → `[1,1]` uint8 (`prob = raw/255`), stride lido do tensor. Bindings TFLite pra Node são escassos/não mantidos no Windows; reimplementar o preprocessamento (mel filterbank, PCAN etc.) em JS arrisca sutilmente divergir do que já foi validado no hardware real.
+O contrato dos modelos (`.tflite` do preprocessador + do "Hey Luna") já está resolvido e documentado — ver [`luna-firmware/models/README.md`](../luna-firmware/models/README.md) e [`docs/adr/003-wake-word-engine.md`](adr/003-wake-word-engine.md): preprocessador `[1,480]` int16 → `[40]` int8, modelo wake `[1,stride,40]` int8 → `[1,1]` uint8 (`prob = raw/255`), stride lido do tensor (**3** para `hey_luna_trained`/`okay_nabu`, os modelos em uso; 2 para os `hey_luna` comunitários). Bindings TFLite pra Node são escassos/não mantidos no Windows; reimplementar o preprocessamento (mel filterbank, PCAN etc.) em JS arrisca sutilmente divergir do que já foi validado no hardware real.
 
-Em vez disso: um processo Python sidecar (mesmo ambiente já validado em [`wake-training/`](../wake-training) — `tflite-runtime` ou `tensorflow`, tirado do `Dockerfile` de lá) que carrega os `.tflite` vendorizados de `luna-firmware/models/` e replica a lógica de janela/stride do `WakeWord.cpp` do firmware. O processo principal do Electron sobe esse sidecar (`child_process.spawn`), manda frames PCM16 16kHz cru pelo stdin, e lê eventos de wake (linha JSON) pelo stdout. Reaproveita o pipeline já comprovado em vez de reescrever a inferência.
+Em vez disso: um processo Python sidecar (`luna-desktop/wakeword-sidecar/`) que carrega o `.tflite` do modelo wake e replica a lógica de janela/stride/refratário do `WakeWord.cpp` do firmware. O processo principal do Electron sobe esse sidecar (`child_process.spawn`), manda frames PCM16 16kHz cru pelo stdin, e lê eventos de wake (linha JSON) pelo stdout.
 
-Empacotamento do Python: para v1, exigir um Python local (documentar `requirements.txt` derivado do `wake-training/Dockerfile`); empacotar como binário standalone (PyInstaller) fica como follow-up se a fricção de instalação incomodar.
+**O plano original desta seção estava errado em dois pontos, corrigidos no marco 3 (ver [ADR 004](adr/004-wake-word-no-desktop.md)):**
+
+- **As dependências não vêm do `wake-training/Dockerfile`.** `tflite-runtime`, `tensorflow` e `tflite-micro` não têm wheel para Windows + Python 3.14 (verificado em 2026-08-17) — o ambiente do `wake-training/` é Linux/Python 3.11 e continua sendo só o ambiente de *treino*. O sidecar tem seu próprio `requirements.txt`: [`ai-edge-litert`](https://pypi.org/project/ai-edge-litert/) (sucessor mantido do `tflite-runtime`, com wheel para Windows/py3.14) carrega o modelo wake.
+- **O preprocessador `.tflite` não é carregável fora do tflite-micro.** `audio_preprocessor_int8.tflite` roda em kernels `tflite::tflm_signal` (`SignalWindow`, `SignalRfft`, `SignalPcan`, ...) que só existem nesse runtime; tentar carregá-lo com `ai-edge-litert` falha com `RuntimeError: Encountered unresolved custom op: SignalWindow`. No lugar dele, o sidecar usa [`pymicro-features`](https://pypi.org/project/pymicro-features/) — o mesmo micro frontend em C++, embalado como wheel `abi3` standalone, e coincidentemente a implementação que o próprio microWakeWord usou para gerar as features de *treino* dos modelos vendorizados. Como o firmware copia a saída int8 do preprocessador crua para dentro do modelo wake (sem dequantizar), o sidecar precisa reconstruir essa quantização a partir de uma constante (`FEATURE_SCALE`, resolvida empiricamente — ver `wakeword-sidecar/README.md`) em vez de herdá-la de graça.
+
+Detalhe completo (paridade linha a linha com `WakeWord.cpp`, protocolo stdin/stdout, calibração) em [`luna-desktop/wakeword-sidecar/README.md`](../luna-desktop/wakeword-sidecar/README.md).
+
+Empacotamento do Python: para v1, exigir um Python local (`requirements.txt` próprio do sidecar, não do `wake-training/`); empacotar como binário standalone (PyInstaller) fica como follow-up se a fricção de instalação incomodar.
 
 ### 3. Máquina de estados — espelha o firmware
 
@@ -77,7 +84,7 @@ luna-desktop/
       tray.ts
     renderer/        # janela oculta: captura (getUserMedia+AudioWorklet) e playback (AudioContext)
     preload.ts
-  wakeword-sidecar/   # script Python + requirements.txt (deriva de wake-training/Dockerfile)
+  wakeword-sidecar/   # sidecar Python (requirements.txt próprio) + fixtures/
   assets/             # ícones de tray por estado
   .env.example
   package.json
@@ -87,7 +94,7 @@ luna-desktop/
 
 1. ✅ **Esqueleto Electron + tray** — app sobe, ícone na bandeja, menu Sair funciona, autostart configurável. Sem áudio ainda. Valida empacotamento/single-instance antes de qualquer complexidade de áudio.
 2. ✅ **Round-trip de áudio sem wake word** — protocolo/auth portados (`src/main/ws/`), captura via Web Audio no renderer (janela oculta), streaming contínuo pro `luna-server`, playback da resposta. Validado ponta a ponta contra o `luna-server` local: auth_ok, sessão Gemini Live aberta, TTFAB logado. Reconexão com backoff (o `luna-client-test` não tinha — um app de bandeja não pode sair no primeiro erro), watchdogs contra turno travado, e uplink pausado durante `speaking`/`thinking` (a captura em si nunca para — é o caminho que o barge-in por wake word do M4 vai reusar via `session.forceListen()`, já exposto manualmente no menu). Detalhes em [`luna-desktop/README.md`](../luna-desktop/README.md).
-3. **Sidecar de wake word isolado** — script Python roda sozinho, recebe um `.wav` de fixture (reaproveitar `luna-client-test/fixtures/silence.wav` + gravar um "hey luna" real), confirma detecção via stdout. Testado fora do Electron primeiro.
+3. ✅ **Sidecar de wake word isolado** — script Python (`luna-desktop/wakeword-sidecar/`) roda sozinho, `--wav`/`--stdin` na CLI, confirma detecção via stdout (JSON lines) e diagnóstico em stderr (`--trace`, `--feature-stats`). Paridade com `WakeWord.cpp` coberta por testes puros (`detector_test.py`, sem tflite/pymicro). Validado ponta a ponta com voz real gravada via `LUNA_DUMP_MIC`: **teste de controle com `okay_nabu.tflite` passou** (8/8 repetições de "okay nabu" detectadas, `mean_prob` 0.970-0.993, recall ~100%) — confirma que a pipeline do sidecar (`pymicro-features` + `FEATURE_SCALE=1.0` + `detector.py`) está correta. **`hey_luna_trained.tflite` (o modelo do satélite) só detectou 3 de 10** "hey luna" reais (recall ~30%) — quando dispara é com confiança e sem falso-positivo, mas a maioria das tentativas nem chega perto do cutoff. Confirma o risco já documentado no manifesto do modelo (`test_auc: 0.536`), pior na prática que os números de treino. Falso-positivo testado com 50s de ruído de fundo → 0 detecções nos dois modelos (`max_mean_prob` 0.29 e 0.017, ambos abaixo do cutoff 0.97) — curto demais pra ser prova robusta, mas sinal positivo; uma sessão ≥15min fica como follow-up recomendado, não bloqueia o marco. **Decisão em aberto pro M4**: usar `hey_luna_trained` assim mesmo (recall baixo, mas sem falso-positivo), trocar por `okay_nabu` como provisório (mesma saída que o ADR 003 tomou no firmware por motivo idêntico), ou aguardar um modelo "hey luna" retreinado — ver `wakeword-sidecar/README.md`.
 4. **Integrar sidecar na máquina de estados** — gatilho de wake liga o streaming; ícones de tray refletem idle/ouvindo/pensando/falando.
 5. **Polimento** — mutar/forçar-escuta no menu, `electron-builder` pra gerar instalador Windows, README de setup (`.env`, dependência do Python).
 
@@ -95,7 +102,7 @@ luna-desktop/
 
 - M1: ✅ rodar `npm run dev`, confirmar ícone na bandeja e que fechar/reabrir não duplica instância.
 - M2: ✅ confirmado contra o `luna-server` local (mesmo `WS_AUTH_SECRET`, porta 8086): `auth_ok` recebido, `device_id` (UUID) persistido em `userData`, captura de mic real inicializada (getUserMedia + AudioWorklet, sem addon nativo), e o servidor abriu sessão Gemini Live + sala ao receber os primeiros `audio_chunk` — confirma que os frames de áudio chegaram e foram aceitos. Falta ainda um teste manual de ponta a ponta com resposta falada audível e cronometragem de TTFAB por um humano (o smoke test automatizado desta sessão não tem microfone/alto-falante para validar o áudio em si, só o protocolo).
-- M3: rodar o sidecar isolado contra a fixture e contra fala real gravada, conferir que só dispara em "Hey Luna" (checar falso-positivo com TV/conversa de fundo, mesmo teste que validou o firmware).
+- M3: ✅ `--wav luna-client-test/fixtures/silence.wav` → 0 detecções, 66 inferências, `max_mean_prob` 0.0. `okay_nabu.tflite` (controle) → 8/8 detecções em "okay nabu" real, `mean_prob` 0.970-0.993 — confirma a pipeline do sidecar de ponta a ponta (features + quantização + detector). `hey_luna_trained.tflite` (modelo do satélite) → 3/10 detecções em "hey luna" real — recall baixo (~30%), mas zero ambiguidade quando dispara e zero falso-positivo; achado real a considerar no M4, não um bug do sidecar. `noise-smoke.wav` (50s de ruído) → 0 detecções nos dois modelos. Fixtures commitadas em `wakeword-sidecar/fixtures/`; números completos e a discussão de recall em `wakeword-sidecar/README.md`.
 - M4/M5: teste manual ponta a ponta — falar "Hey Luna" longe do teclado, confirmar transição de ícone idle→ouvindo→pensando→falando e resposta correta; testar timeout/erro de auth (`.env` errado) mostra estado de erro no tray, não crash silencioso.
 
 ## Fora de escopo para v1

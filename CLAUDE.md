@@ -30,6 +30,12 @@ cd luna-server && npx tsc --noEmit
 cd luna-firmware && pio run
 ```
 
+Sidecar de wake word do `luna-desktop` (Python, venv em `luna-desktop/wakeword-sidecar/.venv`):
+
+```bash
+cd luna-desktop && npm run test:wakeword
+```
+
 Treino de wake word (Docker):
 
 ```bash
@@ -41,5 +47,6 @@ bash wake-training/run.sh all
 - **O script `test` do `luna-server` lista os arquivos um a um, sem glob.** Todo `*.test.ts` novo precisa ser adicionado manualmente ao `package.json`, senão nunca roda — nem local, nem no CI.
 - **O CI só cobre `luna-server/**`.** Firmware, ESPHome e wake-training não têm portão automático; a revisão é o único filtro.
 - **Contrato WS vive em dois lugares.** `luna-server/src/ws/protocol.ts` e `luna-firmware/src/ws/`. Mudar um sem o outro é regressão silenciosa.
+- **O preprocessador de wake word (`.tflite`) não roda fora do tflite-micro** (ops customizadas `tflm_signal`). O `luna-desktop` usa `pymicro-features` em vez dele — duas implementações de extração de features (`luna-firmware/src/wake/WakeWord.cpp` e `luna-desktop/wakeword-sidecar/frontend.py`) que precisam ficar em sincronia; mudar uma sem revisar a outra é a mesma classe de regressão silenciosa do contrato WS. Ver [ADR 004](docs/adr/004-wake-word-no-desktop.md).
 - **`.env` no Windows:** editar com `Get-Content | Set-Content` no PowerShell 5.1 corrompe acentos. Use o editor ou `-Encoding utf8` explícito.
 - **`luna-firmware/include/secrets.h` e `luna-firmware-actuator/secrets.yaml` nunca vão para o commit.**

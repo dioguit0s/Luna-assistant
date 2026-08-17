@@ -15,6 +15,7 @@ import { ConfigError, ENV_PATH, loadConfig } from './config.js';
 import { Session } from './session.js';
 import { LunaWsClient } from './ws/client.js';
 import { createCaptureWindow, type CaptureWindow } from './window.js';
+import { createMicDump, type MicDump } from './mic-dump.js';
 
 // Identidade do app no Windows (barra de tarefas, balões). Antes de tudo.
 app.setAppUserModelId('com.diogo.luna.desktop');
@@ -23,6 +24,7 @@ let tray: TrayController | null = null;
 let session: Session | null = null;
 let wsClient: LunaWsClient | null = null;
 let captureWindow: CaptureWindow | null = null;
+let micDump: MicDump | null = null;
 
 function openConfig(): void {
   shell.openPath(ENV_PATH).then((errorMessage) => {
@@ -60,6 +62,10 @@ if (!gotLock) {
     session?.destroy();
     tray?.destroy();
     tray = null;
+    // Fecha por último: quero capturar áudio até o instante do encerramento,
+    // e o close() corrige o header do .wav (senão o arquivo fica com o
+    // tamanho do placeholder e não toca).
+    micDump?.close();
   });
 
   app.whenReady().then(() => {
@@ -87,6 +93,11 @@ if (!gotLock) {
       throw err;
     }
 
+    // Fixture de voz real para o sidecar de wake word (marco 3): opt-in só
+    // por variável de ambiente, nunca por .env — grava o mic continuamente
+    // enquanto ativo. Ver luna-desktop/wakeword-sidecar/README.md.
+    micDump = createMicDump(app.getPath('userData'));
+
     session = new Session();
 
     wsClient = new LunaWsClient({
@@ -98,6 +109,10 @@ if (!gotLock) {
 
     captureWindow = createCaptureWindow({
       onMicFrame: (pcm) => {
+        // Antes do gate de uplink de propósito: a fixture de calibração do
+        // wake word precisa do áudio inteiro (mudo, thinking, speaking
+        // incluídos), não só do que chega a ser enviado ao servidor.
+        micDump?.write(pcm);
         // A captura nunca para (necessário para o barge-in por wake word do
         // M4 mais tarde); só o envio ao servidor é fechado durante
         // thinking/speaking/mudo. Descartar aqui, não no renderer, mantém a

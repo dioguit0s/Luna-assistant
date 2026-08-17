@@ -1,0 +1,16 @@
+# Runtime do sidecar de wake word. Ver ADR 004 e README.md deste diretório
+# para o porquê de não ser tflite-runtime/tensorflow (como o plano original em
+# docs/luna-desktop.md assumia): sem wheel para Windows + Python 3.14, e o
+# preprocessador .tflite usa ops tflm_signal que só existem no tflite-micro.
+#
+# ai-edge-litert: sucessor mantido do tflite-runtime, roda os modelos
+# streaming .tflite (hey_luna_trained.tflite, okay_nabu.tflite).
+ai-edge-litert>=2.1.6
+
+# pymicro-features: mesmo micro frontend C++ do tflite-micro (extração de
+# features), embalado como wheel abi3 standalone — substitui o
+# audio_preprocessor_int8.tflite, que não carrega neste ambiente.
+pymicro-features==2.0.2
+
+numpy>=2
+soundfile>=0.13

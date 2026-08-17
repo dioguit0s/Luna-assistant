@@ -5,19 +5,21 @@ voz do satélite ESP32-S3 — sem hardware dedicado.
 
 Plano completo em [`docs/luna-desktop.md`](../docs/luna-desktop.md).
 
-## Estado atual — marco 2 de 5
+## Estado atual — marco 3 de 5
 
 O que já funciona: ícone na bandeja com estado, menu, autostart no login, trava
-de instância única, **e agora o round-trip de áudio completo**: captura de
-microfone via Web Audio (numa janela oculta — sem addon nativo), WebSocket
-autenticado com o `luna-server`, streaming contínuo de `audio_chunk` e
-playback da resposta. *Mutar microfone*, *Forçar escuta agora* e
-*Configurações* já funcionam.
+de instância única, o round-trip de áudio completo (captura via Web Audio,
+WebSocket autenticado, streaming de `audio_chunk`, playback da resposta), e
+agora um **sidecar de wake word isolado** (`wakeword-sidecar/`) — roda fora do
+Electron, recebe `.wav` ou stdin, confirma detecção de "Hey Luna" via stdout.
+Ver [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md).
 
-O que **ainda não** existe: wake word "Hey Luna" (marco 3/4) — hoje o mic
-streama **continuamente** para o servidor assim que autenticado, sem filtro
-nenhum. É esse o objetivo do marco: provar que a captura via Web Audio fala o
-protocolo corretamente antes de complicar com wake word.
+O que **ainda não** existe: o sidecar **ligado** à máquina de estados (marco
+4) — hoje o mic ainda streama **continuamente** para o servidor assim que
+autenticado, sem filtro nenhum; o sidecar roda em paralelo, mas não interrompe
+nem inicia o streaming sozinho. Nem a validação final do M3 com voz real
+gravada (a máquina onde o M3 foi implementado não tinha como gravar áudio) —
+ver a seção "Wake word" abaixo.
 
 ## Pré-requisitos
 
@@ -87,6 +89,46 @@ LUNA_DEBUG_WINDOW=1 npm start
 
 Isso mostra a janela normalmente oculta que hospeda `getUserMedia` +
 `AudioWorklet` + `AudioContext` — nunca aparece em uso normal.
+
+**Gravar o microfone para calibrar o wake word:** `LUNA_DUMP_MIC=1` salva
+tudo que passa por `onMicFrame` — o áudio pós AGC/ruído/eco do
+`getUserMedia`, exatamente o que o sidecar de wake word vai ouvir em produção
+— num `.wav` em `userData` (`%APPDATA%\luna-desktop\mic-dump-<timestamp>.wav`).
+`LUNA_DUMP_MIC=<caminho>` grava nesse caminho exato em vez de gerar um nome.
+
+```bash
+LUNA_DUMP_MIC=1 npm run dev
+```
+
+Só grava até você sair pelo menu (o header do `.wav` só fica correto depois do
+`close()`, chamado em `will-quit`). Teto de 30 minutos por padrão
+(`LUNA_DUMP_MIC_SECONDS` para ajustar) — isto grava a casa continuamente
+enquanto ligado, por isso é opt-in só por variável de ambiente, nunca uma
+chave de `.env` que possa ficar ligada sem querer. Uso: ver
+[`wakeword-sidecar/fixtures/README.md`](wakeword-sidecar/fixtures/README.md).
+
+## Wake word (sidecar Python)
+
+O detector de "Hey Luna" roda como processo Python separado, não como binding
+TFLite no Electron — ver [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md)
+para o porquê e [`docs/adr/004-wake-word-no-desktop.md`](../docs/adr/004-wake-word-no-desktop.md)
+para a decisão completa. Resumo prático:
+
+```bash
+cd wakeword-sidecar
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe wake_sidecar.py --wav fixtures\silence.wav --trace
+```
+
+Testes do sidecar (puro Python, sem tflite/pymicro):
+
+```bash
+npm run test:wakeword
+```
+
+Neste marco (M3) o sidecar roda **isolado** — o Electron ainda não o inicia.
+Isso é o marco 4.
 
 ## Conexão e áudio
 
@@ -162,12 +204,20 @@ npx tsc --noEmit
 ```
 
 Cobrem os módulos puros (`state.ts`, `menu.ts`, `session.ts`, o protocolo WS em
-`main/ws/protocol.ts` e a conversão PCM em `shared/pcm.ts`) — o resto (janela
+`main/ws/protocol.ts`, a conversão PCM em `shared/pcm.ts`, o header WAV em
+`shared/wav.ts` e o gravador em `main/mic-dump.ts`) — o resto (janela
 oculta, captura/playback de verdade, WebSocket contra um servidor real)
 depende do runtime do Electron e é verificado à mão, com o `luna-server`
 rodando. **Todo `*.test.ts` novo precisa ser adicionado na mão ao script
 `test` do `package.json`**: ele lista os arquivos um a um, sem glob (mesma
 pegadinha do `luna-server`).
+
+O sidecar de wake word (`wakeword-sidecar/`) tem testes Python próprios,
+fora do `npm test`:
+
+```bash
+npm run test:wakeword
+```
 
 Não há CI para este diretório — o workflow do repositório só cobre
 `luna-server/**`.
