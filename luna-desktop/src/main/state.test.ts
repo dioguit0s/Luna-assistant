@@ -6,6 +6,7 @@ import { join } from 'node:path';
 
 import {
   APP_STATES,
+  idleQualifier,
   stateLabel,
   tooltipFor,
   trayIconBaseName,
@@ -24,8 +25,16 @@ describe('state', () => {
   });
 
   it('monta o tooltip com o rótulo do estado', () => {
-    assert.equal(tooltipFor('idle'), 'Luna — Ociosa');
     assert.equal(tooltipFor('error'), 'Luna — Erro');
+    assert.equal(tooltipFor('listening'), 'Luna — Ouvindo');
+  });
+
+  it('desambigua idle entre mudo e aguardando wake — os únicos dois estados que colidiam desde o M4', () => {
+    assert.equal(tooltipFor('idle'), 'Luna — Ociosa (aguardando "Hey Luna")');
+    assert.equal(tooltipFor('idle', false), 'Luna — Ociosa (aguardando "Hey Luna")');
+    assert.equal(tooltipFor('idle', true), 'Luna — Ociosa (mudo)');
+    assert.equal(idleQualifier(false), 'aguardando "Hey Luna"');
+    assert.equal(idleQualifier(true), 'mudo');
   });
 
   it('usa um ícone distinto por estado', () => {

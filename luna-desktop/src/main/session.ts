@@ -202,8 +202,16 @@ export class Session extends TypedEmitter<SessionEvents> {
    * (gatilho do sidecar): interrompe um turno em andamento se houver, e
    * sempre abre o gate de wake. recompute() só emite se algo mudou de fato,
    * então chamar isto sem turno ativo e já fora de awaitingWake é inofensivo.
+   *
+   * No-op enquanto mudo: sem essa guarda, forceListen() zeraria awaitingWake
+   * silenciosamente (o estado visível continua 'idle' porque muted também
+   * força isso em recompute()) e o próximo setMuted(false) reabriria o
+   * uplink sem exigir um novo "Hey Luna" — quebraria a garantia de que
+   * desmutar nunca reabre sozinho.
    */
   private openGate(): void {
+    if (this.muted) return;
+
     if (this.turnPhase !== 'idle') {
       this.clearWatchdogs();
       this.dropAudio = true;

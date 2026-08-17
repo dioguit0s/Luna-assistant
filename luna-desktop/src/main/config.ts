@@ -4,7 +4,7 @@
 // CLAUDE.md do repo).
 
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { config as loadDotenv } from 'dotenv';
@@ -15,9 +15,21 @@ import { app } from 'electron';
 // quanto rodando de dist/.
 const PROJECT_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 
+// Empacotado, dist/main/config.js mora dentro do app.asar — somente leitura,
+// e um lugar que o usuário não tem como abrir/editar de verdade (shell.openPath
+// não abre nada dentro de um asar). userData é o diretório certo pra config
+// mutável (mesmo lugar de device.json/mic-dump); em dev mantém o comportamento
+// de sempre, .env na raiz do projeto.
+const ENV_DIR = app.isPackaged ? app.getPath('userData') : PROJECT_ROOT;
+
+// Só existe empacotado (extraResources em electron-builder.yml) — usado só
+// pra semear o .env na primeira execução, já que o usuário não tem o checkout
+// do monorepo pra copiar .env.example à mão.
+const ENV_EXAMPLE_PATH = app.isPackaged ? join(process.resourcesPath, '.env.example') : null;
+
 // Exportado para o item de menu "Configurações" (shell.openPath) poder abrir
 // o mesmo arquivo mesmo quando loadConfig() ainda não rodou com sucesso.
-export const ENV_PATH = join(PROJECT_ROOT, '.env');
+export const ENV_PATH = join(ENV_DIR, '.env');
 
 export interface DesktopConfig {
   serverUrl: string;
@@ -65,6 +77,16 @@ function loadOrCreateDeviceId(): string {
  */
 export function loadConfig(): DesktopConfig {
   if (!existsSync(ENV_PATH)) {
+    // Empacotado, semeia o .env a partir do modelo bundlado — sem isso o
+    // usuário cairia num beco sem saída (não tem outro .env pra copiar, e o
+    // diretório userData ainda nem existe na primeira execução).
+    if (ENV_EXAMPLE_PATH && existsSync(ENV_EXAMPLE_PATH)) {
+      mkdirSync(ENV_DIR, { recursive: true });
+      copyFileSync(ENV_EXAMPLE_PATH, ENV_PATH);
+      throw new ConfigError(
+        `.env criado a partir do modelo em ${ENV_PATH} — preencha WS_AUTH_SECRET (pelo item "Configurações" do menu) e reinicie o app.`,
+      );
+    }
     throw new ConfigError(
       `.env não encontrado em ${ENV_PATH}. Copie .env.example para .env e preencha WS_AUTH_SECRET.`,
     );

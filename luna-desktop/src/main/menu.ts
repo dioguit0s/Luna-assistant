@@ -6,12 +6,11 @@
 // por um import de valor.
 
 import type { MenuItemConstructorOptions } from 'electron';
-import { stateLabel, type AppState } from './state.js';
+import { idleQualifier, stateLabel, type AppState } from './state.js';
 
 export interface TrayMenuOptions {
   state: AppState;
   autostartEnabled: boolean;
-  /** M2 — sempre false enquanto não há captura de áudio. */
   micMuted: boolean;
   onToggleAutostart: (enabled: boolean) => void;
   onQuit: () => void;
@@ -27,8 +26,13 @@ export interface TrayMenuOptions {
  * muda de cara depois, e M2/M4 só precisam passar o callback correspondente.
  */
 export function buildTrayMenuTemplate(options: TrayMenuOptions): MenuItemConstructorOptions[] {
+  const header =
+    options.state === 'idle'
+      ? `Luna — ${stateLabel(options.state)} (${idleQualifier(options.micMuted)})`
+      : `Luna — ${stateLabel(options.state)}`;
+
   return [
-    { label: `Luna — ${stateLabel(options.state)}`, enabled: false },
+    { label: header, enabled: false },
     { type: 'separator' },
     {
       label: 'Mutar microfone',
@@ -39,7 +43,9 @@ export function buildTrayMenuTemplate(options: TrayMenuOptions): MenuItemConstru
     },
     {
       label: 'Forçar escuta agora',
-      enabled: options.onForceListen !== undefined,
+      // Enquanto mudo, forceListen() é no-op no session.ts (não pré-arma o
+      // gate) — desabilitar aqui evita oferecer uma ação que não muda nada.
+      enabled: options.onForceListen !== undefined && !options.micMuted,
       click: () => options.onForceListen?.(),
     },
     { type: 'separator' },

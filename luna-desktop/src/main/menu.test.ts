@@ -42,6 +42,14 @@ describe('buildTrayMenuTemplate', () => {
     assert.equal(template[0]?.enabled, false);
   });
 
+  it('desambigua idle entre mudo e aguardando wake no cabeçalho', () => {
+    const aguardando = buildTrayMenuTemplate(baseOptions({ state: 'idle', micMuted: false }));
+    assert.equal(aguardando[0]?.label, 'Luna — Ociosa (aguardando "Hey Luna")');
+
+    const mudo = buildTrayMenuTemplate(baseOptions({ state: 'idle', micMuted: true }));
+    assert.equal(mudo[0]?.label, 'Luna — Ociosa (mudo)');
+  });
+
   it('Sair chama onQuit', () => {
     let quit = false;
     const template = buildTrayMenuTemplate(baseOptions({ onQuit: () => (quit = true) }));
@@ -59,6 +67,18 @@ describe('buildTrayMenuTemplate', () => {
   it('habilita o item assim que o callback é passado', () => {
     const template = buildTrayMenuTemplate(baseOptions({ onToggleMic: () => {} }));
     assert.equal(itemByLabel(template, 'Mutar microfone').enabled, true);
+  });
+
+  it('desabilita "Forçar escuta agora" enquanto mudo, mesmo com o callback presente', () => {
+    const template = buildTrayMenuTemplate(
+      baseOptions({ onForceListen: () => {}, micMuted: true }),
+    );
+    assert.equal(itemByLabel(template, 'Forçar escuta agora').enabled, false);
+
+    const desmutado = buildTrayMenuTemplate(
+      baseOptions({ onForceListen: () => {}, micMuted: false }),
+    );
+    assert.equal(itemByLabel(desmutado, 'Forçar escuta agora').enabled, true);
   });
 
   it('reflete o autostart no checkbox e repassa o novo valor', () => {

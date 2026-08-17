@@ -213,6 +213,30 @@ describe('Session', () => {
     assert.equal(session.isUplinkOpen(), true);
   });
 
+  it('forceListen enquanto mudo não pré-arma o gate — desmutar ainda exige um novo wake', () => {
+    const session = new Session();
+    connectAuthAndWake(session);
+
+    session.setMuted(true);
+    assert.equal(session.getState(), 'idle');
+
+    session.forceListen();
+    assert.equal(session.getState(), 'idle', 'forceListen não faz nada enquanto mudo');
+    assert.equal(session.isUplinkOpen(), false);
+
+    session.setMuted(false);
+    assert.equal(
+      session.getState(),
+      'idle',
+      'desmutar não deve reabrir sozinho mesmo com um forceListen() pendurado de quando estava mudo',
+    );
+    assert.equal(session.isUplinkOpen(), false);
+
+    session.onWakeDetected();
+    assert.equal(session.getState(), 'listening');
+    assert.equal(session.isUplinkOpen(), true);
+  });
+
   it('mutar durante um turno em andamento não interrompe a resposta; só some depois do speaking_end', () => {
     const session = new Session();
     connectAuthAndWake(session);

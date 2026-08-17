@@ -5,11 +5,12 @@
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
-    "icons": "node scripts/generate-icons.mjs",
+    "icons": "node scripts/generate-icons.mjs && node scripts/generate-app-icon.mjs",
     "build": "tsc && node scripts/copy-renderer.mjs",
     "watch": "tsc --watch",
     "dev": "tsc && node scripts/copy-renderer.mjs && electron .",
     "start": "electron .",
+    "package:win": "npm run build && electron-builder --win nsis",
     "test": "node --import tsx --test src/main/state.test.ts src/main/menu.test.ts src/main/session.test.ts src/main/mic-dump.test.ts src/main/ws/protocol.test.ts src/main/wakeword/protocol.test.ts src/shared/pcm.test.ts src/shared/wav.test.ts",
     "test:wakeword": "wakeword-sidecar\\.venv\\Scripts\\python.exe -m unittest discover -s wakeword-sidecar -t wakeword-sidecar -p \"*_test.py\""
   },
@@ -24,6 +25,7 @@
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
     "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

@@ -10,6 +10,7 @@ import { EventEmitter } from 'node:events';
 import { createInterface } from 'node:readline';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { app } from 'electron';
 
 import { parseWakewordLine, type WakewordEvent } from './protocol.js';
 
@@ -17,8 +18,27 @@ import { parseWakewordLine, type WakewordEvent } from './protocol.js';
 // padrão de PROJECT_ROOT em config.ts / ASSETS_DIR em tray.ts, um nível mais
 // fundo porque este módulo mora em src/main/wakeword/, não em src/main/.
 const PROJECT_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const SIDECAR_DIR = join(PROJECT_ROOT, 'wakeword-sidecar');
+
+// Empacotado (app.asar), o cálculo acima resolveria pra um caminho virtual
+// dentro do asar que não existe no disco — o Python precisa de um diretório
+// real pra rodar. electron-builder copia wakeword-sidecar/ (código-fonte, sem
+// .venv/fixtures) pra fora do asar via extraResources (ver
+// electron-builder.yml), acessível em process.resourcesPath. Em dev, mantém o
+// caminho relativo ao monorepo de sempre.
+const SIDECAR_DIR = app.isPackaged
+  ? join(process.resourcesPath, 'wakeword-sidecar')
+  : join(PROJECT_ROOT, 'wakeword-sidecar');
 const DEFAULT_PYTHON_PATH = join(SIDECAR_DIR, '.venv', 'Scripts', 'python.exe');
+
+// Em dev, wake_sidecar.py resolve seu próprio default (hey_luna_trained.tflite)
+// relativo ao checkout do monorepo (luna-firmware/models/, fora de
+// luna-desktop/) — não existe empacotado, porque só luna-desktop/ vai pro
+// instalador. extraResources também copia os .tflite vendorizados pra
+// SIDECAR_DIR/models/; aqui fixamos o caminho explícito só nesse caso, sem
+// mudar o default do próprio script em dev.
+const DEFAULT_MODEL_PATH = app.isPackaged
+  ? join(SIDECAR_DIR, 'models', 'hey_luna_trained.tflite')
+  : undefined;
 
 const RESTART_BACKOFF_INITIAL_MS = 1_000;
 const RESTART_BACKOFF_MAX_MS = 30_000;
@@ -30,7 +50,11 @@ const FATAL_ERROR_BACKOFF_MS = RESTART_BACKOFF_MAX_MS;
 export interface WakewordSidecarOptions {
   /** Default: wakeword-sidecar/.venv/Scripts/python.exe */
   pythonPath?: string;
-  /** --model — omitido usa o default do próprio wake_sidecar.py (hey_luna_trained.tflite) */
+  /**
+   * --model — omitido usa hey_luna_trained.tflite: em dev, o default do
+   * próprio wake_sidecar.py (relativo ao monorepo); empacotado, DEFAULT_MODEL_PATH
+   * (resources/wakeword-sidecar/models/, ver comentário acima).
+   */
   model?: string;
   /** --threshold — omitido usa o default do próprio wake_sidecar.py (0.97) */
   threshold?: number;
@@ -91,8 +115,9 @@ export class WakewordSidecar extends EventEmitter {
 
   private spawnChild(): void {
     const pythonPath = this.opts.pythonPath ?? DEFAULT_PYTHON_PATH;
+    const model = this.opts.model ?? DEFAULT_MODEL_PATH;
     const args = ['wake_sidecar.py', '--stdin'];
-    if (this.opts.model) args.push('--model', this.opts.model);
+    if (model) args.push('--model', model);
     if (this.opts.threshold !== undefined) args.push('--threshold', String(this.opts.threshold));
 
     // windowsHide: sem isso, cada (re)início do sidecar pisca uma janela de
