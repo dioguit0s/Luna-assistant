@@ -1,6 +1,6 @@
 # Luna Desktop — plano de implementação
 
-**Status:** Em andamento — marco 4 de 5 concluído no código (sidecar integrado à máquina de estados; teste manual ponta a ponta com voz real ainda pendente)
+**Status:** Em andamento — marco 4 de 5 concluído (sidecar integrado à máquina de estados, validado com voz real)
 **Data:** 2026-08-17
 
 ## Objetivo
@@ -103,7 +103,7 @@ luna-desktop/
 - M1: ✅ rodar `npm run dev`, confirmar ícone na bandeja e que fechar/reabrir não duplica instância.
 - M2: ✅ confirmado contra o `luna-server` local (mesmo `WS_AUTH_SECRET`, porta 8086): `auth_ok` recebido, `device_id` (UUID) persistido em `userData`, captura de mic real inicializada (getUserMedia + AudioWorklet, sem addon nativo), e o servidor abriu sessão Gemini Live + sala ao receber os primeiros `audio_chunk` — confirma que os frames de áudio chegaram e foram aceitos. Falta ainda um teste manual de ponta a ponta com resposta falada audível e cronometragem de TTFAB por um humano (o smoke test automatizado desta sessão não tem microfone/alto-falante para validar o áudio em si, só o protocolo).
 - M3: ✅ `--wav luna-client-test/fixtures/silence.wav` → 0 detecções, 66 inferências, `max_mean_prob` 0.0. `okay_nabu.tflite` (controle) → 8/8 detecções em "okay nabu" real, `mean_prob` 0.970-0.993 — confirma a pipeline do sidecar de ponta a ponta (features + quantização + detector). `hey_luna_trained.tflite` (modelo do satélite) → 3/10 detecções em "hey luna" real — recall baixo (~30%), mas zero ambiguidade quando dispara e zero falso-positivo; achado real a considerar no M4, não um bug do sidecar. `noise-smoke.wav` (50s de ruído) → 0 detecções nos dois modelos. Fixtures commitadas em `wakeword-sidecar/fixtures/`; números completos e a discussão de recall em `wakeword-sidecar/README.md`.
-- M4: ✅ automatizado — `npm test` (55/55) cobre a máquina de estados nova (`awaitingWake` interagindo com `forceListen()`/`setMuted()`/`setSidecarHealthy()`/watchdogs) e o parser `wakeword/protocol.ts` (`ready`/`wake`/`eof`/`error`, tolerância a linha inválida/desconhecida). `npx tsc --noEmit` limpo. **Pendente** (não bloqueou o marco, mas precisa ser feito antes do M5): teste manual com voz real — dizer "Hey Luna" longe do teclado e confirmar a transição idle→ouvindo→pensando→falando no tray; testar "Mutar microfone" (nem servidor nem sidecar devem receber áudio) e "Forçar escuta agora" a partir do repouso; matar o processo Python manualmente (Gerenciador de Tarefas) e confirmar que o tray reflete erro e o sidecar reinicia sozinho.
+- M4: ✅ automatizado — `npm test` (55/55) cobre a máquina de estados nova (`awaitingWake` interagindo com `forceListen()`/`setMuted()`/`setSidecarHealthy()`/watchdogs) e o parser `wakeword/protocol.ts` (`ready`/`wake`/`eof`/`error`, tolerância a linha inválida/desconhecida). `npx tsc --noEmit` limpo. ✅ **Teste manual ponta a ponta confirmado pelo usuário** (2026-08-17): "Hey Luna" + transição de ícone no tray, mute, forçar escuta e recuperação de crash do sidecar rodaram certo.
 - M5: teste manual ponta a ponta — resposta correta chegando e tocando depois do wake; testar timeout/erro de auth (`.env` errado) mostra estado de erro no tray, não crash silencioso.
 
 ## Fora de escopo para v1
