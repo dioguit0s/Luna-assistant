@@ -63,6 +63,12 @@ export class Session extends TypedEmitter<SessionEvents> {
   private thinkingWatchdog: ReturnType<typeof setTimeout> | null = null;
   private speakingWatchdog: ReturnType<typeof setTimeout> | null = null;
   private speakingStartedAt: number | null = null;
+  /** true = mic local ativo, alimentando o sidecar de wake word, mas o
+   * uplink pro servidor está fechado até um "Hey Luna" (ou bypass manual). */
+  private awaitingWake = true;
+  /** false enquanto o processo do sidecar de wake word está fora do ar —
+   * força 'error' em repouso (ver recompute()), mesmo tratamento de !connected. */
+  private sidecarHealthy = true;
 
   private state: AppState = 'error';
   private uplinkOpen = false;
@@ -143,27 +149,46 @@ export class Session extends TypedEmitter<SessionEvents> {
     return true;
   }
 
-  // --- controles locais (menu / tray / futuro sidecar de wake word) ---
+  // --- controles locais (menu / tray / sidecar de wake word) ---
 
   setMuted(muted: boolean): void {
     if (this.muted === muted) return;
     this.muted = muted;
+    // Mudo muta tudo, incluindo a detecção de wake — desmutar não deve
+    // reabrir um streaming pendurado sozinho, precisa de um novo "Hey Luna".
+    if (muted) this.awaitingWake = true;
     this.recompute();
   }
 
   /**
-   * "Forçar escuta agora": interrompe um turno em andamento. Em M2 é
-   * disparado pelo item de menu; é o mesmo método que o gatilho de wake word
-   * do M4 vai chamar para permitir interromper a Luna falando.
+   * Evento `wake` do sidecar de wake word (index.ts liga isto ao evento
+   * `wake` de WakewordSidecar). Mesmo efeito de forceListen(): abre o gate a
+   * partir do repouso, ou interrompe um turno em andamento (barge-in).
+   */
+  onWakeDetected(): void {
+    this.openGate();
+  }
+
+  /**
+   * Reflete se o processo do sidecar de wake word está de pé
+   * (WakewordSidecar 'ready'/'crashed' em index.ts). Só afeta o estado
+   * público em repouso — não interrompe um turno já em thinking/speaking se
+   * o sidecar cair no meio de uma resposta, mesmo princípio que muted já
+   * respeita hoje.
+   */
+  setSidecarHealthy(healthy: boolean): void {
+    if (this.sidecarHealthy === healthy) return;
+    this.sidecarHealthy = healthy;
+    this.recompute();
+  }
+
+  /**
+   * "Forçar escuta agora": bypass manual do wake word, disparado pelo item de
+   * menu. Mesmo efeito de onWakeDetected() — abre o gate mesmo em repouso, e
+   * interrompe um turno em andamento se houver.
    */
   forceListen(): void {
-    if (this.turnPhase === 'idle') return; // nada em andamento para interromper
-    this.clearWatchdogs();
-    this.dropAudio = true;
-    this.turnPhase = 'idle';
-    this.speakingStartedAt = null;
-    this.emit('flushPlayback');
-    this.recompute();
+    this.openGate();
   }
 
   destroy(): void {
@@ -172,11 +197,33 @@ export class Session extends TypedEmitter<SessionEvents> {
 
   // --- internals ---
 
+  /**
+   * Compartilhado por forceListen() (bypass manual) e onWakeDetected()
+   * (gatilho do sidecar): interrompe um turno em andamento se houver, e
+   * sempre abre o gate de wake. recompute() só emite se algo mudou de fato,
+   * então chamar isto sem turno ativo e já fora de awaitingWake é inofensivo.
+   */
+  private openGate(): void {
+    if (this.turnPhase !== 'idle') {
+      this.clearWatchdogs();
+      this.dropAudio = true;
+      this.turnPhase = 'idle';
+      this.speakingStartedAt = null;
+      this.emit('flushPlayback');
+    }
+    this.awaitingWake = false;
+    this.recompute();
+  }
+
   private resetTurn(): void {
     this.clearWatchdogs();
     this.turnPhase = 'idle';
     this.dropAudio = false;
     this.speakingStartedAt = null;
+    // Fim de turno volta a exigir um novo "Hey Luna" — chamado por
+    // onConnecting/onDisconnected/onSpeakingEnd/watchdogFired, então isto
+    // cobre todos os jeitos de um turno terminar sem precisar tocar neles.
+    this.awaitingWake = true;
   }
 
   private armSpeakingWatchdog(): void {
@@ -216,11 +263,14 @@ export class Session extends TypedEmitter<SessionEvents> {
         ? 'thinking'
         : this.turnPhase === 'speaking'
           ? 'speaking'
-          : this.muted
-            ? 'idle'
-            : 'listening';
+          : !this.sidecarHealthy
+            ? 'error'
+            : this.muted || this.awaitingWake
+              ? 'idle'
+              : 'listening';
 
-    const nextUplink = this.connected && this.turnPhase === 'idle' && !this.muted;
+    const nextUplink =
+      this.connected && this.turnPhase === 'idle' && !this.muted && !this.awaitingWake;
 
     if (nextState !== this.state) {
       this.state = nextState;

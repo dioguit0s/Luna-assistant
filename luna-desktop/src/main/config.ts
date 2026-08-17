@@ -24,6 +24,12 @@ export interface DesktopConfig {
   roomId: string;
   authSecret: string;
   deviceId: string;
+  /** --model do sidecar de wake word. undefined = usa o default do próprio
+   * wake_sidecar.py (hey_luna_trained.tflite) — não força essa decisão aqui. */
+  wakewordModelPath?: string;
+  /** --threshold do sidecar de wake word. undefined = usa o default do
+   * próprio wake_sidecar.py (0.97). */
+  wakewordThreshold?: number;
 }
 
 export class ConfigError extends Error {}
@@ -77,8 +83,15 @@ export function loadConfig(): DesktopConfig {
 
   const deviceId = loadOrCreateDeviceId();
 
+  const wakewordModelPath = process.env.WAKEWORD_MODEL || undefined;
+  const rawThreshold = process.env.WAKEWORD_THRESHOLD;
+  const wakewordThreshold = rawThreshold ? Number(rawThreshold) : undefined;
+  if (rawThreshold && Number.isNaN(wakewordThreshold)) {
+    throw new ConfigError(`WAKEWORD_THRESHOLD inválido em ${ENV_PATH}: "${rawThreshold}" não é um número.`);
+  }
+
   console.log(`[luna-desktop] config carregada de ${ENV_PATH}`);
   console.log(`[luna-desktop] servidor=${serverUrl} sala=${roomId} device=${deviceId}`);
 
-  return { serverUrl, roomId, authSecret, deviceId };
+  return { serverUrl, roomId, authSecret, deviceId, wakewordModelPath, wakewordThreshold };
 }
