@@ -16,6 +16,12 @@ const ASSETS_DIR = fileURLToPath(new URL('../../assets/', import.meta.url));
 
 export interface TrayControllerDeps {
   onQuit: () => void;
+  /** Ausentes = itens correspondentes ficam desabilitados (mesmo comportamento de M1). */
+  onToggleMic?: () => void;
+  onForceListen?: () => void;
+  onOpenConfig?: () => void;
+  /** Lido a cada abertura do menu, como isAutostartEnabled() — sem isso o checkbox travaria no valor de quando o tray foi criado. */
+  isMicMuted?: () => boolean;
 }
 
 export interface TrayController {
@@ -77,12 +83,15 @@ export function createTray(deps: TrayControllerDeps): TrayController {
       // (ex.: setAutostart falhou por política de grupo, ou o usuário mexeu
       // fora do app).
       autostartEnabled: isAutostartEnabled(),
-      micMuted: false, // M2
+      micMuted: deps.isMicMuted?.() ?? false,
       onToggleAutostart: (enabled) => {
         setAutostart(enabled);
         console.log(`[luna-desktop] autostart ${enabled ? 'ligado' : 'desligado'}`);
       },
       onQuit: deps.onQuit,
+      onToggleMic: deps.onToggleMic,
+      onForceListen: deps.onForceListen,
+      onOpenConfig: deps.onOpenConfig,
     });
     trayInstance.setContextMenu(Menu.buildFromTemplate(template));
   };

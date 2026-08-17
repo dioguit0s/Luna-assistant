@@ -1,18 +1,37 @@
-// Entrypoint do luna-desktop — marco 1: só bandeja, sem áudio e sem WebSocket.
+// Entrypoint do luna-desktop — marco 2: round-trip de áudio sem wake word.
+// Mic (Web Audio na janela oculta) -> audio_chunk -> luna-server ->
+// audio_response -> alto-falante. Streaming contínuo, sem wake word ainda
+// (M4). Ver docs/luna-desktop.md.
 //
 // Nada de top-level await antes dos app.on(...): sob main ESM o módulo é
 // avaliado de forma assíncrona e o evento 'ready' pode passar antes de os
 // listeners serem registrados.
 
-import { app } from 'electron';
+import { app, shell } from 'electron';
 
 import { createTray, type TrayController } from './tray.js';
 import { wasAutoLaunched } from './autostart.js';
+import { ConfigError, ENV_PATH, loadConfig } from './config.js';
+import { Session } from './session.js';
+import { LunaWsClient } from './ws/client.js';
+import { createCaptureWindow, type CaptureWindow } from './window.js';
 
 // Identidade do app no Windows (barra de tarefas, balões). Antes de tudo.
 app.setAppUserModelId('com.diogo.luna.desktop');
 
 let tray: TrayController | null = null;
+let session: Session | null = null;
+let wsClient: LunaWsClient | null = null;
+let captureWindow: CaptureWindow | null = null;
+
+function openConfig(): void {
+  shell.openPath(ENV_PATH).then((errorMessage) => {
+    if (errorMessage) {
+      console.error(`[luna-desktop] falha ao abrir .env: ${errorMessage}`);
+      tray?.notify('Luna — não consegui abrir o .env', `${ENV_PATH}\n${errorMessage}`);
+    }
+  });
+}
 
 const gotLock = app.requestSingleInstanceLock();
 
@@ -28,14 +47,17 @@ if (!gotLock) {
   });
 
   // Registrar o listener (mesmo vazio) cancela o default do Electron, que é
-  // encerrar o app no Windows. Em M1 o evento nunca dispara — não há janela —
-  // mas isso evita que a janela oculta de M2 mate o app ao fechar.
+  // encerrar o app no Windows. A janela oculta de captura não deve matar o
+  // app ao "fechar" — só se sai pelo menu.
   app.on('window-all-closed', () => {
     // O app vive na bandeja; sair só pelo menu.
   });
 
   app.on('will-quit', () => {
-    // Sem destroy o ícone vira fantasma na área de notificação.
+    // Sem isso: ícone fantasma na bandeja, WS pendurado, janela oculta viva.
+    wsClient?.stop();
+    captureWindow?.destroy();
+    session?.destroy();
     tray?.destroy();
     tray = null;
   });
@@ -48,14 +70,109 @@ if (!gotLock) {
       console.log('[luna-desktop] iniciado pelo autostart do Windows');
     }
 
-    tray = createTray({ onQuit: () => app.quit() });
-    tray.setState('idle');
+    let config;
+    try {
+      config = loadConfig();
+    } catch (err) {
+      if (err instanceof ConfigError) {
+        // Não é um crash: o usuário corrige o .env e reinicia. O item
+        // "Configurações" continua funcionando mesmo sem config carregada.
+        console.error(`[luna-desktop] ${err.message}`);
+        tray = createTray({ onQuit: () => app.quit(), onOpenConfig: openConfig });
+        tray.setState('error');
+        tray.notify('Luna — configuração incompleta', err.message);
+        console.log('[luna-desktop] pronto, mas em erro — corrija o .env e reinicie');
+        return;
+      }
+      throw err;
+    }
+
+    session = new Session();
+
+    wsClient = new LunaWsClient({
+      serverUrl: config.serverUrl,
+      roomId: config.roomId,
+      authSecret: config.authSecret,
+      deviceId: config.deviceId,
+    });
+
+    captureWindow = createCaptureWindow({
+      onMicFrame: (pcm) => {
+        // A captura nunca para (necessário para o barge-in por wake word do
+        // M4 mais tarde); só o envio ao servidor é fechado durante
+        // thinking/speaking/mudo. Descartar aqui, não no renderer, mantém a
+        // decisão de gate inteira no session.
+        if (session?.isUplinkOpen()) wsClient?.sendAudio(pcm);
+      },
+      onCaptureError: (message) => {
+        console.error(`[luna-desktop] erro de captura: ${message}`);
+        tray?.notify('Luna — erro de microfone', message);
+      },
+      onCaptureReady: () => {
+        console.log('[luna-desktop] captura de áudio pronta (mic + worklet)');
+      },
+    });
+
+    session.on('stateChanged', (state) => tray?.setState(state));
+    session.on('ttfab', (info) => {
+      console.log(`[TTFAB] speaking_start→áudio: ${info.sinceSpeakingStartMs}ms`);
+    });
+    session.on('flushPlayback', () => captureWindow?.flushPlayback());
+
+    wsClient.on('connecting', () => {
+      console.log(`[luna-desktop] conectando a ${config.serverUrl}...`);
+      session?.onConnecting();
+    });
+    wsClient.on('authOk', () => {
+      console.log(`[luna-desktop] autenticado (device_id=${config.deviceId})`);
+      session?.onAuthOk();
+    });
+    wsClient.on('authError', (reason) => {
+      console.error(`[luna-desktop] auth falhou: ${reason ?? '(sem motivo)'}`);
+      tray?.notify(
+        'Luna — falha de autenticação',
+        `${reason ?? 'motivo desconhecido'}\nConfira se WS_AUTH_SECRET bate com o luna-server.`,
+      );
+    });
+    wsClient.on('closed', ({ code, reason }) => {
+      console.warn(`[luna-desktop] WS desconectado (code=${code} reason="${reason}")`);
+      session?.onDisconnected();
+    });
+    wsClient.on('reconnectScheduled', (delayMs) => {
+      console.log(`[luna-desktop] reconectando em ${Math.round(delayMs / 1000)}s`);
+    });
+    wsClient.on('control', (envelope) => {
+      if (envelope.type === 'speaking_start') {
+        session?.onSpeakingStart();
+      } else if (envelope.type === 'speaking_end') {
+        session?.onSpeakingEnd();
+      } else if (envelope.type === 'command_result') {
+        const status = envelope.success ? 'ok' : 'falhou';
+        console.log(
+          `[command_result] ${envelope.device} → ${envelope.action} (${envelope.entity_id}): ${status}`,
+        );
+      }
+    });
+    wsClient.on('audio', (_envelope, pcm) => {
+      const shouldPlay = session?.onAudioResponseFrame() ?? false;
+      if (shouldPlay) captureWindow?.playPcm(pcm);
+    });
+
+    tray = createTray({
+      onQuit: () => app.quit(),
+      onToggleMic: () => session?.setMuted(!session.isMuted()),
+      onForceListen: () => session?.forceListen(),
+      onOpenConfig: openConfig,
+      isMicMuted: () => session?.isMuted() ?? false,
+    });
+    tray.setState('error'); // até o primeiro authOk chegar
+
+    wsClient.start();
 
     console.log('[luna-desktop] pronto — ícone na bandeja (pode estar no overflow "^")');
   }).catch((error) => {
-    // Sem isso, um throw aqui dentro (ex.: o guard de createTray, ou o
-    // Menu.buildFromTemplate) vira rejeição não tratada com o processo vivo,
-    // sem tray e sem janela — o mesmo estado zumbi do ícone vazio em tray.ts.
+    // Sem isso, um throw aqui dentro vira rejeição não tratada com o processo
+    // vivo, sem tray e sem janela — o mesmo estado zumbi do ícone vazio em tray.ts.
     console.error('[luna-desktop] falha ao iniciar:', error);
     app.exit(1);
   });

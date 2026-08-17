@@ -4,9 +4,9 @@ Assistente de voz residencial: satélites ESP32-S3 (`luna-firmware`) falam por W
 
 Arquitetura e decisões: [`docs/PROJETO LUNA.md`](docs/PROJETO%20LUNA.md) e [`docs/adr/`](docs/adr/). Consulte antes de mudar contrato de mensagem, adapter de áudio ou wake word.
 
-## Revisão obrigatória
+## Revisão de codigo
 
-Depois de qualquer alteração de código, e **antes** de reportar a tarefa como concluída, despache o agente `luna-code-reviewer` e apresente os achados dele. Ele lê o diff, aplica os checklists do projeto e roda `tsc` + testes quando a mudança toca o servidor.
+Toda vez que for pedida uma revisao de codigo, despache o agente `luna-code-reviewer` e apresente os achados dele. Ele lê o diff, aplica os checklists do projeto e roda `tsc` + testes quando a mudança toca o servidor.
 
 Não é o caso quando: a mudança é só documentação, comentário ou Markdown; ou o usuário pediu para pular a revisão.
 

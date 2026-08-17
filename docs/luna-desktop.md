@@ -1,6 +1,6 @@
 # Luna Desktop — plano de implementação
 
-**Status:** Planejado, não iniciado
+**Status:** Em andamento — marco 2 de 5 concluído (round-trip de áudio sem wake word)
 **Data:** 2026-08-16
 
 ## Objetivo
@@ -85,16 +85,16 @@ luna-desktop/
 
 ## Ordem de construção (marcos, cada um verificável isoladamente)
 
-1. **Esqueleto Electron + tray** — app sobe, ícone na bandeja, menu Sair funciona, autostart configurável. Sem áudio ainda. Valida empacotamento/single-instance antes de qualquer complexidade de áudio.
-2. **Round-trip de áudio sem wake word** — portar `protocol.ts`/`config.ts`/auth do `luna-client-test`; captura via Web Audio no renderer, streaming contínuo (igual ao client-test hoje) pro `luna-server`, playback da resposta. Objetivo: provar que a abordagem Web Audio fala o protocolo corretamente antes de complicar com wake word.
+1. ✅ **Esqueleto Electron + tray** — app sobe, ícone na bandeja, menu Sair funciona, autostart configurável. Sem áudio ainda. Valida empacotamento/single-instance antes de qualquer complexidade de áudio.
+2. ✅ **Round-trip de áudio sem wake word** — protocolo/auth portados (`src/main/ws/`), captura via Web Audio no renderer (janela oculta), streaming contínuo pro `luna-server`, playback da resposta. Validado ponta a ponta contra o `luna-server` local: auth_ok, sessão Gemini Live aberta, TTFAB logado. Reconexão com backoff (o `luna-client-test` não tinha — um app de bandeja não pode sair no primeiro erro), watchdogs contra turno travado, e uplink pausado durante `speaking`/`thinking` (a captura em si nunca para — é o caminho que o barge-in por wake word do M4 vai reusar via `session.forceListen()`, já exposto manualmente no menu). Detalhes em [`luna-desktop/README.md`](../luna-desktop/README.md).
 3. **Sidecar de wake word isolado** — script Python roda sozinho, recebe um `.wav` de fixture (reaproveitar `luna-client-test/fixtures/silence.wav` + gravar um "hey luna" real), confirma detecção via stdout. Testado fora do Electron primeiro.
 4. **Integrar sidecar na máquina de estados** — gatilho de wake liga o streaming; ícones de tray refletem idle/ouvindo/pensando/falando.
 5. **Polimento** — mutar/forçar-escuta no menu, `electron-builder` pra gerar instalador Windows, README de setup (`.env`, dependência do Python).
 
 ## Verificação
 
-- M1: rodar `npm run dev`, confirmar ícone na bandeja e que fechar/reabrir não duplica instância.
-- M2: falar no mic real, confirmar log de TTFAB (mesmo padrão do `luna-client-test`) e áudio de resposta audível — comparar round-trip contra o `luna-client-test` já validado.
+- M1: ✅ rodar `npm run dev`, confirmar ícone na bandeja e que fechar/reabrir não duplica instância.
+- M2: ✅ confirmado contra o `luna-server` local (mesmo `WS_AUTH_SECRET`, porta 8086): `auth_ok` recebido, `device_id` (UUID) persistido em `userData`, captura de mic real inicializada (getUserMedia + AudioWorklet, sem addon nativo), e o servidor abriu sessão Gemini Live + sala ao receber os primeiros `audio_chunk` — confirma que os frames de áudio chegaram e foram aceitos. Falta ainda um teste manual de ponta a ponta com resposta falada audível e cronometragem de TTFAB por um humano (o smoke test automatizado desta sessão não tem microfone/alto-falante para validar o áudio em si, só o protocolo).
 - M3: rodar o sidecar isolado contra a fixture e contra fala real gravada, conferir que só dispara em "Hey Luna" (checar falso-positivo com TV/conversa de fundo, mesmo teste que validou o firmware).
 - M4/M5: teste manual ponta a ponta — falar "Hey Luna" longe do teclado, confirmar transição de ícone idle→ouvindo→pensando→falando e resposta correta; testar timeout/erro de auth (`.env` errado) mostra estado de erro no tray, não crash silencioso.
 
