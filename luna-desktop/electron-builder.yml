@@ -1,0 +1,58 @@
+# Config do electron-builder (marco 5 — instalador Windows). Arquivo separado
+# em vez de uma chave "build" dentro do package.json: evita confusão com o
+# script "scripts.build" (tsc + copy-renderer) que já existe lá.
+#
+# Rodar com: npm run package:win (builda com tsc antes de empacotar).
+
+appId: com.diogo.luna.desktop # mesmo id de app.setAppUserModelId() em index.ts
+productName: Luna Desktop
+icon: assets/icon.ico # gerado por scripts/generate-app-icon.mjs (npm run icons)
+
+directories:
+  # O .gitignore já avisa: o "build/" default do electron-builder colide com o
+  # /dist,/build genérico já ignorado no repo — aponta explícito pra assets/.
+  buildResources: assets
+  output: release
+
+# Lista fechada em vez do default (que inclui basicamente tudo não ignorado):
+# só o que o app empacotado precisa em runtime. src/, scripts/ de dev e
+# wakeword-sidecar/ ficam de fora daqui — o sidecar precisa existir como
+# arquivo real em disco pro Python rodar (não dentro do asar), então vai por
+# extraResources abaixo.
+files:
+  - dist/**/*
+  - assets/**/*
+  - package.json
+
+# Sidecar de wake word: código-fonte Python (sem .venv — v1 continua exigindo
+# Python local, decisão já tomada em docs/luna-desktop.md) e os dois .tflite
+# vendorizados que hoje só existem como caminho relativo ao monorepo
+# (luna-firmware/models/, fora de luna-desktop/) — sem isso aqui, o instalador
+# sobe mas a detecção de wake falha com "modelo não encontrado" assim que
+# instalado fora do checkout. src/main/wakeword/sidecar.ts resolve esses
+# caminhos via process.resourcesPath quando app.isPackaged.
+#
+# .env.example também vai — src/main/config.ts usa esse arquivo pra semear o
+# .env em userData na primeira execução empacotada (não tem monorepo por perto
+# pra copiar à mão).
+extraResources:
+  - from: .env.example
+    to: .env.example
+  - from: wakeword-sidecar
+    to: wakeword-sidecar
+    filter:
+      - '*.py'
+      - requirements.txt
+      - README.md
+  - from: ../luna-firmware/models
+    to: wakeword-sidecar/models
+    filter:
+      - hey_luna_trained.tflite
+      - okay_nabu.tflite
+
+win:
+  target: nsis
+
+# Defaults do electron-builder (não sobrescritos aqui): oneClick=true,
+# perMachine=false — instala em %LOCALAPPDATA%\Programs\, sem exigir admin,
+# adequado pro caso de uso single-user (distribuição só pra este usuário).

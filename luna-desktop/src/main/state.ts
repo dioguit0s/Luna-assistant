@@ -51,7 +51,18 @@ export function trayIconFileName(state: AppState): string {
   return `${trayIconBaseName(state)}.png`;
 }
 
+/**
+ * Qualificador do estado 'idle', que desde o M4 cobre tanto "mudo" quanto
+ * "aguardando um 'Hey Luna'" — indistinguíveis sem isso, porque os dois
+ * mapeiam para o mesmo ícone/rótulo. Usado no cabeçalho do menu (menu.ts) e
+ * no tooltip do tray (tray.ts) só quando state === 'idle'.
+ */
+export function idleQualifier(muted: boolean): string {
+  return muted ? 'mudo' : 'aguardando "Hey Luna"';
+}
+
 /** Texto do tooltip do ícone de bandeja. */
-export function tooltipFor(state: AppState): string {
-  return `Luna — ${stateLabel(state)}`;
+export function tooltipFor(state: AppState, muted = false): string {
+  const base = `Luna — ${stateLabel(state)}`;
+  return state === 'idle' ? `${base} (${idleQualifier(muted)})` : base;
 }

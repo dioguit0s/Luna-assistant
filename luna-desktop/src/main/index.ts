@@ -1,7 +1,7 @@
-// Entrypoint do luna-desktop — marco 2: round-trip de áudio sem wake word.
-// Mic (Web Audio na janela oculta) -> audio_chunk -> luna-server ->
-// audio_response -> alto-falante. Streaming contínuo, sem wake word ainda
-// (M4). Ver docs/luna-desktop.md.
+// Entrypoint do luna-desktop — marco 4: sidecar de wake word integrado à
+// máquina de estados. Mic (Web Audio na janela oculta) -> sidecar Python
+// (detecção de "Hey Luna") + audio_chunk pro luna-server (só depois do wake)
+// -> audio_response -> alto-falante. Ver docs/luna-desktop.md.
 //
 // Nada de top-level await antes dos app.on(...): sob main ESM o módulo é
 // avaliado de forma assíncrona e o evento 'ready' pode passar antes de os
@@ -16,6 +16,7 @@ import { Session } from './session.js';
 import { LunaWsClient } from './ws/client.js';
 import { createCaptureWindow, type CaptureWindow } from './window.js';
 import { createMicDump, type MicDump } from './mic-dump.js';
+import { WakewordSidecar } from './wakeword/sidecar.js';
 
 // Identidade do app no Windows (barra de tarefas, balões). Antes de tudo.
 app.setAppUserModelId('com.diogo.luna.desktop');
@@ -25,6 +26,7 @@ let session: Session | null = null;
 let wsClient: LunaWsClient | null = null;
 let captureWindow: CaptureWindow | null = null;
 let micDump: MicDump | null = null;
+let wakeword: WakewordSidecar | null = null;
 
 function openConfig(): void {
   shell.openPath(ENV_PATH).then((errorMessage) => {
@@ -56,8 +58,10 @@ if (!gotLock) {
   });
 
   app.on('will-quit', () => {
-    // Sem isso: ícone fantasma na bandeja, WS pendurado, janela oculta viva.
+    // Sem isso: ícone fantasma na bandeja, WS pendurado, janela oculta viva,
+    // sidecar Python órfão.
     wsClient?.stop();
+    wakeword?.stop();
     captureWindow?.destroy();
     session?.destroy();
     tray?.destroy();
@@ -107,16 +111,24 @@ if (!gotLock) {
       deviceId: config.deviceId,
     });
 
+    wakeword = new WakewordSidecar({
+      model: config.wakewordModelPath,
+      threshold: config.wakewordThreshold,
+    });
+
     captureWindow = createCaptureWindow({
       onMicFrame: (pcm) => {
-        // Antes do gate de uplink de propósito: a fixture de calibração do
+        // Antes de qualquer gate de propósito: a fixture de calibração do
         // wake word precisa do áudio inteiro (mudo, thinking, speaking
         // incluídos), não só do que chega a ser enviado ao servidor.
         micDump?.write(pcm);
-        // A captura nunca para (necessário para o barge-in por wake word do
-        // M4 mais tarde); só o envio ao servidor é fechado durante
-        // thinking/speaking/mudo. Descartar aqui, não no renderer, mantém a
-        // decisão de gate inteira no session.
+        // A captura nunca para (necessário para o barge-in por wake word);
+        // só o que sai dela é fechado. Mudo pausa a alimentação do sidecar
+        // também — mudo deve mutar tudo, incluindo detecção de wake.
+        if (!session?.isMuted()) wakeword?.feed(pcm);
+        // O envio ao servidor é fechado durante thinking/speaking/mudo/
+        // aguardando-wake. Descartar aqui, não no renderer, mantém a decisão
+        // de gate inteira no session.
         if (session?.isUplinkOpen()) wsClient?.sendAudio(pcm);
       },
       onCaptureError: (message) => {
@@ -133,6 +145,26 @@ if (!gotLock) {
       console.log(`[TTFAB] speaking_start→áudio: ${info.sinceSpeakingStartMs}ms`);
     });
     session.on('flushPlayback', () => captureWindow?.flushPlayback());
+
+    wakeword.on('ready', (info) => {
+      console.log(`[luna-desktop] wakeword pronto (modelo=${info.model} threshold=${info.threshold})`);
+      session?.setSidecarHealthy(true);
+    });
+    wakeword.on('wake', (info) => {
+      console.log(`[luna-desktop] wake detectado (mean_prob=${info.mean_prob.toFixed(3)})`);
+      session?.onWakeDetected();
+    });
+    wakeword.on('crashed', ({ code }) => {
+      console.warn(`[luna-desktop] wakeword sidecar saiu (code=${code}) — reiniciando`);
+      session?.setSidecarHealthy(false);
+    });
+    wakeword.on('fatalError', (message) => {
+      session?.setSidecarHealthy(false);
+      tray?.notify('Luna — wake word indisponível', message);
+    });
+    wakeword.on('restartScheduled', (delayMs) => {
+      console.log(`[luna-desktop] wakeword: reiniciando em ${Math.round(delayMs / 1000)}s`);
+    });
 
     wsClient.on('connecting', () => {
       console.log(`[luna-desktop] conectando a ${config.serverUrl}...`);
@@ -183,6 +215,7 @@ if (!gotLock) {
     tray.setState('error'); // até o primeiro authOk chegar
 
     wsClient.start();
+    wakeword.start();
 
     console.log('[luna-desktop] pronto — ícone na bandeja (pode estar no overflow "^")');
   }).catch((error) => {

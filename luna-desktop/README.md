@@ -5,21 +5,20 @@ voz do satélite ESP32-S3 — sem hardware dedicado.
 
 Plano completo em [`docs/luna-desktop.md`](../docs/luna-desktop.md).
 
-## Estado atual — marco 3 de 5
+## Estado atual — marco 5 de 5 (polimento)
 
-O que já funciona: ícone na bandeja com estado, menu, autostart no login, trava
-de instância única, o round-trip de áudio completo (captura via Web Audio,
-WebSocket autenticado, streaming de `audio_chunk`, playback da resposta), e
-agora um **sidecar de wake word isolado** (`wakeword-sidecar/`) — roda fora do
-Electron, recebe `.wav` ou stdin, confirma detecção de "Hey Luna" via stdout.
-Ver [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md).
+O que já funciona: ícone na bandeja com estado, menu (mutar microfone, forçar
+escuta, autostart, configurações), trava de instância única, o round-trip de
+áudio completo (captura via Web Audio, WebSocket autenticado, streaming de
+`audio_chunk`, playback da resposta), e o **sidecar de wake word ligado à
+máquina de estados**: o app começa em repouso ("Ociosa — aguardando 'Hey
+Luna'"), sem streamar nada pro servidor até um "Hey Luna" real (ou o bypass
+manual "Forçar escuta agora"). Validado ponta a ponta com voz real — ver
+[`docs/luna-desktop.md`](../docs/luna-desktop.md) para o histórico completo
+dos marcos 1-4.
 
-O que **ainda não** existe: o sidecar **ligado** à máquina de estados (marco
-4) — hoje o mic ainda streama **continuamente** para o servidor assim que
-autenticado, sem filtro nenhum; o sidecar roda em paralelo, mas não interrompe
-nem inicia o streaming sozinho. Nem a validação final do M3 com voz real
-gravada (a máquina onde o M3 foi implementado não tinha como gravar áudio) —
-ver a seção "Wake word" abaixo.
+Marco 5 (em andamento): empacotamento num instalador Windows (ver seção
+"Empacotar" abaixo) e este próprio README.
 
 ## Pré-requisitos
 
@@ -78,9 +77,14 @@ O Windows 10 pede permissão de privacidade de microfone por app
 automaticamente para o processo que chama `getUserMedia`, mas se o app ficar
 em `error` mesmo com `.env` correto e o `luna-server` no ar, confira ali.
 
-**Streaming contínuo:** enquanto não mutado (menu *Mutar microfone*), o app
-manda tudo que o mic capta para o `luna-server` — não há wake word neste
-marco para filtrar. Para debugar visualmente a captura (nível de mic, erros),
+**Captura sempre ligada, envio com gate:** o mic nunca para de capturar
+localmente (necessário para o barge-in por wake word), mas só manda
+`audio_chunk` pro `luna-server` depois de um "Hey Luna" real (evento do
+sidecar) ou de "Forçar escuta agora" no menu — em repouso, o áudio só
+alimenta o detector de wake word local. *Mutar microfone* corta os dois: nem
+detecção de wake, nem envio pro servidor. Desmutar não retoma sozinho — exige
+um novo "Hey Luna" (ou "Forçar escuta agora", que fica desabilitado no menu
+enquanto mudo). Para debugar visualmente a captura (nível de mic, erros),
 rode com `LUNA_DEBUG_WINDOW=1`:
 
 ```bash
@@ -127,8 +131,23 @@ Testes do sidecar (puro Python, sem tflite/pymicro):
 npm run test:wakeword
 ```
 
-Neste marco (M3) o sidecar roda **isolado** — o Electron ainda não o inicia.
-Isso é o marco 4.
+Desde o marco 4, o Electron sobe o sidecar sozinho (`src/main/wakeword/`) e
+liga o evento `wake` à máquina de estados — ver "Estado atual" acima.
+
+**`WAKEWORD_MODEL`/`WAKEWORD_THRESHOLD` no `.env`** (opcionais — omitidos,
+o sidecar usa os próprios defaults, `hey_luna_trained.tflite` e `0.97`):
+
+```
+WAKEWORD_MODEL=../luna-firmware/models/okay_nabu.tflite
+WAKEWORD_THRESHOLD=0.97
+```
+
+`hey_luna_trained.tflite` (modelo treinado da Luna) teve recall baixo (~30%)
+em voz real no M3 — dispara sem falso-positivo quando dispara, mas erra a
+maioria das tentativas. `okay_nabu.tflite` é uma alternativa provisória mais
+confiável (~100% recall no teste de controle), mas muda a frase de ativação
+para "Okay Nabu". Detalhe completo em
+[`wakeword-sidecar/README.md`](wakeword-sidecar/README.md).
 
 ## Conexão e áudio
 
@@ -140,11 +159,11 @@ Isso é o marco 4.
   tentar rápido — o secret não se corrige sozinho).
 - **TTFAB no log:** cada resposta loga `[TTFAB] speaking_start→áudio: Xms` —
   comparável à métrica do [`luna-client-test`](../luna-client-test).
-- **"Forçar escuta agora"** interrompe uma resposta em andamento (equivalente
-  manual ao barge-in que o wake word do marco 4 vai disparar sozinho): corta o
-  playback na hora e volta a ouvir. Frames de áudio que o servidor já tinha
-  mandado antes da interrupção são descartados, não tocam por cima da fala
-  seguinte.
+- **"Hey Luna" / "Forçar escuta agora"** abrem o gate a partir do repouso, ou
+  interrompem uma resposta em andamento (barge-in): corta o playback na hora e
+  volta a ouvir. Frames de áudio que o servidor já tinha mandado antes da
+  interrupção são descartados, não tocam por cima da fala seguinte. "Forçar
+  escuta agora" fica desabilitado no menu enquanto o mic está mudo.
 - **Watchdogs:** se o servidor parar de responder no meio de um turno
   (`thinking` por 15s ou `speaking` por 5s sem novo chunk), o app volta a
   ouvir sozinho em vez de ficar surdo pra sempre — mesma classe de bug do
@@ -156,12 +175,48 @@ Isso é o marco 4.
 npm run icons
 ```
 
-Gera `assets/tray-*.png` (16px, `@1.5x`, `@2x`) com Node puro — sem dependência
-de rasterização. Os PNGs são commitados; só rode isso depois de mexer na paleta
-ou na geometria em [`scripts/generate-icons.mjs`](scripts/generate-icons.mjs).
+Gera `assets/tray-*.png` (16px, `@1.5x`, `@2x`) e `assets/icon.ico`
+(16/32/48/256px, usado pelo instalador) com Node puro — sem dependência de
+rasterização. Os arquivos são commitados; só rode isso depois de mexer na
+paleta ou na geometria em [`scripts/png.mjs`](scripts/png.mjs) (compartilhado
+por [`generate-icons.mjs`](scripts/generate-icons.mjs) e
+[`generate-app-icon.mjs`](scripts/generate-app-icon.mjs)).
 
 Uma cor por estado: cinza (ociosa), azul (ouvindo), âmbar (pensando), verde
-(falando), vermelho (erro).
+(falando), vermelho (erro). O ícone do app usa a cor "ociosa".
+
+## Empacotar (instalador Windows)
+
+```bash
+npm run package:win
+```
+
+Builda (`tsc` + copy-renderer) e roda o [electron-builder](https://www.electron.build/)
+(`electron-builder.yml`) com alvo NSIS. O instalador sai em
+`release/Luna Desktop Setup <versão>.exe` — instala em
+`%LOCALAPPDATA%\Programs\` sem exigir admin (`perMachine: false`, o default do
+electron-builder), adequado pra distribuição single-user.
+
+**O sidecar de wake word vai junto** (código Python + os dois `.tflite`
+vendorizados, copiados de `luna-firmware/models/` — ver `extraResources` em
+`electron-builder.yml`), mas **o `.venv` não** (v1 continua exigindo Python
+local, decisão já tomada). Depois de instalar, pra "Hey Luna" funcionar:
+
+```bash
+cd "%LOCALAPPDATA%\Programs\Luna Desktop\resources\wakeword-sidecar"
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Mesmos passos de [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md),
+só que a partir da instalação em vez do checkout do repo.
+
+**`.env` na primeira execução:** o instalador não pergunta nada — na primeira
+vez que o app roda sem um `.env` em `userData`
+(`%APPDATA%\luna-desktop\.env`), ele copia sozinho o modelo bundlado
+(`.env.example`) pra lá e fica em estado de erro até você abrir
+"Configurações" no menu, preencher `WS_AUTH_SECRET` (idêntico ao do
+`luna-server`) e reiniciar o app.
 
 ## Bandeja
 

@@ -89,7 +89,17 @@ export function createTray(deps: TrayControllerDeps): TrayController {
         console.log(`[luna-desktop] autostart ${enabled ? 'ligado' : 'desligado'}`);
       },
       onQuit: deps.onQuit,
-      onToggleMic: deps.onToggleMic,
+      // Mudo/desmudo não muda o AppState em 'idle' (session.ts colapsa os
+      // dois no mesmo estado), então setState() nunca dispararia applyState()
+      // sozinho — sem este wrapper o tooltip do tray ficaria com o
+      // qualificador (mudo/aguardando wake) desatualizado até a próxima
+      // transição real de estado.
+      onToggleMic: deps.onToggleMic
+        ? () => {
+            deps.onToggleMic!();
+            applyState(currentState);
+          }
+        : undefined,
       onForceListen: deps.onForceListen,
       onOpenConfig: deps.onOpenConfig,
     });
@@ -99,7 +109,7 @@ export function createTray(deps: TrayControllerDeps): TrayController {
   const applyState = (state: AppState): void => {
     currentState = state;
     trayInstance.setImage(icons.get(state)!);
-    trayInstance.setToolTip(tooltipFor(state));
+    trayInstance.setToolTip(tooltipFor(state, deps.isMicMuted?.() ?? false));
     // Reconstruir o menu (em vez de mutar labels) porque mutação de MenuItem já
     // construído é inconsistente no Windows, e o rótulo de estado fica no topo.
     refreshMenu();
