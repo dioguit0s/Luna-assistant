@@ -38,12 +38,26 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
   private assistantTranscript = '';
   private roomId = '';
   /**
+   * Guarda contra notificação duplicada: `ws.on('close')` e `sendAudio` com
+   * socket morto podem disparar `sessionEndedCb` para o mesmo fechamento
+   * (mesma corrida coberta em GeminiLiveAdapter via `notifySessionEnded`/
+   * `session === null`) — aqui não há um campo de sessão para servir de
+   * guarda sozinho, daí a flag explícita.
+   */
+  private sessionEndedNotified = false;
+  /**
    * Calls da resposta em voo ainda sem resultado. Só quando esvazia é que sai o
    * `response.create` — ver `sendToolResult`.
    */
   private readonly pendingToolCalls = new Set<string>();
 
   constructor(private readonly config: AppConfig) {}
+
+  private notifySessionEnded(): void {
+    if (this.sessionEndedNotified) return;
+    this.sessionEndedNotified = true;
+    this.sessionEndedCb?.();
+  }
 
   /**
    * `server_vad` corta por silêncio (a janela entra direto no TTFAB, como no
@@ -76,6 +90,7 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
 
       this.ws.on('open', () => {
         this.connected = true;
+        this.sessionEndedNotified = false;
         this.sendEvent({
           type: 'session.update',
           session: {
@@ -124,14 +139,27 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
         // (mesma lacuna corrigida no GeminiLiveAdapter) — aqui não há renovação
         // proativa por `goAway`, então todo fechamento orgânico precisa avisar
         // o RoomManager pra recriar sob demanda na próxima fala.
-        if (!this.disposed) this.sessionEndedCb?.();
+        if (!this.disposed) this.notifySessionEnded();
       });
     });
   }
 
   sendAudio(pcm16kHz: Buffer): void {
     if (!this.ws || !this.connected) {
-      throw new Error('OpenAIRealtimeAdapter não conectado');
+      // Socket já caiu (limite de duração da Realtime API, queda de rede) e o
+      // satélite ainda mandando áudio: lançar aqui derrubava o processo
+      // inteiro por unhandledRejection (handleAudioChunk é async e o
+      // WsServer não tinha .catch). Descarta o chunk; `ws.on('close')` já
+      // deve ter disparado `sessionEndedCb` para o RoomManager recriar a
+      // sessão na próxima fala — chamar de novo aqui é no-op (evictRoom já
+      // é idempotente), rede de segurança caso o áudio chegue antes do
+      // evento `close` ser processado.
+      getLogger().warn(
+        { event: 'openai_send_audio_not_connected', room_id: this.roomId },
+        'Áudio recebido sem sessão OpenAI Realtime ativa: descartado',
+      );
+      if (!this.disposed) this.notifySessionEnded();
+      return;
     }
 
     const pcm24k = resample16kTo24k(pcm16kHz);

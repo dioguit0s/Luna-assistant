@@ -179,7 +179,15 @@ export class HomeAssistantClient {
         },
         `Home Assistant aceitou ${domain}.${service} em ${entityId} (sem confirmação no corpo)`,
       );
-      void this.verifyStateEventually(domain, service, entityId);
+      // `getState` já captura tudo, então isto é seguro hoje — mas fica a um
+      // refactor de virar unhandledRejection. `.catch` explícito: telemetria
+      // não pode ter caminho nenhum de derrubar o processo.
+      this.verifyStateEventually(domain, service, entityId).catch((err) => {
+        getLogger().warn(
+          { event: 'ha_verify', entity_id: entityId, err: this.describeFailure(err) },
+          `Falha inesperada na verificação em background de ${entityId}`,
+        );
+      });
       return { success: true };
     } catch (err) {
       const error = this.describeFailure(err);

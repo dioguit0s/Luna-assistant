@@ -19,6 +19,14 @@ export interface AppConfig {
   devicesConfigPath: string;
   /** Intervalo de revalidação do registro: dispositivo novo sem restart. */
   deviceRegistryTtlMs: number;
+  /**
+   * Teto para `IAudioProvider.connect()`. Um blackhole de rede (Wi-Fi de pé,
+   * internet fora) deixa a promise do SDK do Gemini/OpenAI pendurada para
+   * sempre — sem este teto, `RoomManager.pendingConnections` entrega a mesma
+   * promise nunca resolvida para todo chunk de áudio seguinte, e a sala fica
+   * muda até o processo reiniciar.
+   */
+  providerConnectTimeoutMs: number;
   geminiVadSilenceMs: number | null;
   geminiVadEndSensitivity: EndSensitivityName | null;
   geminiManualActivity: boolean;
@@ -130,6 +138,7 @@ export function loadConfig(): AppConfig {
     haToken: process.env.HA_TOKEN ?? '',
     devicesConfigPath: process.env.DEVICES_CONFIG_PATH ?? 'config/devices.json',
     deviceRegistryTtlMs: parseOptionalNumber('DEVICE_REGISTRY_TTL_MS') ?? 300_000,
+    providerConnectTimeoutMs: parseOptionalNumber('PROVIDER_CONNECT_TIMEOUT_MS') ?? 5000,
     // Sem override, o SDK usa END_SENSITIVITY_LOW e uma janela de silêncio
     // longa: o Gemini só começa a gerar bem depois de o usuário calar. Isso
     // entra inteiro no atraso percebido entre o comando e a luz acender.

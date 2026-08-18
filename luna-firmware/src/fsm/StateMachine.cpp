@@ -116,4 +116,9 @@ void onSpeakingEnd() {
   if (resumeAt == 0) resumeAt = 1; // evita colidir com o sentinela
 }
 
+void noteResponseAudio() {
+  if (state != State::RESPONDING) return;
+  respondingSince = millis();
+}
+
 } // namespace StateMachine

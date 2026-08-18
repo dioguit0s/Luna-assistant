@@ -18,6 +18,8 @@ export class RoomManager {
   constructor(
     private readonly config: AppConfig,
     private readonly ringBuffer: ConversationRingBuffer,
+    /** Injetável para teste (timeout de connect): mesmo padrão do `fetchImpl` de `HomeAssistantClient`. */
+    private readonly providerFactory: (config: AppConfig) => IAudioProvider = createAudioProvider,
   ) {}
 
   async getOrCreateProvider(roomId: string): Promise<IAudioProvider> {
@@ -42,21 +44,81 @@ export class RoomManager {
   }
 
   private async createProviderSession(roomId: string): Promise<IAudioProvider> {
-    const provider = createAudioProvider(this.config);
+    const provider = this.providerFactory(this.config);
     const history = this.ringBuffer.getHistory(roomId);
     const systemPrompt = buildLunaSystemPrompt(roomId, history);
 
-    await provider.connect({
+    const connectPromise = provider.connect({
       roomId,
       systemPrompt,
       history,
       tools: [CONTROL_DEVICE_TOOL],
     });
 
+    await this.awaitConnectWithTimeout(roomId, provider, connectPromise);
+
     this.sessions.set(roomId, { provider });
     getLogger().info({ room_id: roomId, event: 'room_created' }, 'Sala criada');
 
     return provider;
+  }
+
+  /**
+   * Teto para `connect()`: num blackhole de rede (Wi-Fi de pé, internet fora)
+   * a promise do SDK do Gemini/OpenAI nunca resolve nem rejeita. Sem isto,
+   * `getOrCreateProvider` entregaria a mesma promise pendurada para sempre a
+   * todo chunk de áudio seguinte — a sala ficaria muda até o processo
+   * reiniciar, sem log nenhum apontando a causa.
+   *
+   * A `connectPromise` original não é cancelável (o SDK não expõe isso), então
+   * no estouro ela continua em voo. Se acabar resolvendo depois do prazo, o
+   * `.then` abaixo desconecta a sessão assim que ela assentar — chamar
+   * `provider.disconnect()` *antes* disso arriscaria uma corrida com o próprio
+   * `connect()` do adapter (o `disposed` dos dois adapters só é checado antes
+   * do `await` interno, não depois: um `disconnect()` prematuro marcaria
+   * `disposed = true` sem sessão ainda atribuída, e o `connect()` sobrescreveria
+   * `this.session` com uma sessão "viva" logo em seguida — vazando a conexão
+   * paga do provedor sem que nada a feche).
+   */
+  private async awaitConnectWithTimeout(
+    roomId: string,
+    provider: IAudioProvider,
+    connectPromise: Promise<void>,
+  ): Promise<void> {
+    const timeoutMs = this.config.providerConnectTimeoutMs;
+    let timedOut = false;
+
+    const timeout = new Promise<never>((_, reject) => {
+      const timer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`Timeout ao conectar o provider de áudio (${timeoutMs}ms, room_id=${roomId})`));
+      }, timeoutMs);
+      timer.unref();
+    });
+
+    try {
+      await Promise.race([connectPromise, timeout]);
+    } catch (err) {
+      if (timedOut) {
+        getLogger().error(
+          { room_id: roomId, event: 'provider_connect_timeout', timeout_ms: timeoutMs },
+          'connect() do provider de áudio excedeu o teto: sala não criada',
+        );
+        void connectPromise
+          .then(() => {
+            getLogger().warn(
+              { room_id: roomId, event: 'provider_connect_timeout_late_success' },
+              'connect() do provider resolveu depois do teto: desconectando sessão órfã',
+            );
+            return provider.disconnect();
+          })
+          .catch(() => {
+            // connect() também rejeitou, só que depois do teto — nada para
+            // desconectar, o erro relevante já foi logado/propagado acima.
+          });
+      }
+      throw err;
+    }
   }
 
   /**
@@ -83,7 +145,14 @@ export class RoomManager {
     this.clientCounts.set(roomId, (this.clientCounts.get(roomId) ?? 0) + 1);
   }
 
-  async unregisterClient(roomId: string): Promise<void> {
+  /**
+   * @returns `true` quando este era o último cliente da sala e a sessão do
+   * provider foi de fato encerrada — sinal para o chamador (`WsServer`)
+   * liberar também o estado por sala do `Orchestrator` (ver
+   * `Orchestrator.releaseRoom`). `false` quando ainda há outro cliente
+   * conectado à mesma sala e a sessão continua viva para ele.
+   */
+  async unregisterClient(roomId: string): Promise<boolean> {
     const count = (this.clientCounts.get(roomId) ?? 1) - 1;
     if (count <= 0) {
       this.clientCounts.delete(roomId);
@@ -93,9 +162,10 @@ export class RoomManager {
         this.sessions.delete(roomId);
         getLogger().info({ room_id: roomId, event: 'room_destroyed' }, 'Sala encerrada');
       }
-    } else {
-      this.clientCounts.set(roomId, count);
+      return true;
     }
+    this.clientCounts.set(roomId, count);
+    return false;
   }
 
   getRingBuffer(): ConversationRingBuffer {

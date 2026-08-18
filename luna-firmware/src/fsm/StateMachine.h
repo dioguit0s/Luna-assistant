@@ -47,4 +47,11 @@ void noteCapturePeak(int16_t peak);
 void onSpeakingStart(); // -> RESPONDING (LED off, para TX)
 void onSpeakingEnd();   // agenda retorno a IDLE_LISTENING após AEC_RESUME_DELAY_MS
 
+// Rearma o teto do RESPONDING_TIMEOUT_MS (ver config.h): chamar a cada
+// audio_response recebido do servidor, não só no speaking_start. Sem isto o
+// teto conta a partir do início da resposta e ignora áudio ainda chegando —
+// uma resposta mais longa que RESPONDING_TIMEOUT_MS era cortada no meio do
+// playback mesmo com o provider ainda enviando. No-op fora de RESPONDING.
+void noteResponseAudio();
+
 } // namespace StateMachine

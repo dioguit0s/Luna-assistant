@@ -63,12 +63,33 @@ static void handleTextFrame(const uint8_t *payload, size_t length) {
 static void handleBinaryFrame(const uint8_t *payload, size_t length) {
   if (length == 0 || payload[0] != '{') return;
 
-  // Acha o '}' que fecha o header JSON (contagem de profundidade).
+  // Acha o '}' que fecha o header JSON (contagem de profundidade, ciente de
+  // string). Sem isto, um '{' ou '}' dentro de um valor de string do header
+  // (device_id, por exemplo) fecharia no lugar errado e cortaria o PCM. O
+  // servidor tem a mesma lógica em messageParser.ts — mudar uma sem a outra é
+  // a mesma classe de regressão silenciosa do contrato WS (ver CLAUDE.md).
   int depth = 0;
   int jsonEnd = -1;
+  bool inString = false;
+  bool escaped = false;
   for (size_t i = 0; i < length; i++) {
-    if (payload[i] == '{') depth++;
-    else if (payload[i] == '}') {
+    const uint8_t c = payload[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (c == '\\') {
+      if (inString) escaped = true;
+      continue;
+    }
+    if (c == '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+
+    if (c == '{') depth++;
+    else if (c == '}') {
       if (--depth == 0) { jsonEnd = (int)i; break; }
     }
   }
