@@ -32,11 +32,26 @@ interface ClientState {
 const STALE_CONNECTION_TIMEOUT_MS = 25_000;
 const STALE_CHECK_INTERVAL_MS = 5_000;
 
+// Teto para o handshake de auth: sem isto, um socket que conecta e nunca
+// manda "auth" (bug de firmware, teste manual, cliente malicioso) fica
+// pendurado para sempre — `reapStaleConnections` só varre `clients`, que só
+// ganha entrada DEPOIS da auth bem-sucedida, então esse socket é invisível
+// ao reaper de conexões zumbis.
+const AUTH_TIMEOUT_MS = 10_000;
+
+// Vocabulário de room_id: mesmo formato do area_id do Home Assistant (ver
+// ROOM_LABELS em luna-system-prompt.ts) — minúsculas, dígitos e underscore.
+// room_id vira chave em vários mapas do Orchestrator/RoomManager; sem este
+// teto de formato/tamanho, um valor arbitrário do envelope de auth (nunca
+// validado antes) entraria direto nessas estruturas.
+const ROOM_ID_PATTERN = /^[a-z0-9_]{1,64}$/;
+
 export class WsServer {
   private wss: WebSocketServer | null = null;
   private httpServer: HttpServer | null = null;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
   private readonly clients = new Map<WebSocket, ClientState>();
+  private readonly pendingAuthTimers = new Map<WebSocket, NodeJS.Timeout>();
   private readonly orchestrator: Orchestrator;
 
   constructor(
@@ -69,17 +84,49 @@ export class WsServer {
       res.writeHead(404).end();
     });
 
-    this.wss = new WebSocketServer({ server: this.httpServer });
+    // Default do `ws` é 100MB por frame — um frame malformado (ou hostil)
+    // alocaria isso tudo antes de qualquer validação. O contrato real é
+    // 640 bytes de PCM + um header JSON pequeno; 64KB sobra folga generosa.
+    this.wss = new WebSocketServer({ server: this.httpServer, maxPayload: 64 * 1024 });
 
     this.wss.on('connection', (ws) => {
       getLogger().info({ event: 'ws_connect' }, 'Cliente WebSocket conectado');
 
+      this.pendingAuthTimers.set(
+        ws,
+        setTimeout(() => {
+          this.pendingAuthTimers.delete(ws);
+          getLogger().warn(
+            { event: 'ws_auth_timeout' },
+            `Sem "auth" em ${AUTH_TIMEOUT_MS}ms: encerrando conexão`,
+          );
+          ws.terminate();
+        }, AUTH_TIMEOUT_MS),
+      );
+
       ws.on('message', (data, isBinary) => {
-        void this.handleMessage(ws, data, isBinary);
+        this.handleMessage(ws, data, isBinary).catch((err) => {
+          // Qualquer rejeição aqui (provider inacessível, socket já fechado,
+          // etc.) não pode derrubar o processo inteiro — sob Node 22 uma
+          // unhandledRejection mata todos os cômodos, não só este. Degrada
+          // só esta conexão: fecha para o satélite reconectar e reautenticar
+          // (StateMachine::reset() no onAuthOk do firmware limpa o resto).
+          getLogger().error(
+            { err: err instanceof Error ? err.message : String(err), event: 'ws_message_failed' },
+            'Falha ao processar mensagem WebSocket',
+          );
+          ws.close(1011, 'Erro interno');
+        });
       });
 
       ws.on('close', () => {
-        void this.handleDisconnect(ws);
+        this.clearAuthTimeout(ws);
+        this.handleDisconnect(ws).catch((err) => {
+          getLogger().error(
+            { err: err instanceof Error ? err.message : String(err), event: 'ws_disconnect_failed' },
+            'Falha ao encerrar sessão da sala no disconnect',
+          );
+        });
       });
 
       ws.on('error', (err) => {
@@ -112,6 +159,14 @@ export class WsServer {
     }
   }
 
+  private clearAuthTimeout(ws: WebSocket): void {
+    const timer = this.pendingAuthTimers.get(ws);
+    if (timer) {
+      clearTimeout(timer);
+      this.pendingAuthTimers.delete(ws);
+    }
+  }
+
   /** Porta efetivamente aberta. Difere de config.wsPort quando ela é 0 (testes). */
   get port(): number | null {
     const addr = this.httpServer?.address();
@@ -124,8 +179,18 @@ export class WsServer {
       this.staleCheckTimer = null;
     }
 
+    for (const timer of this.pendingAuthTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.pendingAuthTimers.clear();
+
+    // `terminate()`, não `close()`: um satélite que não responde ao handshake
+    // de close (Wi-Fi degradado, já sem energia) faria `httpServer.close()`
+    // esperar por uma conexão que nunca vai fechar sozinha — até o teto do
+    // `ws` (closeTimeout, ~30s), tempo de sobra para o systemd mandar SIGKILL
+    // antes do shutdown gracioso terminar.
     for (const ws of this.clients.keys()) {
-      ws.close();
+      ws.terminate();
     }
     this.clients.clear();
     this.wss?.close();
@@ -203,12 +268,26 @@ export class WsServer {
     ws: WebSocket,
     envelope: NonNullable<ReturnType<typeof parseControlMessage>>,
   ): void {
+    // Recebeu "auth" (válido ou não): o handshake aconteceu, não é mais um
+    // socket zumbi que nunca fala nada.
+    this.clearAuthTimeout(ws);
+
     const { room_id, device_id, token } = envelope;
 
     if (!device_id || !token) {
       ws.send(
         serializeControlMessage(
           createEnvelope('auth_error', room_id, { reason: 'device_id e token obrigatórios' }),
+        ),
+      );
+      ws.close(4001, 'Auth inválida');
+      return;
+    }
+
+    if (!ROOM_ID_PATTERN.test(room_id)) {
+      ws.send(
+        serializeControlMessage(
+          createEnvelope('auth_error', room_id, { reason: 'room_id fora do formato esperado' }),
         ),
       );
       ws.close(4001, 'Auth inválida');
@@ -223,6 +302,31 @@ export class WsServer {
       );
       ws.close(4001, 'Auth inválida');
       return;
+    }
+
+    // Re-auth no mesmo socket: o firmware manda um único "auth" por conexão
+    // (ver LunaWsClient.cpp), então isto não deveria disparar no fluxo normal
+    // — mas sem a guarda, um segundo "auth" levaria `registerClient` a
+    // incrementar o refcount para 2 sem um `unregisterClient` correspondente,
+    // prendendo a sessão paga do provider até o restart do processo (o único
+    // disconnect deste socket derrubaria o refcount só para 1).
+    const previous = this.clients.get(ws);
+    if (previous) {
+      this.roomManager
+        .unregisterClient(previous.roomId)
+        .then((roomDestroyed) => {
+          if (roomDestroyed) this.orchestrator.releaseRoom(previous.roomId);
+        })
+        .catch((err) => {
+          getLogger().error(
+            {
+              err: err instanceof Error ? err.message : String(err),
+              room_id: previous.roomId,
+              event: 'ws_reauth_unregister_failed',
+            },
+            'Falha ao liberar a sala anterior num re-auth no mesmo socket',
+          );
+        });
     }
 
     this.clients.set(ws, {
@@ -244,7 +348,14 @@ export class WsServer {
   private async handleDisconnect(ws: WebSocket): Promise<void> {
     const state = this.clients.get(ws);
     if (state) {
-      await this.roomManager.unregisterClient(state.roomId);
+      const roomDestroyed = await this.roomManager.unregisterClient(state.roomId);
+      // Só libera o estado por sala do Orchestrator (speakingByRoom, timers,
+      // sendToClient) quando este era de fato o último cliente da sala — com
+      // outro satélite ainda conectado na mesma sala, apagar essa memória
+      // agora derrubaria o `speaking_start`/`speaking_end` que ele depende.
+      if (roomDestroyed) {
+        this.orchestrator.releaseRoom(state.roomId);
+      }
       getLogger().info(
         { room_id: state.roomId, device_id: state.deviceId, event: 'ws_disconnect' },
         'Cliente desconectado',

@@ -17,6 +17,7 @@ const baseConfig: AppConfig = {
   haToken: 'token-de-teste',
   devicesConfigPath: 'config/devices.json',
   deviceRegistryTtlMs: 300_000,
+  providerConnectTimeoutMs: 5000,
   geminiVadSilenceMs: null,
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,

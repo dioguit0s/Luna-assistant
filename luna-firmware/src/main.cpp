@@ -72,6 +72,11 @@ static void onSpeakingEnd() {
 }
 
 static void onAudioResponse(const uint8_t *pcm, size_t len) {
+  // Rearma o teto do RESPONDING_TIMEOUT_MS a cada chunk: sem isto, uma
+  // resposta mais longa que o teto (contado desde o speaking_start) era
+  // cortada no meio mesmo com áudio ainda chegando do servidor.
+  StateMachine::noteResponseAudio();
+
   responseBytes += len;
   if (!playbackBuffer) return;
 

@@ -148,6 +148,17 @@
 // RESPONDING para sempre — mic mudo (TX suspenso) e wake word desligada
 // (shouldDetectWake() exige IDLE_LISTENING). Sem este teto só uma reautenticação
 // (onAuthOk chama StateMachine::reset()) recupera o satélite.
+//
+// Contado desde o ÚLTIMO audio_response recebido, não desde o speaking_start:
+// StateMachine::noteResponseAudio() rearma respondingSince a cada chunk (ver
+// main.cpp:onAudioResponse). Antes disso o teto contava só a partir do início
+// da resposta e ignorava áudio ainda chegando — uma resposta falada mais
+// longa que 20s (o servidor agora despacha o áudio no ritmo real do
+// playback, ver Orchestrator.ts:AUDIO_FRAME_INTERVAL_MS, então isso é comum)
+// era cortada no meio mesmo com o provider ainda enviando. Agora o teto
+// significa "20s SEM áudio novo", preservando a rede de segurança original
+// (turno de fato travado no provider continua recuperando) sem impor limite
+// à duração da resposta.
 #define RESPONDING_TIMEOUT_MS 20000
 
 #define AEC_RESUME_DELAY_MS 150    // silêncio após speaking_end antes de recapturar

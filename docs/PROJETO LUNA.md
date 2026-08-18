@@ -76,6 +76,31 @@ Todas as mensagens de controle seguem o envelope JSON padrão abaixo. Chunks de 
 | `command_result` | Servidor → Satélite | Resultado de execução de comando de automação                            |
 | `ping` / `pong`  | Bidirecional        | Keep-alive e medição de RTT                                              |
 
+### **4.1 Ritmo de `audio_response` e recuperação de `speaking_end`**
+
+O `luna-server` (`Orchestrator.enqueueAudioFrames`/`drainAudioQueue`) não despeja a resposta
+inteira na conexão assim que o provider (Gemini/OpenAI) a entrega — Gemini e OpenAI geram áudio
+bem mais rápido que tempo real, e um envio síncrono estourava o buffer de playback do satélite
+(512KB de PSRAM, ~16s a 16kHz) numa resposta longa, com o excesso descartado silenciosamente do
+lado do firmware. O servidor enfileira os frames por sala e os envia no ritmo em que o
+alto-falante realmente consome (`AUDIO_FRAME_INTERVAL_MS`, calculado a partir do tamanho do
+frame e da taxa de amostragem); o primeiro frame de cada resposta sai imediato, para não somar
+latência ao TTFAB. O campo `seq` de `audio_response` é monotônico por sala (não mais
+`Date.now()`, que repetia entre frames emitidos no mesmo milissegundo).
+
+Em espelho, `RESPONDING_TIMEOUT_MS` (20s, `luna-firmware/include/config.h`) é rearmado a cada
+`audio_response` recebido (`StateMachine::noteResponseAudio()`), não só no `speaking_start`: o
+teto significa "20s **sem** áudio novo chegando", não "resposta limitada a 20s". Isso preserva a
+rede de segurança original (turno de fato travado no provider ainda recupera) sem cortar
+respostas faladas mais longas que o teto.
+
+Do lado do servidor, `speaking_end` agora é garantido em todo caminho de encerramento de um
+turno — sucesso (`onTurnComplete`), erro do provider (`onError`), sessão encerrada
+(`onSessionEnded`) e um watchdog próprio (`SPEAKING_WATCHDOG_MS`, 8s sem áudio novo, sempre menor
+que o teto do firmware para o servidor recuperar primeiro). Antes, só o caminho de sucesso
+mandava `speaking_end`, deixando o satélite preso em `RESPONDING` (mic mudo, wake word desligada)
+até o teto do firmware nos demais casos.
+
 ***
 
 ## **5. Segurança**

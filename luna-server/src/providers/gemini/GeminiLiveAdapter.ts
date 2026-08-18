@@ -39,12 +39,41 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private activityOpen = false;
   private roomId = '';
   private disposed = false;
+  /**
+   * Incrementado a cada sessão aberta (connect inicial ou renovação). O
+   * `onclose` de cada sessão captura o valor vigente no momento em que foi
+   * criada: `renewSession` fecha a sessão antiga *depois* de já ter trocado
+   * `this.session` pela nova, então o `onclose` assíncrono da antiga chegaria
+   * tarde e, sem este guard, apagaria a sessão nova que acabou de substituí-la.
+   */
+  private sessionGeneration = 0;
   /** Evita reconexões concorrentes: um `goAway` chegando durante outra reconexão em voo é no-op. */
   private reconnecting = false;
   /** callId → nome da função. O SDK exige o `name` de volta no `functionResponse`. */
   private readonly pendingToolCalls = new Map<string, string>();
 
-  constructor(private readonly config: AppConfig) {}
+  constructor(
+    private readonly config: AppConfig,
+    /**
+     * Injetável para teste (guarda de `sessionGeneration` contra `onclose`
+     * tardio de uma sessão renovada): mesmo padrão do `fetchImpl` de
+     * `HomeAssistantClient` e do `providerFactory` de `RoomManager`.
+     */
+    private readonly createClient: (apiKey: string) => GoogleGenAI = (apiKey) =>
+      new GoogleGenAI({ apiKey }),
+  ) {}
+
+  /**
+   * Dispara `sessionEndedCb` no máximo uma vez por sessão: `session` vira
+   * `null` aqui, e essa é a própria guarda contra notificação duplicada
+   * (goAway ocioso, `onclose` do socket e falha de `sendAudio` podem
+   * disputar a mesma sessão morta).
+   */
+  private notifySessionEnded(): void {
+    if (this.session === null) return;
+    this.session = null;
+    this.sessionEndedCb?.();
+  }
 
   /**
    * Janela de silêncio do VAD entra direto no caminho crítico do TTFAB: o Gemini
@@ -78,7 +107,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
   }
 
   async connect(sessionConfig: ProviderSessionConfig): Promise<void> {
-    this.ai = new GoogleGenAI({ apiKey: this.config.geminiApiKey });
+    this.ai = this.createClient(this.config.geminiApiKey);
     this.roomId = sessionConfig.roomId;
     this.sessionConfig = sessionConfig;
 
@@ -92,6 +121,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
 
   private async openLiveSession(sessionConfig: ProviderSessionConfig): Promise<LiveSession> {
     const automaticActivityDetection = this.buildActivityDetection();
+    const generation = ++this.sessionGeneration;
 
     return this.ai!.live.connect({
       model: this.config.geminiLiveModel,
@@ -122,6 +152,22 @@ export class GeminiLiveAdapter implements IAudioProvider {
         onmessage: (message) => this.handleMessage(message),
         onerror: (e: { message?: string }) => {
           this.errorCb?.(new Error(e.message ?? 'Erro Gemini Live'));
+        },
+        // Fechamento abrupto sem `goAway` prévio (queda de rede do lado do
+        // Gemini, por exemplo): sem isto a sala ficava com uma sessão morta
+        // até o satélite cair — mesma lacuna que o `ws.on('close')` cobre no
+        // OpenAIRealtimeAdapter.
+        onclose: () => {
+          if (this.disposed) return;
+          // Sessão antiga fechada de propósito durante uma renovação: já foi
+          // substituída em `this.session`, então este evento é tardio e não
+          // deve mexer na sessão atual (ver comentário de `sessionGeneration`).
+          if (generation !== this.sessionGeneration) return;
+          getLogger().warn(
+            { event: 'gemini_session_closed', room_id: this.roomId },
+            'Sessão Gemini Live fechada pelo servidor sem goAway prévio',
+          );
+          this.notifySessionEnded();
         },
       },
     });
@@ -155,8 +201,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
       'Sessão Gemini Live ociosa: deixando expirar em vez de renovar',
     );
     this.session?.close();
-    this.session = null;
-    this.sessionEndedCb?.();
+    this.notifySessionEnded();
   }
 
   private async renewSession(): Promise<void> {
@@ -178,6 +223,12 @@ export class GeminiLiveAdapter implements IAudioProvider {
         'Falha ao renovar sessão Gemini Live antes do goAway',
       );
       this.errorCb?.(err instanceof Error ? err : new Error('Falha ao renovar sessão Gemini Live'));
+      // A sessão antiga já estava a caminho do goAway e a nova falhou: sem
+      // isto o provider ficava cacheado apontando pra uma sessão morta, e todo
+      // áudio seguinte caía num buraco negro até o satélite desconectar. Fecha
+      // explicitamente em vez de esperar o timeout do goAway do lado do Gemini.
+      oldSession?.close();
+      this.notifySessionEnded();
     } finally {
       this.reconnecting = false;
     }
@@ -185,7 +236,18 @@ export class GeminiLiveAdapter implements IAudioProvider {
 
   sendAudio(pcm16kHz: Buffer): void {
     if (!this.session) {
-      throw new Error('GeminiLiveAdapter não conectado');
+      // Sessão morta (goAway ocioso, onclose, renovação que falhou) e o
+      // satélite ainda mandando áudio: lançar aqui derrubava o processo
+      // inteiro por unhandledRejection (handleAudioChunk é async e o
+      // WsServer não tinha .catch). Descarta o chunk; a próxima fala recria
+      // a sessão do zero via RoomManager.evictRoom, disparado por
+      // notifySessionEnded logo abaixo.
+      getLogger().warn(
+        { event: 'gemini_send_audio_no_session', room_id: this.roomId },
+        'Áudio recebido sem sessão Gemini Live ativa: descartado',
+      );
+      this.notifySessionEnded();
+      return;
     }
 
     this.lastAudioAt = Date.now();

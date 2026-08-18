@@ -14,7 +14,12 @@ import type {
   ToolCall,
 } from '../providers/types.js';
 import { parseControlMessage } from '../ws/protocol.js';
-import { Orchestrator } from './Orchestrator.js';
+import {
+  Orchestrator,
+  SPEAKING_WATCHDOG_MS,
+  MAX_AUDIO_FRAME_BYTES,
+  AUDIO_FRAME_INTERVAL_MS,
+} from './Orchestrator.js';
 
 const baseConfig: AppConfig = {
   audioProvider: 'gemini',
@@ -29,6 +34,7 @@ const baseConfig: AppConfig = {
   haToken: 'token-de-teste',
   devicesConfigPath: 'config/devices.json',
   deviceRegistryTtlMs: 300_000,
+  providerConnectTimeoutMs: 5000,
   geminiVadSilenceMs: null,
   geminiVadEndSensitivity: null,
   geminiManualActivity: false,
@@ -75,6 +81,8 @@ class FakeAudioProvider implements IAudioProvider {
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private userSpeechCb: (() => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
+  private errorCb: ((err: Error) => void) | null = null;
+  private sessionEndedCb: (() => void) | null = null;
   /** Resolvida no próximo `sendToolResult` — evita sleep nos testes. */
   private nextResult: (() => void) | null = null;
 
@@ -97,9 +105,13 @@ class FakeAudioProvider implements IAudioProvider {
   onTurnComplete(callback: (turn: CompletedTurn) => void): void {
     this.turnCompleteCb = callback;
   }
-  onError(_callback: (err: Error) => void): void {}
+  onError(callback: (err: Error) => void): void {
+    this.errorCb = callback;
+  }
 
-  onSessionEnded(_callback: () => void): void {}
+  onSessionEnded(callback: () => void): void {
+    this.sessionEndedCb = callback;
+  }
 
   emitUserSpeech(): void {
     this.userSpeechCb?.();
@@ -111,6 +123,14 @@ class FakeAudioProvider implements IAudioProvider {
 
   emitTurnComplete(turn: CompletedTurn): void {
     this.turnCompleteCb?.(turn);
+  }
+
+  emitError(err: Error): void {
+    this.errorCb?.(err);
+  }
+
+  emitSessionEnded(): void {
+    this.sessionEndedCb?.();
   }
 
   onToolCall(callback: (call: ToolCall) => void): void {
@@ -168,6 +188,7 @@ interface Harness {
   provider: FakeAudioProvider;
   sent: Array<Buffer | string>;
   haCalls: FetchCall[];
+  evictRoomCalls: string[];
 }
 
 /**
@@ -192,11 +213,13 @@ function buildHarness(
   const ringBuffer = new ConversationRingBuffer();
   ringBuffers.push(ringBuffer);
 
-  // RoomManager mínimo: o Orchestrator só chama estes dois métodos, e a sessão
-  // real (connect + tools) já é coberta pelo próprio RoomManager.
+  // RoomManager mínimo: o Orchestrator só chama estes três métodos, e a
+  // sessão real (connect + tools) já é coberta pelo próprio RoomManager.
+  const evictRoomCalls: string[] = [];
   const roomManager = {
     getOrCreateProvider: async () => provider,
     getRingBuffer: () => ringBuffer,
+    evictRoom: (roomId: string) => evictRoomCalls.push(roomId),
   } as unknown as RoomManager;
 
   const { fetchImpl, calls } = mockFetch(respond);
@@ -207,6 +230,7 @@ function buildHarness(
     provider,
     sent: [],
     haCalls: calls,
+    evictRoomCalls,
   };
 }
 
@@ -504,5 +528,287 @@ describe('Orchestrator: corte de silêncio antecipa speaking_start', () => {
       0,
       'sem speaking_start correspondente, não deve mandar speaking_end',
     );
+  });
+});
+describe('Orchestrator: speaking_end garantido em todo caminho de encerramento', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+  });
+
+  function speakingStarts(h: Harness): number {
+    return controlMessages(h.sent).filter((msg) => msg.type === 'speaking_start').length;
+  }
+
+  function speakingEnds(h: Harness): number {
+    return controlMessages(h.sent).filter((msg) => msg.type === 'speaking_end').length;
+  }
+
+  it('onError no meio de uma resposta fecha o par com speaking_end', async () => {
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(4));
+    assert.equal(speakingStarts(harness), 1);
+    assert.equal(speakingEnds(harness), 0);
+
+    harness.provider.emitError(new Error('sessão caiu no meio da resposta'));
+
+    assert.equal(
+      speakingEnds(harness),
+      1,
+      'sem isto o satélite ficava preso em RESPONDING até o teto de 20s do firmware',
+    );
+  });
+
+  it('onSessionEnded no meio de uma resposta fecha o par e evicta a sala', async () => {
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(4));
+    assert.equal(speakingStarts(harness), 1);
+
+    harness.provider.emitSessionEnded();
+
+    assert.equal(speakingEnds(harness), 1, 'speaking_end deve sair antes/junto do evict');
+    assert.deepEqual(harness.evictRoomCalls, [ROOM_ID]);
+  });
+
+  it('releaseRoom limpa speakingByRoom preso em true: a sessão seguinte volta a mandar speaking_start', async () => {
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(4));
+    assert.equal(speakingStarts(harness), 1);
+
+    // Conexão cai sem o turno fechar (nem onError, nem onSessionEnded — só o
+    // WsServer percebendo o socket do satélite morto): releaseRoom é o único
+    // ponto que resincroniza o estado antes da próxima sessão da sala.
+    harness.orchestrator.releaseRoom(ROOM_ID);
+
+    harness.sent.length = 0;
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(4));
+
+    assert.equal(
+      speakingStarts(harness),
+      1,
+      'sem releaseRoom, speakingByRoom preso em true faria startSpeaking() retornar cedo',
+    );
+  });
+});
+
+describe('Orchestrator: watchdog de speaking_end sem áudio novo', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+  });
+
+  function speakingEnds(h: Harness): number {
+    return controlMessages(h.sent).filter((msg) => msg.type === 'speaking_end').length;
+  }
+
+  it('sem áudio novo por SPEAKING_WATCHDOG_MS, força speaking_end', async () => {
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(4));
+
+    mock.timers.tick(SPEAKING_WATCHDOG_MS - 1);
+    assert.equal(speakingEnds(harness), 0, 'não deveria disparar antes do teto completar');
+
+    mock.timers.tick(1);
+    assert.equal(speakingEnds(harness), 1);
+  });
+
+  it('resposta longa (áudio contínuo) nunca aciona o watchdog sozinha', async () => {
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(4));
+
+    // Três rodadas de "quase o teto, mas sempre chega áudio novo antes":
+    // uma resposta de ~24s (3x SPEAKING_WATCHDOG_MS) sem nunca parar de
+    // enviar chunks não pode ser cortada pelo watchdog.
+    for (let i = 0; i < 3; i++) {
+      mock.timers.tick(SPEAKING_WATCHDOG_MS - 100);
+      harness.provider.emitAudioResponse(Buffer.alloc(4));
+    }
+
+    assert.equal(speakingEnds(harness), 0, 'áudio contínuo deveria ter rearmado o watchdog a cada chunk');
+
+    // E, parando de vez, o watchdog volta a valer.
+    mock.timers.tick(SPEAKING_WATCHDOG_MS);
+    assert.equal(speakingEnds(harness), 1);
+  });
+});
+describe('Orchestrator: pacing de audio_response (resposta longa não estoura o playback)', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+  });
+
+  /** Separa o header JSON (contagem de chaves) do payload PCM, espelhando parseAudioMessage. */
+  function parseAudioResponseFrame(data: Buffer): { seq: number; payload: Buffer } {
+    let depth = 0;
+    let end = -1;
+    for (let i = 0; i < data.length; i++) {
+      if (data[i] === 0x7b) depth++;
+      if (data[i] === 0x7d) {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    assert.notEqual(end, -1, 'header JSON do audio_response não fechou');
+    const header = JSON.parse(data.subarray(0, end + 1).toString('utf8')) as {
+      type: string;
+      seq?: number;
+    };
+    assert.equal(header.type, 'audio_response');
+    return { seq: header.seq!, payload: data.subarray(end + 1) };
+  }
+
+  function audioFrames(h: Harness): Buffer[] {
+    return h.sent.filter((item): item is Buffer => Buffer.isBuffer(item));
+  }
+
+  it('resposta longa: primeiro frame sai imediato, o resto paceado, tudo chega em ordem e completo', async () => {
+    await feedAudio(harness);
+
+    // ~10 frames (pouco mais de 10KB) — uma resposta de alguns segundos.
+    const FRAME_COUNT = 10;
+    const chunk = Buffer.alloc(MAX_AUDIO_FRAME_BYTES * FRAME_COUNT + 37);
+    for (let i = 0; i < chunk.length; i++) chunk[i] = i % 256;
+
+    harness.provider.emitAudioResponse(chunk);
+
+    // O primeiro frame não espera o intervalo de pacing — preserva o TTFAB.
+    assert.equal(audioFrames(harness).length, 1, 'primeiro frame deveria sair na mesma call stack');
+
+    // Avança um frame por vez e confirma que cada um só sai depois do
+    // intervalo — nunca todos de uma vez, que é o que estourava o buffer de
+    // playback de 512KB do firmware.
+    for (let i = 1; i <= FRAME_COUNT; i++) {
+      assert.equal(audioFrames(harness).length, i, `frame ${i} deveria já ter saído`);
+      mock.timers.tick(AUDIO_FRAME_INTERVAL_MS - 1);
+      assert.equal(audioFrames(harness).length, i, 'não deveria adiantar o próximo frame');
+      mock.timers.tick(1);
+    }
+
+    const frames = audioFrames(harness);
+    assert.equal(frames.length, FRAME_COUNT + 1);
+
+    // Reconstrói o payload na ordem de chegada e confere contra o original —
+    // prova que nada foi perdido, duplicado ou reordenado.
+    const parsed = frames.map(parseAudioResponseFrame);
+    const reassembled = Buffer.concat(parsed.map((p) => p.payload));
+    assert.deepEqual(reassembled, chunk);
+
+    // seq monotônico: sem isto, frames emitidos no mesmo milissegundo saíam
+    // todos com o mesmo Date.now(), inutilizando o campo.
+    const seqs = parsed.map((p) => p.seq);
+    assert.deepEqual(seqs, [...seqs].sort((a, b) => a - b));
+    assert.equal(new Set(seqs).size, seqs.length, 'seq não pode repetir dentro da mesma sala');
+  });
+
+  it('speaking_end nunca chega antes do último frame de áudio do mesmo turno', async () => {
+    await feedAudio(harness);
+
+    const FRAME_COUNT = 5;
+    const chunk = Buffer.alloc(MAX_AUDIO_FRAME_BYTES * FRAME_COUNT);
+    harness.provider.emitAudioResponse(chunk);
+    assert.equal(audioFrames(harness).length, 1, 'primeiro frame já saiu, os outros 4 ainda estão na fila');
+
+    // Turno fecha (onTurnComplete) com a fila de pacing ainda não vazia — o
+    // caso que fazia endSpeaking() mandar speaking_end direto, ultrapassando
+    // os frames de áudio ainda presos no pacing e chegando ANTES deles no
+    // satélite. Isso arriscava a FSM do firmware sair de RESPONDING (e reabrir
+    // o mic) com áudio do próprio turno ainda a caminho.
+    harness.provider.emitTurnComplete({ assistantText: 'resposta longa' });
+
+    assert.equal(
+      controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length,
+      0,
+      'speaking_end não pode sair enquanto ainda há frame de áudio deste turno na fila',
+    );
+
+    // Drena os frames restantes; enquanto ainda há MAIS áudio na frente do
+    // speaking_end na fila, ele não pode ter saído.
+    for (let i = 2; i < FRAME_COUNT; i++) {
+      mock.timers.tick(AUDIO_FRAME_INTERVAL_MS);
+      assert.equal(audioFrames(harness).length, i);
+      assert.equal(
+        controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length,
+        0,
+        `speaking_end não pode sair antes do frame ${i}`,
+      );
+    }
+
+    // Último frame: o speaking_end enfileirado logo atrás sai no mesmo tick,
+    // sem esperar mais um intervalo de pacing — ele não carrega áudio, então
+    // não compete pelo buffer de playback do firmware. O que importa é a
+    // ORDEM (verificada abaixo), não uma pausa extra antes dele.
+    mock.timers.tick(AUDIO_FRAME_INTERVAL_MS);
+    assert.equal(audioFrames(harness).length, FRAME_COUNT);
+    assert.equal(
+      controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length,
+      1,
+    );
+
+    // E, na ordem real de chegada ao satélite (harness.sent preserva a ordem
+    // de envio), o speaking_end aparece depois de todo frame de áudio.
+    let lastAudioIndex = -1;
+    for (let i = 0; i < harness.sent.length; i++) {
+      if (Buffer.isBuffer(harness.sent[i])) lastAudioIndex = i;
+    }
+    const speakingEndIndex = harness.sent.findIndex(
+      (item) => typeof item === 'string' && parseControlMessage(item)?.type === 'speaking_end',
+    );
+    assert.ok(speakingEndIndex > lastAudioIndex, 'speaking_end deve vir depois de todo frame de áudio do turno');
+  });
+
+  it('releaseRoom descarta a fila pendente: turno morto não vaza para a sessão seguinte', async () => {
+    await feedAudio(harness);
+
+    const chunk = Buffer.alloc(MAX_AUDIO_FRAME_BYTES * 5);
+    harness.provider.emitAudioResponse(chunk);
+    assert.equal(audioFrames(harness).length, 1, 'só o primeiro frame saiu até aqui');
+
+    harness.orchestrator.releaseRoom(ROOM_ID);
+
+    // Mesmo avançando bem além do que faltava da resposta antiga, nada mais
+    // deveria sair: a fila e o timer de drain foram descartados.
+    mock.timers.tick(AUDIO_FRAME_INTERVAL_MS * 10);
+    assert.equal(audioFrames(harness).length, 1, 'fila da sessão morta vazou para depois do releaseRoom');
   });
 });
