@@ -1,4 +1,5 @@
 import type { ConversationTurn } from '../providers/types.js';
+import { formatLocalTime, localDateTime, systemNow } from '../time/clock.js';
 
 /**
  * Chaves são `area_id` do Home Assistant, não rótulos livres: o mesmo valor
@@ -34,11 +35,12 @@ export function roomLabel(roomId: string): string {
 export function buildLunaSystemPrompt(
   roomId: string,
   history: ConversationTurn[],
-  now: Date = new Date(),
+  now: Date = systemNow(),
 ): string {
-  const hour = now.getHours();
-  const periodo = periodOfDay(hour);
-  const horaFormatada = `${String(hour).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  // `now.getHours()` daria a hora local do *processo* — num host em UTC o prompt
+  // dizia a hora errada por 3 horas. A hora de parede vem do relógio único.
+  const periodo = periodOfDay(localDateTime(now).hour);
+  const horaFormatada = formatLocalTime(now);
 
   const historyBlock =
     history.length > 0

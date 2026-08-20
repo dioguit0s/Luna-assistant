@@ -2,8 +2,16 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildLunaSystemPrompt } from './luna-system-prompt.js';
 import type { ConversationTurn } from '../providers/types.js';
+import { LUNA_UTC_OFFSET_MINUTES } from '../time/clock.js';
 
-const at = (hour: number, minute = 0): Date => new Date(2026, 6, 19, hour, minute, 0);
+/**
+ * Instante cuja hora de parede **em São Paulo** é `hour:minute`. Construído a
+ * partir de UTC de propósito: com `new Date(2026, 6, 19, hour)` o teste afirmava
+ * uma hora diferente em cada máquina e passava mesmo com o prompt lendo a hora
+ * local do processo.
+ */
+const at = (hour: number, minute = 0): Date =>
+  new Date(Date.UTC(2026, 6, 19, hour, minute, 0) - LUNA_UTC_OFFSET_MINUTES * 60_000);
 
 describe('buildLunaSystemPrompt', () => {
   it('traduz room_id conhecido para nome legível', () => {
@@ -137,5 +145,15 @@ describe('buildLunaSystemPrompt', () => {
   it('usa a hora atual quando o parâmetro now é omitido', () => {
     const prompt = buildLunaSystemPrompt('sala_de_estar', []);
     assert.match(prompt, /Agora são \d{2}:\d{2}/);
+  });
+
+  it('rende a hora de São Paulo, não a do processo', () => {
+    // Regressão: `now.getHours()` devolvia a hora local do host. Num servidor em
+    // UTC — o caso do systemd sem `TZ=` e do runner de CI — o prompt dizia a
+    // hora errada por 3 horas, e "amanhã às 7" resolveria 3h fora.
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], new Date('2026-07-20T02:00:00Z'));
+
+    assert.match(prompt, /Agora são 23:00/);
+    assert.match(prompt, /período da noite/);
   });
 });

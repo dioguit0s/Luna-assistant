@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "node --import tsx --test src/rooms/ConversationRingBuffer.test.ts src/rooms/RoomManager.test.ts src/metrics/ttfab.test.ts src/prompts/luna-system-prompt.test.ts src/providers/utils/resampler.test.ts src/providers/AudioProviderFactory.test.ts src/providers/types.test.ts src/providers/gemini/tool-mapping.test.ts src/providers/gemini/GeminiLiveAdapter.test.ts src/providers/openai/tool-mapping.test.ts src/ha/HomeAssistantClient.test.ts src/ha/deviceRegistry.test.ts src/ha/deviceRegistrySource.test.ts src/orchestrator/Orchestrator.integration.test.ts src/ws/auth.test.ts src/ws/messageParser.test.ts src/ws/WsServer.integration.test.ts src/ws/WsServer.hardening.test.ts src/ws/health.test.ts"
+    "test": "node --import tsx --test src/rooms/ConversationRingBuffer.test.ts src/rooms/RoomManager.test.ts src/metrics/ttfab.test.ts src/prompts/luna-system-prompt.test.ts src/time/clock.test.ts src/providers/utils/resampler.test.ts src/providers/AudioProviderFactory.test.ts src/providers/types.test.ts src/providers/gemini/tool-mapping.test.ts src/providers/gemini/GeminiLiveAdapter.test.ts src/providers/openai/tool-mapping.test.ts src/ha/HomeAssistantClient.test.ts src/ha/deviceRegistry.test.ts src/ha/deviceRegistrySource.test.ts src/orchestrator/Orchestrator.integration.test.ts src/ws/auth.test.ts src/ws/messageParser.test.ts src/ws/WsServer.integration.test.ts src/ws/WsServer.hardening.test.ts src/ws/health.test.ts"
   },
   "engines": {
     "node": ">=20.0.0"

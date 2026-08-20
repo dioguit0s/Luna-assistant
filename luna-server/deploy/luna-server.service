@@ -16,6 +16,11 @@ ExecStart=/usr/bin/node dist/index.js
 # Segredos ficam fora do repositorio.
 EnvironmentFile=/etc/luna-server.env
 Environment=NODE_ENV=production
+# Sem isto o processo herda o fuso do host (UTC nas VMs), e a hora que a Luna
+# fala -- e a que o agendador usa -- sai 3h errada. O codigo tambem nao depende
+# do TZ do processo (src/time/clock.ts fixa America/Sao_Paulo); esta linha
+# mantem log do systemd, `date` e node concordando na mesma maquina.
+Environment=TZ=America/Sao_Paulo
 
 Restart=always
 RestartSec=5
