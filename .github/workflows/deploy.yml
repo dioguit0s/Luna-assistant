@@ -26,6 +26,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # O runner e self-hosted e o workflow nao tem setup-node: usa o node da
+      # maquina. Em Node < 22.5 o import de `node:sqlite` morre no boot, o
+      # health_ok do activate.sh falha e o rollback dispara -- falha segura,
+      # mas deploy queimado. Melhor parar aqui, antes de montar a release.
+      - name: Guard de versao do Node (node:sqlite)
+        run: |
+          node -e "
+            const [maj, min] = process.versions.node.split('.').map(Number);
+            if (maj < 22 || (maj === 22 && min < 5)) {
+              console.error('Node ' + process.versions.node + ' e antigo demais: luna-server exige >= 22.5.0 (node:sqlite).');
+              process.exit(1);
+            }
+          "
+          node --disable-warning=ExperimentalWarning -e "require('node:sqlite')"
+
       - name: Instalar dependencias
         run: npm ci
 

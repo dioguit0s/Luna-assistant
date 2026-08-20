@@ -8,6 +8,7 @@ import {
 import { ConversationRingBuffer } from './rooms/ConversationRingBuffer.js';
 import { RoomManager } from './rooms/RoomManager.js';
 import { WsServer } from './ws/WsServer.js';
+import { ReminderStore } from './reminders/ReminderStore.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -44,6 +45,17 @@ process.on('uncaughtException', (err) => logFatal('uncaught_exception', err));
 async function main(): Promise<void> {
   const config = loadConfig();
   createLogger(config);
+
+  // Antes de qualquer conexão: se o banco não abrir (permissão, corrupção,
+  // Node sem `node:sqlite`), o processo morre aqui, o `health_ok` do
+  // `activate.sh` falha e o rollback dispara. Falha barulhenta é o objetivo —
+  // um fallback silencioso para `:memory:` faria os alarmes sumirem a cada
+  // deploy sem nenhum sinal.
+  const reminderStore = ReminderStore.open(config.dbPath);
+  getLogger().info(
+    { event: 'reminder_store_open', db_path: config.dbPath },
+    'Banco de lembretes aberto',
+  );
 
   const ringBuffer = new ConversationRingBuffer();
   const roomManager = new RoomManager(config, ringBuffer);
@@ -104,6 +116,7 @@ async function main(): Promise<void> {
     deviceRegistry.stop();
     await roomManager.destroy();
     ringBuffer.destroy();
+    reminderStore.close();
     process.exit(0);
   };
 

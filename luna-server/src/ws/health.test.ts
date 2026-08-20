@@ -32,6 +32,7 @@ const config: AppConfig = {
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
   openaiVoice: 'marin',
+  dbPath: ':memory:',
 };
 
 describe('GET /health', () => {

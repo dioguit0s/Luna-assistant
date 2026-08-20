@@ -38,6 +38,7 @@ const config: AppConfig = {
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
   openaiVoice: 'marin',
+  dbPath: ':memory:',
 };
 
 const ROOM = 'sala_de_estar';

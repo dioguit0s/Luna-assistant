@@ -1,4 +1,5 @@
 import { config as loadEnv } from 'dotenv';
+import { isAbsolute, join, resolve } from 'node:path';
 
 loadEnv();
 
@@ -58,6 +59,14 @@ export interface AppConfig {
   /** Loga mensagens cruas da Realtime, incluindo transcrições da fala. */
   openaiDebugMessages: boolean;
   openaiVoice: string;
+  /**
+   * Caminho **absoluto** do banco de lembretes. Absoluto de propósito: o
+   * `activate.sh` troca o symlink de `/opt/luna/current` a cada deploy e poda
+   * as releases antigas, então um default relativo ao `WorkingDirectory` —
+   * como o de `devicesConfigPath` — apontaria justamente para o diretório que
+   * some. Em produção vem do `$STATE_DIRECTORY` que o systemd cria.
+   */
+  dbPath: string;
 }
 
 export type EndSensitivityName = 'HIGH' | 'LOW';
@@ -120,6 +129,28 @@ function parseAudioProvider(value: string): AudioProviderName {
   throw new Error(`AUDIO_PROVIDER inválido: "${value}". Use "gemini" ou "openai".`);
 }
 
+/**
+ * `LUNA_DB_PATH` explícito > `$STATE_DIRECTORY` do systemd > default de dev.
+ *
+ * O systemd cria `/var/lib/luna-server` com dono `luna:luna` a partir do
+ * `StateDirectory=` da unit e exporta o caminho em `$STATE_DIRECTORY` — é o que
+ * libera escrita mesmo sob `ProtectSystem=strict`, sem `ReadWritePaths` à mão.
+ * Com mais de um `StateDirectory=`, a variável vem separada por `:`.
+ */
+export function resolveDbPath(
+  explicit = process.env.LUNA_DB_PATH,
+  stateDirectory = process.env.STATE_DIRECTORY,
+): string {
+  if (explicit) {
+    return isAbsolute(explicit) ? explicit : resolve(explicit);
+  }
+  const firstStateDir = stateDirectory?.split(':')[0];
+  if (firstStateDir) {
+    return join(firstStateDir, 'luna.db');
+  }
+  return resolve('.luna-state', 'luna.db');
+}
+
 export function loadConfig(): AppConfig {
   const audioProvider = parseAudioProvider(process.env.AUDIO_PROVIDER ?? 'gemini');
   const thinkingBudget = parseThinkingBudget(process.env.GEMINI_THINKING_BUDGET);
@@ -164,6 +195,7 @@ export function loadConfig(): AppConfig {
     openaiVadSilenceMs: parseOptionalNumber('OPENAI_VAD_SILENCE_MS') ?? 500,
     openaiDebugMessages: process.env.OPENAI_DEBUG_MESSAGES === 'true',
     openaiVoice: process.env.OPENAI_VOICE ?? 'marin',
+    dbPath: resolveDbPath(),
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {

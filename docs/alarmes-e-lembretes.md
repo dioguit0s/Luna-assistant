@@ -1,6 +1,6 @@
 # Alarmes e lembretes — plano de implementação
 
-**Status:** Em desenvolvimento — marcos 0 a 2 entregues (relógio único, endereçamento por sala, registry de dispatch)
+**Status:** Em desenvolvimento — marcos 0 a 3 entregues (relógio único, endereçamento por sala, registry de dispatch, `ReminderStore`)
 **Data:** 2026-08-19
 
 ## Objetivo

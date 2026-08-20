@@ -35,6 +35,7 @@ const config: AppConfig = {
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
   openaiVoice: 'marin',
+  dbPath: ':memory:',
 };
 
 describe('WsServer: endurecimento da borda', () => {

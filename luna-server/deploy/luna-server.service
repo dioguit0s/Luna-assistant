@@ -11,7 +11,9 @@ Group=luna
 
 # Symlink trocado atomicamente pelo activate.sh a cada deploy.
 WorkingDirectory=/opt/luna/current
-ExecStart=/usr/bin/node dist/index.js
+# `--disable-warning`: o `node:sqlite` emite ExperimentalWarning a cada boot, e
+# StandardError=journal despejaria isso no journal toda vez.
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning dist/index.js
 
 # Segredos ficam fora do repositorio.
 EnvironmentFile=/etc/luna-server.env
@@ -33,7 +35,16 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=luna-server
 
-# Hardening. O processo nao escreve em disco: nenhum ReadWritePaths necessario.
+# Banco de lembretes. O systemd cria /var/lib/luna-server com dono luna:luna e
+# libera escrita mesmo sob ProtectSystem=strict, sem ReadWritePaths a mao. O
+# caminho chega ao processo em $STATE_DIRECTORY (ver resolveDbPath em env.ts).
+#
+# O banco NAO pode ficar em /opt/luna/current: o activate.sh troca o symlink da
+# release a cada deploy e poda as antigas -- o alarme das 7h sumiria no deploy
+# das 3h.
+StateDirectory=luna-server
+
+# Hardening. Fora do StateDirectory acima, o processo nao escreve em disco.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

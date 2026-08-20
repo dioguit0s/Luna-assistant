@@ -28,6 +28,7 @@ describe('AudioProviderFactory', () => {
     openaiVadSilenceMs: null,
     openaiDebugMessages: false,
     openaiVoice: 'marin',
+    dbPath: ':memory:',
   };
 
   it('instancia GeminiLiveAdapter', () => {

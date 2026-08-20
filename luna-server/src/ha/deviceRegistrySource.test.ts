@@ -35,6 +35,7 @@ const baseConfig: AppConfig = {
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
   openaiVoice: 'marin',
+  dbPath: ':memory:',
 };
 
 /** Mock de `fetch` que devolve o corpo de `/api/template` que o teste quiser. */
