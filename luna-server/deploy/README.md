@@ -82,6 +82,15 @@ sudo systemctl enable luna-server
 # Ainda não dá `start`: /opt/luna/current só existe após o primeiro deploy.
 ```
 
+**Isto é manual — o deploy automático nunca repete.** `activate.sh` só copia
+`dist/` e `config/` para a release; `/etc/systemd/system/luna-server.service`
+não faz parte do pipeline. Toda vez que `deploy/luna-server.service` mudar no
+repositório (novo `Environment=`, novo hardening, etc.), repita os três
+comandos acima manualmente no servidor **antes** do próximo push em `main` —
+senão o deploy roda com a unit velha, `activate.sh` recusa (checagem de
+`cmp` logo no início, ver comentário no script) e o job falha com a mensagem
+exata do que rodar.
+
 ### 5. Self-hosted runner
 
 No GitHub: **Settings → Actions → Runners → New self-hosted runner (Linux x64)**.

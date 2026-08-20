@@ -60,6 +60,28 @@ if [[ ! -f "$NEW_RELEASE/dist/index.js" ]]; then
   exit 1
 fi
 
+# A unit systemd NAO faz parte da release: activate.sh so copia dist/ e
+# config/, nunca /etc/systemd/system/luna-server.service (isso e passo manual
+# do setup inicial, ver README). Uma mudanca em deploy/luna-server.service
+# que nao seja reinstalada fica invisivel ate o proximo restart falhar de um
+# jeito que nao tem nada a ver com a causa real -- foi assim que
+# StateDirectory=luna-server (para o ReminderStore escrever sob
+# ProtectSystem=strict) queimou um deploy inteiro: o processo saia com EROFS
+# no boot, o Restart=always ficava reiniciando em loop, e so o health check
+# estourava em 20s -- nenhuma pista de systemd unit desatualizada em lugar
+# nenhum. Falhar aqui, antes de tocar no symlink ou reiniciar o servico,
+# troca 20s de timeout as cegas por um erro imediato e acionavel.
+INSTALLED_UNIT="/etc/systemd/system/luna-server.service"
+REPO_UNIT="$(dirname "$0")/luna-server.service"
+if [[ -f "$INSTALLED_UNIT" && -f "$REPO_UNIT" ]] && ! cmp -s "$REPO_UNIT" "$INSTALLED_UNIT"; then
+  log "ERRO: deploy/luna-server.service mudou mas a unit instalada no servidor nao foi atualizada."
+  log "      O deploy automatico nunca escreve em /etc/systemd/system/ -- isso e manual, uma vez por mudanca de unit."
+  log "      Rode no servidor e repita o deploy:"
+  log "        sudo cp $REPO_UNIT $INSTALLED_UNIT"
+  log "        sudo systemctl daemon-reload"
+  exit 1
+fi
+
 # Guarda a release anterior para eventual rollback.
 PREVIOUS_RELEASE=""
 if [[ -L "$CURRENT_LINK" ]]; then
@@ -95,7 +117,10 @@ if health_ok; then
   echo
 else
   log "ERRO: health check falhou em ${HEALTH_TIMEOUT_S}s ($HEALTH_URL)"
-  sudo systemctl status luna-server --no-pager --lines=30 || true
+  # Sem flag nenhuma: precisa bater exatamente com a entrada NOPASSWD do
+  # sudoers (ver README, "sudoers para o restart") -- `--no-pager --lines=30`
+  # aqui pedia senha (sudo nao interativo falha) e o diagnostico nunca saia.
+  sudo systemctl status luna-server || true
 
   if [[ -n "$PREVIOUS_RELEASE" && -d "$PREVIOUS_RELEASE" ]]; then
     log "rollback para $PREVIOUS_RELEASE"
