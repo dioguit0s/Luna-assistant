@@ -82,6 +82,65 @@ class InstantProvider extends ControllableProvider {
 
 const ROOM_ID = 'sala_de_estar';
 
+describe('RoomManager: bind dos callbacks na criação da sessão', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  it('chama o binder com a sala e o provider, antes de entregar a sessão', async () => {
+    const ringBuffer = new ConversationRingBuffer();
+    const provider = new InstantProvider();
+    const roomManager = new RoomManager(baseConfig, ringBuffer, () => provider);
+
+    const binds: Array<{ roomId: string; provider: IAudioProvider }> = [];
+    roomManager.setProviderBinder((roomId, bound) => binds.push({ roomId, provider: bound }));
+
+    const created = await roomManager.getOrCreateProvider(ROOM_ID);
+
+    assert.deepEqual(binds, [{ roomId: ROOM_ID, provider }]);
+    assert.equal(created, provider);
+
+    await roomManager.destroy();
+    ringBuffer.destroy();
+  });
+
+  it('não rebinda a sessão já criada — dois binds dobrariam cada frame de áudio', async () => {
+    const ringBuffer = new ConversationRingBuffer();
+    const provider = new InstantProvider();
+    const roomManager = new RoomManager(baseConfig, ringBuffer, () => provider);
+
+    let bindCount = 0;
+    roomManager.setProviderBinder(() => {
+      bindCount += 1;
+    });
+
+    await roomManager.getOrCreateProvider(ROOM_ID);
+    await roomManager.getOrCreateProvider(ROOM_ID);
+
+    assert.equal(bindCount, 1);
+
+    await roomManager.destroy();
+    ringBuffer.destroy();
+  });
+
+  it('connect() que estoura o teto não binda nada: não existe sessão para receber áudio', async () => {
+    const ringBuffer = new ConversationRingBuffer();
+    const provider = new ControllableProvider();
+    const roomManager = new RoomManager(baseConfig, ringBuffer, () => provider);
+
+    let bindCount = 0;
+    roomManager.setProviderBinder(() => {
+      bindCount += 1;
+    });
+
+    await assert.rejects(roomManager.getOrCreateProvider(ROOM_ID));
+
+    assert.equal(bindCount, 0);
+
+    ringBuffer.destroy();
+  });
+});
+
 describe('RoomManager: timeout de connect()', () => {
   before(() => {
     createLogger(baseConfig);

@@ -1,6 +1,9 @@
 import type { RoomManager } from '../rooms/RoomManager.js';
 import type { CompletedTurn } from '../providers/types.js';
-import { isControlDeviceCall } from '../providers/types.js';
+import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
+import type { IAudioProvider } from '../providers/IAudioProvider.js';
+import { createControlDeviceHandler } from './tools/controlDevice.js';
+import { INVALID_ARGS_RESULT, type ToolContext, type ToolHandler } from './tools/types.js';
 import { getLogger } from '../logging/logger.js';
 import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
@@ -78,12 +81,24 @@ export class Orchestrator {
   // seq monotônico por sala: Date.now() repetia entre frames emitidos no
   // mesmo milissegundo, inutilizando o campo para ordenação/detecção de perda.
   private readonly audioSeqByRoom = new Map<string, number>();
+  // Satélite que transmitiu por último em cada cômodo. Só para log: com o bind
+  // dos callbacks na criação da sessão (RoomManager), não existe mais um
+  // `deviceId` no escopo do bind — e nem sempre existe um, já que a sessão
+  // pode nascer sem ninguém ter falado.
+  private readonly lastDeviceIdByRoom = new Map<string, string>();
+  /**
+   * Registro de dispatch: nome da tool → handler. A chave casa o nome; validar
+   * os args é obrigação do handler (ver `ToolHandler`). Nome fora do mapa é
+   * tratado igual a args inválidos — do ponto de vista do modelo é a mesma
+   * coisa, ele pediu algo que o servidor não sabe executar.
+   */
+  private readonly toolHandlers: Map<string, ToolHandler>;
 
   constructor(
     private readonly config: AppConfig,
     private readonly roomManager: RoomManager,
-    private readonly haClient: HomeAssistantClient,
-    private readonly deviceRegistry: DeviceRegistrySource,
+    haClient: HomeAssistantClient,
+    deviceRegistry: DeviceRegistrySource,
     /**
      * Endereçamento por cômodo, resolvido pelo `WsServer` no momento do envio.
      * O Orchestrator não guarda conexão nenhuma: o provider é cacheado por
@@ -95,16 +110,36 @@ export class Orchestrator {
      * transmitiu nada) era inalcançável.
      */
     private readonly sendToRoom: SendToRoom,
-  ) {}
+  ) {
+    this.toolHandlers = new Map<string, ToolHandler>([
+      [
+        CONTROL_DEVICE_TOOL.name,
+        createControlDeviceHandler({
+          haClient,
+          deviceRegistry,
+          sendToRoom: (targetRoom, payload) => this.sendToRoom(targetRoom, payload),
+        }),
+      ],
+    ]);
+
+    // O bind dos callbacks passa a acontecer na criação da sessão, não no
+    // primeiro chunk de áudio: um provider criado por qualquer outro caminho
+    // — o disparo de alarme, que fala sem ter sido perguntado — nasceria sem
+    // `onAudioResponse` e a fala cairia no vazio, sem erro nenhum.
+    roomManager.setProviderBinder((roomId, provider) =>
+      this.bindProviderCallbacks(roomId, provider),
+    );
+  }
 
   async handleAudioChunk(roomId: string, deviceId: string, pcm: Buffer): Promise<void> {
     const tracker = this.getTtfabTracker(roomId);
     tracker.markClientAudioReceived();
 
+    this.lastDeviceIdByRoom.set(roomId, deviceId);
     this.roomManager.getRingBuffer().touch(roomId);
 
+    // Os callbacks já vêm registrados de `RoomManager.createProviderSession`.
     const provider = await this.roomManager.getOrCreateProvider(roomId);
-    this.bindProviderCallbacksOnce(roomId, deviceId, provider);
 
     provider.sendAudio(pcm);
   }
@@ -123,13 +158,20 @@ export class Orchestrator {
 
   private readonly boundProviders = new WeakSet<object>();
 
-  private bindProviderCallbacksOnce(
-    roomId: string,
-    deviceId: string,
-    provider: import('../providers/IAudioProvider.js').IAudioProvider,
-  ): void {
+  /**
+   * Registra os callbacks do port num provider recém-criado. Chamado por
+   * `RoomManager.createProviderSession` (ver o binder no construtor), uma vez
+   * por provider; a WeakSet é a garantia de que continua sendo uma só, mesmo
+   * se um caminho novo chamar de novo — dois binds no mesmo provider dobrariam
+   * cada `speaking_start` e cada frame de áudio.
+   */
+  private bindProviderCallbacks(roomId: string, provider: IAudioProvider): void {
     if (this.boundProviders.has(provider)) return;
     this.boundProviders.add(provider);
+
+    // Resolvido a cada log, nunca capturado: o bind acontece na criação da
+    // sessão, quando pode não haver satélite nenhum tendo falado ainda.
+    const deviceId = (): string | null => this.lastDeviceIdByRoom.get(roomId) ?? null;
 
     const tracker = this.getTtfabTracker(roomId);
     const providerName = getActiveProviderName(this.config);
@@ -219,7 +261,7 @@ export class Orchestrator {
           {
             event: 'ttfab',
             room_id: roomId,
-            device_id: deviceId,
+            device_id: deviceId(),
             provider: providerName,
             latency_ms: latencyMs,
           },
@@ -258,7 +300,7 @@ export class Orchestrator {
         {
           event: 'turn_complete',
           room_id: roomId,
-          device_id: deviceId,
+          device_id: deviceId(),
           had_audio: this.speakingByRoom.get(roomId) === true,
           assistant_text: turn.assistantText ?? null,
         },
@@ -277,145 +319,53 @@ export class Orchestrator {
     });
 
     provider.onToolCall((call) => {
-      // Fronteira de confiança: `args` é texto gerado pelo modelo.
-      if (!isControlDeviceCall(call)) {
+      // Fronteira de confiança: `name` e `args` são texto gerado pelo modelo.
+      // O registro casa o nome; o handler valida o conteúdo.
+      const handler = this.toolHandlers.get(call.name);
+      if (!handler) {
         getLogger().error(
           { event: 'tool_call', room_id: roomId, name: call.name, args: call.args },
           'Tool call inválida ou desconhecida',
         );
-        provider.sendToolResult(call.callId, {
-          success: false,
-          error: 'argumentos inválidos',
-        });
+        provider.sendToolResult(call.callId, INVALID_ARGS_RESULT);
         return;
       }
 
-      // Marco do ciclo completo: tool call recebida → HA executado → resposta
-      // devolvida. O `latency_ms` do HomeAssistantClient mede só o HTTP; o que
-      // o usuário sente é este intervalo, que inclui resolução no registro.
-      const toolStartedAt = Date.now();
-      // Latência do modelo: fim da fala → decisão de chamar a tool. É o termo
-      // dominante do atraso percebido; o despacho no HA fica na casa dos 15ms.
-      const modelDecisionMs = tracker.elapsedSinceAnchor();
+      const ctx: ToolContext = {
+        roomId,
+        deviceId: deviceId(),
+        provider,
+        callId: call.callId,
+        // Latência do modelo: fim da fala → decisão de chamar a tool. É o termo
+        // dominante do atraso percebido; o despacho no HA fica na casa dos 15ms.
+        modelDecisionMs: tracker.elapsedSinceAnchor(),
+      };
 
-      const { device, action } = call.args;
-
-      // O `room_id` do modelo é descartado: ele alucina o cômodo (visto em
-      // teste, sessão em sala_de_estar gerando room_id "cozinha") e os args
-      // continuariam válidos pelo type guard — acionaria o cômodo errado sem
-      // erro nenhum. O servidor sabe de onde veio o áudio; essa é a verdade.
-      const suggestedRoomId = call.args.room_id;
-
-      getLogger().info(
-        {
-          event: 'tool_call',
-          room_id: roomId,
-          device_id: deviceId,
-          name: call.name,
-          device,
-          action,
-          ...(suggestedRoomId !== roomId ? { discarded_room_id: suggestedRoomId } : {}),
-        },
-        `Comando de automação: ${device} → ${action} em ${roomId}`,
-      );
-
-      // `current()` a cada chamada, nunca em campo: o registro é revalidado em
-      // background e uma referência guardada congelaria o vocabulário no boot.
-      const resolution = this.deviceRegistry.current().resolve(device, roomId);
-
-      if (!resolution.ok) {
-        getLogger().warn(
-          {
-            event: 'device_unresolved',
-            room_id: roomId,
-            device_id: deviceId,
-            device,
-            reason: resolution.reason,
-          },
-          `Dispositivo não resolvido: ${device} em ${roomId} (${resolution.reason})`,
-        );
-        // Sem `command_result`: nada foi acionado. O erro é escrito para ser
-        // falado — é assim que a IA diz "não encontrei esse dispositivo" em vez
-        // de encerrar o turno em silêncio.
-        provider.sendToolResult(call.callId, {
-          success: false,
-          error: resolution.error,
-        });
-        return;
-      }
-
-      const { domain, entityId } = resolution.entry;
-
-      // O callback do port é síncrono; a chamada ao HA é async, então isto
-      // não pode ficar como promise solta.
-      //
-      // O `sendToolResult` espera o HA de propósito: com a verificação de
-      // estado fora do caminho crítico, o await custa só o POST (~20-40ms) e
-      // preserva o único sinal de falha verdadeiro (HA fora do ar, 401,
-      // timeout). Responder otimista antes do POST faria a Luna confirmar em
-      // voz um comando que falhou de fato.
-      void this.haClient
-        .callService(domain, action === 'on' ? 'turn_on' : 'turn_off', entityId)
+      // O callback do port é síncrono e o handler é async, então isto não pode
+      // ficar como promise solta. O `.catch` é o andaime que nenhuma tool
+      // precisa repetir: sem ele, a rejeição derrubava o processo inteiro (era
+      // o mesmo `void` "confiável" que já tinha sido a causa da queda por HA
+      // fora do ar) e o modelo nunca recebia o `functionResponse` — o turno do
+      // usuário ficava pendurado para sempre esperando a Luna falar.
+      void handler(call.args, ctx)
         .then((result) => {
-          const latencyMs = Date.now() - toolStartedAt;
-
-          getLogger().info(
-            {
-              event: 'command_dispatch',
-              room_id: roomId,
-              device_id: deviceId,
-              device,
-              action,
-              entity_id: entityId,
-              success: result.success,
-              latency_ms: latencyMs,
-              ...(modelDecisionMs !== null ? { model_decision_ms: modelDecisionMs } : {}),
-            },
-            `Comando despachado: ${device} → ${action} (${latencyMs}ms` +
-              (modelDecisionMs !== null ? `, modelo: ${modelDecisionMs}ms)` : ')'),
-          );
-
-          // `success` reflete o resultado real: o satélite não pode tratar um
-          // HA fora do ar como comando executado.
-          this.sendToRoom(
-            roomId,
-            serializeControlMessage(
-              createEnvelope('command_result', roomId, {
-                success: result.success,
-                device,
-                action,
-                entity_id: entityId,
-              }),
-            ),
-          );
-
           provider.sendToolResult(call.callId, result);
         })
         .catch((err: unknown) => {
-          // `callService` em si nunca lança (contrato do HomeAssistantClient),
-          // mas este `.then` chama `sendToRoom` (socket morto) e
-          // `provider.sendToolResult` (ex.: `session.sendToolResponse` do
-          // Gemini numa sessão já fechada) — os dois podem lançar. Sem este
-          // `.catch`, a rejeição derrubava o processo inteiro (era o mesmo
-          // `void` "confiável" que já tinha sido a causa da queda por HA fora
-          // do ar) e o modelo nunca recebia o `functionResponse`: o turno do
-          // usuário ficava pendurado para sempre esperando a Luna falar.
           getLogger().error(
             {
-              event: 'command_dispatch_failed',
+              event: 'tool_dispatch_failed',
               room_id: roomId,
-              device_id: deviceId,
-              device,
-              action,
-              entity_id: entityId,
+              device_id: ctx.deviceId,
+              name: call.name,
               err: err instanceof Error ? err.message : String(err),
             },
-            `Falha ao concluir o despacho de ${device} → ${action}`,
+            `Falha ao concluir a tool ${call.name}`,
           );
           try {
             provider.sendToolResult(call.callId, {
               success: false,
-              error: 'falha ao acionar o dispositivo',
+              error: 'falha ao executar o comando',
             });
           } catch {
             // Provider também fora do ar (mesma causa raiz): nada mais a
@@ -426,7 +376,12 @@ export class Orchestrator {
 
     provider.onError((err) => {
       getLogger().error(
-        { room_id: roomId, device_id: deviceId, provider: providerName, err: err.message },
+        {
+          room_id: roomId,
+          device_id: deviceId(),
+          provider: providerName,
+          err: err.message,
+        },
         'Erro no provider de áudio',
       );
       // Sem isto, um erro no meio de uma resposta em voo deixava o satélite
@@ -472,6 +427,7 @@ export class Orchestrator {
   releaseRoom(roomId: string): void {
     this.ttfabByRoom.delete(roomId);
     this.speakingByRoom.delete(roomId);
+    this.lastDeviceIdByRoom.delete(roomId);
 
     const silenceTimer = this.silenceTimerByRoom.get(roomId);
     if (silenceTimer) {

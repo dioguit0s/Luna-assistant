@@ -10,10 +10,14 @@ interface RoomSession {
   provider: IAudioProvider;
 }
 
+/** Registra os callbacks do port num provider recém-criado. Ver `setProviderBinder`. */
+export type ProviderBinder = (roomId: string, provider: IAudioProvider) => void;
+
 export class RoomManager {
   private readonly sessions = new Map<string, RoomSession>();
   private readonly clientCounts = new Map<string, number>();
   private readonly pendingConnections = new Map<string, Promise<IAudioProvider>>();
+  private bindProvider: ProviderBinder = () => {};
 
   constructor(
     private readonly config: AppConfig,
@@ -21,6 +25,19 @@ export class RoomManager {
     /** Injetável para teste (timeout de connect): mesmo padrão do `fetchImpl` de `HomeAssistantClient`. */
     private readonly providerFactory: (config: AppConfig) => IAudioProvider = createAudioProvider,
   ) {}
+
+  /**
+   * O Orchestrator registra aqui, no construtor dele, o bind dos callbacks do
+   * provider — exatamente um binder, sobrescrito se chamado duas vezes.
+   *
+   * Antes o bind acontecia no primeiro `handleAudioChunk`. Um provider criado
+   * por qualquer outro caminho — o disparo de alarme, que fala sem ter sido
+   * perguntado — nasceria sem `onAudioResponse` registrado, e a fala seria
+   * gerada e cairia no vazio, sem erro nenhum.
+   */
+  setProviderBinder(bind: ProviderBinder): void {
+    this.bindProvider = bind;
+  }
 
   async getOrCreateProvider(roomId: string): Promise<IAudioProvider> {
     const existing = this.sessions.get(roomId);
@@ -56,6 +73,10 @@ export class RoomManager {
     });
 
     await this.awaitConnectWithTimeout(roomId, provider, connectPromise);
+
+    // Antes de `sessions.set`: nenhum caminho pode alcançar este provider sem
+    // os callbacks já registrados.
+    this.bindProvider(roomId, provider);
 
     this.sessions.set(roomId, { provider });
     getLogger().info({ room_id: roomId, event: 'room_created' }, 'Sala criada');

@@ -6,7 +6,7 @@ import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import { DeviceRegistry, toDeviceEntry } from '../ha/deviceRegistry.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import { ConversationRingBuffer } from '../rooms/ConversationRingBuffer.js';
-import type { RoomManager } from '../rooms/RoomManager.js';
+import type { ProviderBinder, RoomManager } from '../rooms/RoomManager.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import type {
   CompletedTurn,
@@ -186,6 +186,8 @@ function toolCall(args: Record<string, unknown>, name = 'control_device'): ToolC
 interface Harness {
   orchestrator: Orchestrator;
   provider: FakeAudioProvider;
+  /** Cria a sessão do cômodo sem ninguém ter falado — o caminho do alarme. */
+  startSession: () => Promise<void>;
   /** Payloads que o Orchestrator endereçou a um cômodo, em ordem de envio. */
   sent: Array<Buffer | string>;
   /** Cômodo de destino de cada item de `sent`, no mesmo índice. */
@@ -211,11 +213,26 @@ function buildHarness(
   const ringBuffer = new ConversationRingBuffer();
   ringBuffers.push(ringBuffer);
 
-  // RoomManager mínimo: o Orchestrator só chama estes três métodos, e a
+  // RoomManager mínimo: o Orchestrator só chama estes quatro métodos, e a
   // sessão real (connect + tools) já é coberta pelo próprio RoomManager.
+  //
+  // O bind dos callbacks acontece na criação da sessão, não no primeiro chunk
+  // de áudio — então o fake precisa chamar o binder na primeira vez que
+  // entrega o provider, como faz `createProviderSession`.
   const evictRoomCalls: string[] = [];
+  let bindProvider: ProviderBinder = () => {};
+  let bound = false;
   const roomManager = {
-    getOrCreateProvider: async () => provider,
+    setProviderBinder: (bind: ProviderBinder) => {
+      bindProvider = bind;
+    },
+    getOrCreateProvider: async (roomId: string) => {
+      if (!bound) {
+        bound = true;
+        bindProvider(roomId, provider);
+      }
+      return provider;
+    },
     getRingBuffer: () => ringBuffer,
     evictRoom: (roomId: string) => evictRoomCalls.push(roomId),
   } as unknown as RoomManager;
@@ -229,6 +246,9 @@ function buildHarness(
   const sentRooms: string[] = [];
 
   return {
+    startSession: async () => {
+      await roomManager.getOrCreateProvider(ROOM_ID);
+    },
     orchestrator: new Orchestrator(
       baseConfig,
       roomManager,
@@ -417,25 +437,62 @@ describe('Orchestrator: despacho de comandos de automação', () => {
     assert.equal(results[0]!.entity_id, 'switch.luz_bancada');
   });
 
-  it('tool desconhecida ou args inválidos: rejeita sem tocar no HA', async () => {
+  it('nome fora do registro de dispatch: "argumentos inválidos" sem tocar no HA', async () => {
+    // O registro casa o nome; nome que não está lá nunca chega a handler
+    // nenhum. Para o modelo é a mesma coisa que args inválidos — ele pediu
+    // algo que o servidor não sabe executar.
     await feedAudio(harness);
 
     await harness.provider.emitToolCall(
-      toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }, 'outra_tool'),
+      toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }, 'set_reminder'),
     );
+
+    assert.equal(harness.haCalls.length, 0);
+    assert.equal(harness.provider.toolResults.length, 1);
+    assert.deepEqual(harness.provider.toolResults[0]!.result, {
+      success: false,
+      error: 'argumentos inválidos',
+    });
+    assert.equal(
+      controlMessages(harness.sent).filter((msg) => msg.type === 'command_result').length,
+      0,
+    );
+  });
+
+  it('args inválidos: o handler rejeita sem tocar no HA', async () => {
+    await feedAudio(harness);
+
     await harness.provider.emitToolCall(
       toolCall({ device: 'luz_bancada', action: 'talvez', room_id: ROOM_ID }),
     );
 
     assert.equal(harness.haCalls.length, 0);
-    assert.equal(harness.provider.toolResults.length, 2);
-    for (const { result } of harness.provider.toolResults) {
-      assert.deepEqual(result, { success: false, error: 'argumentos inválidos' });
-    }
+    assert.deepEqual(harness.provider.toolResults[0]!.result, {
+      success: false,
+      error: 'argumentos inválidos',
+    });
     assert.equal(
       controlMessages(harness.sent).filter((msg) => msg.type === 'command_result').length,
       0,
     );
+  });
+
+  it('sessão criada sem ninguém ter falado já responde áudio', async () => {
+    // O bind saiu do primeiro `handleAudioChunk` e foi para a criação da
+    // sessão. Sem isso, um provider criado pelo caminho do alarme — que fala
+    // sem ter sido perguntado — nasceria sem `onAudioResponse` e a fala do
+    // lembrete seria gerada e cairia no vazio, sem erro nenhum.
+    await harness.startSession();
+
+    harness.provider.emitAudioResponse(Buffer.alloc(64));
+
+    const tipos = controlMessages(harness.sent).map((msg) => msg.type);
+    assert.ok(tipos.includes('speaking_start'), 'faltou speaking_start');
+    assert.ok(
+      harness.sent.some((item) => Buffer.isBuffer(item)),
+      'faltou o frame de áudio',
+    );
+    assert.deepEqual([...new Set(harness.sentRooms)], [ROOM_ID]);
   });
 });
 
