@@ -8,6 +8,8 @@ import {
 import { ConversationRingBuffer } from './rooms/ConversationRingBuffer.js';
 import { RoomManager } from './rooms/RoomManager.js';
 import { WsServer } from './ws/WsServer.js';
+import { ReminderStore } from './reminders/ReminderStore.js';
+import { ReminderScheduler } from './reminders/ReminderScheduler.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -45,6 +47,17 @@ async function main(): Promise<void> {
   const config = loadConfig();
   createLogger(config);
 
+  // Antes de qualquer conexão: se o banco não abrir (permissão, corrupção,
+  // Node sem `node:sqlite`), o processo morre aqui, o `health_ok` do
+  // `activate.sh` falha e o rollback dispara. Falha barulhenta é o objetivo —
+  // um fallback silencioso para `:memory:` faria os alarmes sumirem a cada
+  // deploy sem nenhum sinal.
+  const reminderStore = ReminderStore.open(config.dbPath);
+  getLogger().info(
+    { event: 'reminder_store_open', db_path: config.dbPath },
+    'Banco de lembretes aberto',
+  );
+
   const ringBuffer = new ConversationRingBuffer();
   const roomManager = new RoomManager(config, ringBuffer);
 
@@ -58,7 +71,55 @@ async function main(): Promise<void> {
   // sobe com os overrides e o refresh por TTL recupera depois.
   await deviceRegistry.start();
 
-  const wsServer = new WsServer(config, roomManager, haClient, deviceRegistry);
+  // O ReminderScheduler só pode nascer depois do WsServer estar construído: o
+  // onFire precisa do `ringOnce` do Orchestrator lá dentro, e o Orchestrator
+  // precisa do scheduler para o handler de set_reminder chamar reschedule()
+  // — nenhum dos dois nasce primeiro sozinho (ver o comentário em
+  // Orchestrator.setReminderScheduler). `wsServer.start()` só roda depois de
+  // tudo isto amarrado, de propósito: nenhuma conexão é aceita antes de o
+  // scheduler existir para o handler chamar.
+  //
+  // O toque em si ainda é só isto: um `ringOnce`. Rajadas repetidas,
+  // dispensa por voz e soneca são o `AlarmRinger` do marco 7.
+  const wsServer = new WsServer(config, roomManager, haClient, deviceRegistry, reminderStore);
+
+  const reminderScheduler = new ReminderScheduler({
+    store: reminderStore,
+    onFire: (reminder) => {
+      const delivered = wsServer.ringOnce(reminder.roomId);
+      if (delivered > 0) return;
+
+      // Satélite de origem offline (ou sem ninguém conectado): cai no
+      // cômodo de fallback fixo — burro de propósito, não "onde tem gente"
+      // (ver `reminderFallbackRoomId` em config/env.ts).
+      if (!config.reminderFallbackRoomId || config.reminderFallbackRoomId === reminder.roomId) {
+        getLogger().warn(
+          { event: 'reminder_room_offline', reminder_id: reminder.id, room_id: reminder.roomId },
+          `Lembrete ${reminder.shortId} venceu em ${reminder.roomId}, mas ninguém está lá para ouvir (sem fallback configurado)`,
+        );
+        return;
+      }
+
+      const fallbackDelivered = wsServer.ringOnce(config.reminderFallbackRoomId);
+      getLogger().warn(
+        {
+          event: 'reminder_fallback_room',
+          reminder_id: reminder.id,
+          room_id: reminder.roomId,
+          fallback_room_id: config.reminderFallbackRoomId,
+          delivered: fallbackDelivered > 0,
+        },
+        `Lembrete ${reminder.shortId}: ${reminder.roomId} offline, tocado em ${config.reminderFallbackRoomId}`,
+      );
+    },
+    missedGraceMs: config.missedGraceMs,
+    maxRingMs: config.alarmMaxRingMs,
+    maxConcurrent: config.reminderMaxConcurrent,
+  });
+  wsServer.setReminderScheduler(reminderScheduler);
+  // Rehydrate: fecha `ringing` órfão de um processo anterior e arma o timer a
+  // partir do banco — é o que faz um alarme sobreviver ao deploy.
+  reminderScheduler.start();
 
   wsServer.start();
 
@@ -102,8 +163,10 @@ async function main(): Promise<void> {
 
     await wsServer.stop();
     deviceRegistry.stop();
+    reminderScheduler.stop();
     await roomManager.destroy();
     ringBuffer.destroy();
+    reminderStore.close();
     process.exit(0);
   };
 

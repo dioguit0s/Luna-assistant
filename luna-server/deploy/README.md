@@ -131,6 +131,27 @@ na porta antiga indefinidamente. Também lembre da regra `ufw` para a porta nova
 Rodar o workflow manualmente (**Actions → Deploy luna-server → Run workflow**) ou
 fazer um push em `main`.
 
+## Estado persistente
+
+O serviço grava um banco SQLite com os lembretes e alarmes. A unit declara
+`StateDirectory=luna-server`, então o systemd cria `/var/lib/luna-server` com
+dono `luna:luna` e libera escrita mesmo sob `ProtectSystem=strict` — não é
+preciso criar o diretório nem ajustar permissão à mão.
+
+O banco **não** fica junto da release: o `activate.sh` troca o symlink de
+`/opt/luna/current` a cada deploy e poda as antigas, então um alarme marcado
+para as 7h não sobreviveria a um deploy às 3h. Para apontar para outro caminho,
+use `LUNA_DB_PATH` (absoluto) em `/etc/luna-server.env`.
+
+O `node:sqlite` exige **Node >= 22.5**. O workflow não tem `setup-node` — usa o
+node da máquina —, então há um guard de versão logo no início do deploy: com um
+node antigo, o job falha antes de montar a release em vez de queimar um deploy.
+
+```bash
+# Banco de lembretes
+sudo ls -l /var/lib/luna-server/
+```
+
 ## Operação
 
 ```bash

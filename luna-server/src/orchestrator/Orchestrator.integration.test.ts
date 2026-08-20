@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import type { AppConfig } from '../config/env.js';
 import { createLogger } from '../logging/logger.js';
 import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import { ReminderStore } from '../reminders/ReminderStore.js';
+import { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import { DeviceRegistry, toDeviceEntry } from '../ha/deviceRegistry.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import { ConversationRingBuffer } from '../rooms/ConversationRingBuffer.js';
-import type { RoomManager } from '../rooms/RoomManager.js';
+import type { ProviderBinder, RoomManager } from '../rooms/RoomManager.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import type {
   CompletedTurn,
@@ -45,6 +47,12 @@ const baseConfig: AppConfig = {
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
   openaiVoice: 'marin',
+  dbPath: ':memory:',
+  missedGraceMs: 15 * 60_000,
+  alarmMaxRingMs: 5 * 60_000,
+  reminderMaxConcurrent: 20,
+  reminderMaxPerRoom: 20,
+  reminderFallbackRoomId: '',
 };
 
 const ROOM_ID = 'sala_de_estar';
@@ -186,7 +194,13 @@ function toolCall(args: Record<string, unknown>, name = 'control_device'): ToolC
 interface Harness {
   orchestrator: Orchestrator;
   provider: FakeAudioProvider;
+  reminderStore: ReminderStore;
+  /** Cria a sessão do cômodo sem ninguém ter falado — o caminho do alarme. */
+  startSession: () => Promise<void>;
+  /** Payloads que o Orchestrator endereçou a um cômodo, em ordem de envio. */
   sent: Array<Buffer | string>;
+  /** Cômodo de destino de cada item de `sent`, no mesmo índice. */
+  sentRooms: string[];
   haCalls: FetchCall[];
   evictRoomCalls: string[];
 }
@@ -196,14 +210,11 @@ interface Harness {
  * o processo de teste nunca encerra.
  */
 const ringBuffers: ConversationRingBuffer[] = [];
+/** Mesmo padrão de `ringBuffers`: cada harness abre um `:memory:` próprio. */
+const reminderStores: ReminderStore[] = [];
 
 async function feedAudio(h: Harness): Promise<void> {
-  await h.orchestrator.handleAudioChunk(
-    ROOM_ID,
-    DEVICE_ID,
-    Buffer.alloc(640),
-    (data) => h.sent.push(data),
-  );
+  await h.orchestrator.handleAudioChunk(ROOM_ID, DEVICE_ID, Buffer.alloc(640));
 }
 
 function buildHarness(
@@ -213,11 +224,26 @@ function buildHarness(
   const ringBuffer = new ConversationRingBuffer();
   ringBuffers.push(ringBuffer);
 
-  // RoomManager mínimo: o Orchestrator só chama estes três métodos, e a
+  // RoomManager mínimo: o Orchestrator só chama estes quatro métodos, e a
   // sessão real (connect + tools) já é coberta pelo próprio RoomManager.
+  //
+  // O bind dos callbacks acontece na criação da sessão, não no primeiro chunk
+  // de áudio — então o fake precisa chamar o binder na primeira vez que
+  // entrega o provider, como faz `createProviderSession`.
   const evictRoomCalls: string[] = [];
+  let bindProvider: ProviderBinder = () => {};
+  let bound = false;
   const roomManager = {
-    getOrCreateProvider: async () => provider,
+    setProviderBinder: (bind: ProviderBinder) => {
+      bindProvider = bind;
+    },
+    getOrCreateProvider: async (roomId: string) => {
+      if (!bound) {
+        bound = true;
+        bindProvider(roomId, provider);
+      }
+      return provider;
+    },
     getRingBuffer: () => ringBuffer,
     evictRoom: (roomId: string) => evictRoomCalls.push(roomId),
   } as unknown as RoomManager;
@@ -225,10 +251,34 @@ function buildHarness(
   const { fetchImpl, calls } = mockFetch(respond);
   const haClient = new HomeAssistantClient(baseConfig, fetchImpl);
 
+  const reminderStore = ReminderStore.open(':memory:');
+  reminderStores.push(reminderStore);
+
+  // O fan-out real vive no WsServer (ver WsServer.fanout.test.ts); aqui o que
+  // importa é que o Orchestrator só endereça cômodo, nunca conexão.
+  const sent: Array<Buffer | string> = [];
+  const sentRooms: string[] = [];
+
   return {
-    orchestrator: new Orchestrator(baseConfig, roomManager, haClient, registrySource),
+    startSession: async () => {
+      await roomManager.getOrCreateProvider(ROOM_ID);
+    },
+    orchestrator: new Orchestrator(
+      baseConfig,
+      roomManager,
+      haClient,
+      registrySource,
+      (roomId, payload) => {
+        sentRooms.push(roomId);
+        sent.push(payload);
+        return 1;
+      },
+      reminderStore,
+    ),
     provider,
-    sent: [],
+    reminderStore,
+    sent,
+    sentRooms,
     haCalls: calls,
     evictRoomCalls,
   };
@@ -249,6 +299,11 @@ describe('Orchestrator: despacho de comandos de automação', () => {
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -307,47 +362,25 @@ describe('Orchestrator: despacho de comandos de automação', () => {
     assert.equal(results[0]!.entity_id, 'switch.luz_bancada');
   });
 
-  it('reconexão do satélite: respostas seguem a conexão atual, não a original', async () => {
-    // O provider (RoomManager) sobrevive à reconexão — é o próprio cenário do
-    // bug: uma queda abrupta (energia, cabo USB) não manda close frame, o
-    // servidor não percebe, e o cômodo segue com o mesmo provider quando o
-    // satélite volta com uma conexão (e um sendToClient) novos.
-    const sentFirstConnection: Array<Buffer | string> = [];
-    const sentSecondConnection: Array<Buffer | string> = [];
+  it('endereça tudo pelo cômodo, sem guardar conexão nenhuma', async () => {
+    // Era aqui que morava o `sendToClientByRoom`: uma closure por cômodo,
+    // reposta a cada chunk de áudio. Ela sobrevivia à reconexão do satélite,
+    // mas guardava só a ÚLTIMA conexão que falou — com dois satélites no mesmo
+    // cômodo, um deles ficava sem `speaking_start` e sem áudio. Quem sabe
+    // quais satélites existem na sala agora é o WsServer; o Orchestrator só
+    // diz o cômodo.
+    await feedAudio(harness);
 
-    await harness.orchestrator.handleAudioChunk(
-      ROOM_ID,
-      DEVICE_ID,
-      Buffer.alloc(640),
-      (data) => sentFirstConnection.push(data),
-    );
-    await harness.orchestrator.handleAudioChunk(
-      ROOM_ID,
-      DEVICE_ID,
-      Buffer.alloc(640),
-      (data) => sentSecondConnection.push(data),
-    );
-
+    harness.provider.emitAudioResponse(Buffer.alloc(64));
     await harness.provider.emitToolCall(
       toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }),
     );
 
-    const resultsOnDeadConnection = controlMessages(sentFirstConnection).filter(
-      (msg) => msg.type === 'command_result',
-    );
-    assert.equal(
-      resultsOnDeadConnection.length,
-      0,
-      'a conexão original (morta) não deveria receber nada',
-    );
-
-    const resultsOnCurrentConnection = controlMessages(sentSecondConnection).filter(
-      (msg) => msg.type === 'command_result',
-    );
-    assert.equal(
-      resultsOnCurrentConnection.length,
-      1,
-      'command_result deveria sair pela conexão atual',
+    assert.ok(harness.sentRooms.length > 0, 'nada foi endereçado');
+    assert.deepEqual(
+      [...new Set(harness.sentRooms)],
+      [ROOM_ID],
+      'todo envio deveria ser endereçado ao cômodo da sessão',
     );
   });
 
@@ -425,25 +458,62 @@ describe('Orchestrator: despacho de comandos de automação', () => {
     assert.equal(results[0]!.entity_id, 'switch.luz_bancada');
   });
 
-  it('tool desconhecida ou args inválidos: rejeita sem tocar no HA', async () => {
+  it('nome fora do registro de dispatch: "argumentos inválidos" sem tocar no HA', async () => {
+    // O registro casa o nome; nome que não está lá nunca chega a handler
+    // nenhum. Para o modelo é a mesma coisa que args inválidos — ele pediu
+    // algo que o servidor não sabe executar.
     await feedAudio(harness);
 
     await harness.provider.emitToolCall(
-      toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }, 'outra_tool'),
+      toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }, 'manage_reminders'),
     );
+
+    assert.equal(harness.haCalls.length, 0);
+    assert.equal(harness.provider.toolResults.length, 1);
+    assert.deepEqual(harness.provider.toolResults[0]!.result, {
+      success: false,
+      error: 'argumentos inválidos',
+    });
+    assert.equal(
+      controlMessages(harness.sent).filter((msg) => msg.type === 'command_result').length,
+      0,
+    );
+  });
+
+  it('args inválidos: o handler rejeita sem tocar no HA', async () => {
+    await feedAudio(harness);
+
     await harness.provider.emitToolCall(
       toolCall({ device: 'luz_bancada', action: 'talvez', room_id: ROOM_ID }),
     );
 
     assert.equal(harness.haCalls.length, 0);
-    assert.equal(harness.provider.toolResults.length, 2);
-    for (const { result } of harness.provider.toolResults) {
-      assert.deepEqual(result, { success: false, error: 'argumentos inválidos' });
-    }
+    assert.deepEqual(harness.provider.toolResults[0]!.result, {
+      success: false,
+      error: 'argumentos inválidos',
+    });
     assert.equal(
       controlMessages(harness.sent).filter((msg) => msg.type === 'command_result').length,
       0,
     );
+  });
+
+  it('sessão criada sem ninguém ter falado já responde áudio', async () => {
+    // O bind saiu do primeiro `handleAudioChunk` e foi para a criação da
+    // sessão. Sem isso, um provider criado pelo caminho do alarme — que fala
+    // sem ter sido perguntado — nasceria sem `onAudioResponse` e a fala do
+    // lembrete seria gerada e cairia no vazio, sem erro nenhum.
+    await harness.startSession();
+
+    harness.provider.emitAudioResponse(Buffer.alloc(64));
+
+    const tipos = controlMessages(harness.sent).map((msg) => msg.type);
+    assert.ok(tipos.includes('speaking_start'), 'faltou speaking_start');
+    assert.ok(
+      harness.sent.some((item) => Buffer.isBuffer(item)),
+      'faltou o frame de áudio',
+    );
+    assert.deepEqual([...new Set(harness.sentRooms)], [ROOM_ID]);
   });
 });
 
@@ -454,6 +524,11 @@ describe('Orchestrator: corte de silêncio antecipa speaking_start', () => {
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -537,6 +612,11 @@ describe('Orchestrator: speaking_end garantido em todo caminho de encerramento',
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -608,6 +688,11 @@ describe('Orchestrator: watchdog de speaking_end sem áudio novo', () => {
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -662,6 +747,11 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -810,5 +900,255 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
     // deveria sair: a fila e o timer de drain foram descartados.
     mock.timers.tick(AUDIO_FRAME_INTERVAL_MS * 10);
     assert.equal(audioFrames(harness).length, 1, 'fila da sessão morta vazou para depois do releaseRoom');
+  });
+});
+
+describe('Orchestrator: ringOnce (chime)', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+  });
+
+  function audioFrames(h: Harness): Buffer[] {
+    return h.sent.filter((item): item is Buffer => Buffer.isBuffer(item));
+  }
+
+  /** Drena a fila paceada até esvaziar — mesmo padrão do describe de pacing. */
+  function drainQueue(rounds = 200): void {
+    for (let i = 0; i < rounds; i++) mock.timers.tick(AUDIO_FRAME_INTERVAL_MS);
+  }
+
+  it('não abre sessão de provider nenhuma — é PCM puro pela fila existente', () => {
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    // Nenhum handleAudioChunk/getOrCreateProvider foi chamado neste teste:
+    // se ringOnce dependesse de provider, harness.provider (nunca "criado"
+    // aqui) não teria como ter emitido nada — e mesmo assim o chime saiu.
+    assert.ok(audioFrames(harness).length > 0, 'nenhum frame de áudio saiu');
+  });
+
+  it('manda speaking_start, o chime fragmentado, e speaking_end nessa ordem', () => {
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    const tipos = controlMessages(harness.sent).map((msg) => msg.type);
+    assert.deepEqual(
+      tipos.filter((t) => t === 'speaking_start' || t === 'speaking_end'),
+      ['speaking_start', 'speaking_end'],
+      'esperava exatamente um par speaking_start/speaking_end',
+    );
+
+    const startIndex = harness.sent.findIndex(
+      (item) => typeof item === 'string' && parseControlMessage(item)?.type === 'speaking_start',
+    );
+    const endIndex = harness.sent.findIndex(
+      (item) => typeof item === 'string' && parseControlMessage(item)?.type === 'speaking_end',
+    );
+    const frameIndices = harness.sent
+      .map((item, i) => (Buffer.isBuffer(item) ? i : -1))
+      .filter((i) => i !== -1);
+
+    assert.ok(frameIndices.length > 0, 'nenhum frame de áudio enfileirado');
+    assert.ok(startIndex < frameIndices[0]!, 'speaking_start deveria vir antes do primeiro frame');
+    assert.ok(
+      endIndex > frameIndices[frameIndices.length - 1]!,
+      'speaking_end deveria vir depois do último frame',
+    );
+  });
+
+  it('todo pedaço de PCM do chime cabe no teto de MAX_AUDIO_FRAME_BYTES', () => {
+    // O frame no fio é header JSON + pedaço de PCM (Buffer.concat em
+    // drainAudioQueue) — MAX_AUDIO_FRAME_BYTES é o teto do PEDAÇO, não do
+    // frame inteiro; o header soma uns 60-100B a mais por cima, e é o mesmo
+    // caminho que qualquer audio_response de provider já usa.
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    const frames = audioFrames(harness);
+    assert.ok(frames.length > 1, 'o bipe de 1s deveria fragmentar em mais de um frame');
+    for (const frame of frames) {
+      const headerEnd = frame.indexOf(0x7d) + 1; // '}' fecha o envelope JSON
+      const piece = frame.subarray(headerEnd);
+      assert.ok(
+        piece.length <= MAX_AUDIO_FRAME_BYTES,
+        `pedaço de ${piece.length}B acima do teto de ${MAX_AUDIO_FRAME_BYTES}B`,
+      );
+    }
+  });
+
+  it('reconstitui o mesmo PCM que chime.ts gera, sem perda nem reordenação', async () => {
+    const { CHIME_PCM16 } = await import('../reminders/chime.js');
+
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    const payloads = harness.sent
+      .filter((item): item is Buffer => Buffer.isBuffer(item))
+      .map((frame) => frame.subarray(frame.indexOf(0x7d) + 1)); // após o header JSON
+    const reassembled = Buffer.concat(payloads);
+
+    assert.deepEqual(reassembled, CHIME_PCM16);
+  });
+
+  it('endereça o cômodo certo: outra sala não ouve nada', () => {
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    assert.deepEqual(harness.sentRooms.filter((r) => r !== ROOM_ID), []);
+  });
+
+  it('devolve 0 e não enfileira nada quando o cômodo já está falando (turno em voo)', async () => {
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(64));
+    const antes = harness.sent.length;
+
+    const delivered = harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    assert.equal(delivered, 0);
+    assert.equal(harness.sent.length, antes, 'ringOnce não deveria ter enfileirado nada por cima do turno');
+  });
+
+  it('sala vazia (sendToRoom devolve 0): ainda assim completa o ciclo, sem travar speakingByRoom', () => {
+    // Um `sendToRoom` real devolve 0 quando ninguém está conectado no cômodo
+    // (ver WsServer.sendToRoom). O ciclo inteiro precisa terminar mesmo
+    // assim — senão a sala fica com `speakingByRoom` travado em `true` e a
+    // próxima fala de verdade nunca manda `speaking_start`.
+    // `ringOnce` não toca `getOrCreateProvider`/`getRingBuffer`/`evictRoom` —
+    // só `setProviderBinder` precisa existir, chamado direto pelo construtor
+    // do Orchestrator.
+    const { fetchImpl } = mockFetch(() => new Response('[]', { status: 200 }));
+    const haClient = new HomeAssistantClient(baseConfig, fetchImpl);
+    const roomManagerStub = { setProviderBinder: () => {} } as unknown as RoomManager;
+    const reminderStore = ReminderStore.open(':memory:');
+    reminderStores.push(reminderStore);
+
+    const orchestrator = new Orchestrator(
+      baseConfig,
+      roomManagerStub,
+      haClient,
+      registrySource,
+      () => 0, // sala vazia: sempre 0 entregues.
+      reminderStore,
+    );
+
+    const primeiroDisparo = orchestrator.ringOnce(ROOM_ID);
+    const segundoDisparo = orchestrator.ringOnce(ROOM_ID);
+
+    assert.equal(primeiroDisparo, 0);
+    assert.equal(
+      segundoDisparo,
+      0,
+      'um segundo ringOnce logo depois do primeiro não deveria ser bloqueado por speakingByRoom preso',
+    );
+  });
+});
+
+describe('Orchestrator: set_reminder ponta a ponta', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  let harness: Harness;
+  let scheduler: ReminderScheduler;
+  let fired: string[];
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    fired = [];
+    scheduler = new ReminderScheduler({
+      store: harness.reminderStore,
+      onFire: (reminder) => {
+        fired.push(reminder.shortId);
+      },
+      missedGraceMs: 15 * 60_000,
+      maxRingMs: 5 * 60_000,
+      maxConcurrent: 20,
+    });
+    // Mesma injeção tardia do boot real (ver index.ts): o Orchestrator
+    // precisa do scheduler para o handler de set_reminder chamar reschedule().
+    harness.orchestrator.setReminderScheduler(scheduler);
+  });
+
+  afterEach(() => {
+    scheduler.stop();
+  });
+
+  it('tool → store → scheduler: "daqui a 10 minutos" cria o lembrete e o scheduler o vê', async () => {
+    await feedAudio(harness);
+
+    await harness.provider.emitToolCall(toolCall({ in_seconds: 600 }, 'set_reminder'));
+
+    const results = harness.provider.toolResults;
+    assert.equal(results.length, 1);
+    const result = results[0]!.result as { success: boolean; reminder_id: string; spoken_when: string };
+    assert.equal(result.success, true);
+    assert.match(result.spoken_when, /10 minutos/);
+
+    const live = harness.reminderStore.listLiveByRoom(ROOM_ID);
+    assert.equal(live.length, 1);
+    assert.equal(live[0]!.shortId, result.reminder_id);
+
+    // O scheduler já foi cutucado (reschedule() dentro do handler): sem
+    // esperar a próxima acordada, ele já enxerga o lembrete recém-criado como
+    // o próximo a vencer.
+    assert.equal(harness.reminderStore.nextArmed()?.shortId, result.reminder_id);
+  });
+
+  it('args inválidos: erro falável ao modelo, nenhuma linha no banco', async () => {
+    await feedAudio(harness);
+
+    await harness.provider.emitToolCall(
+      toolCall({ in_seconds: 600, at_time: '19:00' }, 'set_reminder'),
+    );
+
+    const result = harness.provider.toolResults[0]!.result as { success: boolean; error: string };
+    assert.equal(result.success, false);
+    assert.equal(typeof result.error, 'string');
+    assert.equal(harness.reminderStore.countLiveByRoom(ROOM_ID), 0);
+  });
+
+  it('nenhum command_result nem chamada ao HA — set_reminder não é control_device', async () => {
+    await feedAudio(harness);
+
+    await harness.provider.emitToolCall(toolCall({ in_seconds: 60 }, 'set_reminder'));
+
+    assert.equal(harness.haCalls.length, 0);
+    assert.equal(
+      controlMessages(harness.sent).filter((msg) => msg.type === 'command_result').length,
+      0,
+    );
+  });
+
+  it('o cômodo do lembrete é sempre o da sessão, mesmo sem room_id nos args', async () => {
+    await feedAudio(harness);
+    await harness.provider.emitToolCall(toolCall({ in_seconds: 60 }, 'set_reminder'));
+
+    assert.equal(harness.reminderStore.countLiveByRoom(ROOM_ID), 1);
   });
 });

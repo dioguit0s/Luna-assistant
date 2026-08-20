@@ -63,3 +63,8 @@ luna-desktop/wakeword-sidecar/fixtures/background-*.wav
 # Dump de microfone (LUNA_DUMP_MIC) — pode conter áudio da casa do usuário;
 # nunca commitar por acidente se gerado dentro do repo.
 luna-desktop/mic-dump-*.wav
+
+# Banco de lembretes em desenvolvimento (default de `resolveDbPath` quando não
+# há $STATE_DIRECTORY do systemd). Em produção o banco vive em
+# /var/lib/luna-server, fora do repo.
+luna-server/.luna-state/

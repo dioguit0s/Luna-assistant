@@ -74,15 +74,16 @@ export interface ControlDeviceArgs {
 }
 
 /**
- * Valida uma `ToolCall` vinda do LLM contra o contrato de `control_device`.
- * Fronteira de confiança: os args são texto gerado, não payload estruturado.
+ * Valida os args de `control_device` vindos do LLM. Fronteira de confiança: os
+ * args são texto gerado, não payload estruturado.
+ *
+ * Separado do nome da tool porque quem casa o nome é o registro de dispatch do
+ * Orchestrator (a chave do mapa); ao handler sobra validar o conteúdo.
  */
-export function isControlDeviceCall(
-  call: ToolCall,
-): call is ToolCall & { args: ControlDeviceArgs } {
-  if (call.name !== CONTROL_DEVICE_TOOL.name) return false;
-
-  const { device, action, room_id: roomId } = call.args;
+export function isControlDeviceArgs(
+  args: Record<string, unknown>,
+): args is Record<string, unknown> & ControlDeviceArgs {
+  const { device, action, room_id: roomId } = args;
 
   return (
     typeof device === 'string' &&
@@ -91,4 +92,11 @@ export function isControlDeviceCall(
     roomId.length > 0 &&
     (action === 'on' || action === 'off')
   );
+}
+
+/** Idem, para quem tem a `ToolCall` inteira em mãos: nome mais args. */
+export function isControlDeviceCall(
+  call: ToolCall,
+): call is ToolCall & { args: ControlDeviceArgs } {
+  return call.name === CONTROL_DEVICE_TOOL.name && isControlDeviceArgs(call.args);
 }

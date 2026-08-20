@@ -7,6 +7,7 @@ import { ConversationRingBuffer } from '../rooms/ConversationRingBuffer.js';
 import { RoomManager } from '../rooms/RoomManager.js';
 import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
+import { ReminderStore } from '../reminders/ReminderStore.js';
 import { WsServer } from './WsServer.js';
 import { computeAuthToken } from './auth.js';
 import { createEnvelope, parseControlMessage, serializeControlMessage } from './protocol.js';
@@ -35,12 +36,19 @@ const config: AppConfig = {
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
   openaiVoice: 'marin',
+  dbPath: ':memory:',
+  missedGraceMs: 15 * 60_000,
+  alarmMaxRingMs: 5 * 60_000,
+  reminderMaxConcurrent: 20,
+  reminderMaxPerRoom: 20,
+  reminderFallbackRoomId: '',
 };
 
 describe('WsServer: endurecimento da borda', () => {
   let ringBuffer: ConversationRingBuffer;
   let roomManager: RoomManager;
   let server: WsServer;
+  let reminderStore: ReminderStore;
   let wsUrl: string;
 
   before(async () => {
@@ -51,7 +59,8 @@ describe('WsServer: endurecimento da borda', () => {
     ringBuffer = new ConversationRingBuffer();
     roomManager = new RoomManager(config, ringBuffer);
     const haClient = new HomeAssistantClient(config);
-    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient));
+    reminderStore = ReminderStore.open(':memory:');
+    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient), reminderStore);
     server.start();
 
     while (server.port === null) {
@@ -62,6 +71,7 @@ describe('WsServer: endurecimento da borda', () => {
 
   afterEach(async () => {
     await server.stop();
+    reminderStore.close();
     await roomManager.destroy();
     ringBuffer.destroy();
   });

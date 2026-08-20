@@ -6,6 +6,7 @@ import { ConversationRingBuffer } from '../rooms/ConversationRingBuffer.js';
 import { RoomManager } from '../rooms/RoomManager.js';
 import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
+import { ReminderStore } from '../reminders/ReminderStore.js';
 import { WsServer } from './WsServer.js';
 
 const config: AppConfig = {
@@ -32,12 +33,19 @@ const config: AppConfig = {
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
   openaiVoice: 'marin',
+  dbPath: ':memory:',
+  missedGraceMs: 15 * 60_000,
+  alarmMaxRingMs: 5 * 60_000,
+  reminderMaxConcurrent: 20,
+  reminderMaxPerRoom: 20,
+  reminderFallbackRoomId: '',
 };
 
 describe('GET /health', () => {
   let ringBuffer: ConversationRingBuffer;
   let roomManager: RoomManager;
   let server: WsServer;
+  let reminderStore: ReminderStore;
   let baseUrl: string;
 
   before(async () => {
@@ -45,7 +53,8 @@ describe('GET /health', () => {
     ringBuffer = new ConversationRingBuffer();
     roomManager = new RoomManager(config, ringBuffer);
     const haClient = new HomeAssistantClient(config);
-    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient));
+    reminderStore = ReminderStore.open(':memory:');
+    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient), reminderStore);
     server.start();
 
     while (server.port === null) {
@@ -56,6 +65,7 @@ describe('GET /health', () => {
 
   after(async () => {
     await server.stop();
+    reminderStore.close();
     await roomManager.destroy();
     ringBuffer.destroy();
   });

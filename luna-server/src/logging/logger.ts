@@ -1,26 +1,13 @@
 import pino from 'pino';
 import type { AppConfig } from '../config/env.js';
+import { formatLocalTimestamp } from '../time/clock.js';
 
 let loggerInstance: pino.Logger | null = null;
 
-const saoPauloFormatter = new Intl.DateTimeFormat('sv-SE', {
-  timeZone: 'America/Sao_Paulo',
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  second: '2-digit',
-  hour12: false,
-});
-
-// America/Sao_Paulo não observa mais horário de verão desde 2019, então o
-// offset -03:00 é fixo.
+// Um relógio só no servidor: o timestamp do log sai da mesma fonte que o prompt
+// e o agendador usam (`time/clock.ts`), em America/Sao_Paulo.
 function saoPauloTimestamp(): string {
-  const now = new Date();
-  const [date, time] = saoPauloFormatter.format(now).split(' ');
-  const ms = String(now.getMilliseconds()).padStart(3, '0');
-  return `,"time":"${date}T${time}.${ms}-03:00"`;
+  return `,"time":"${formatLocalTimestamp()}"`;
 }
 
 export function createLogger(config: AppConfig): pino.Logger {
