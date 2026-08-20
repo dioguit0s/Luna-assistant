@@ -865,3 +865,156 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
     assert.equal(audioFrames(harness).length, 1, 'fila da sessão morta vazou para depois do releaseRoom');
   });
 });
+
+describe('Orchestrator: ringOnce (chime)', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+  });
+
+  function audioFrames(h: Harness): Buffer[] {
+    return h.sent.filter((item): item is Buffer => Buffer.isBuffer(item));
+  }
+
+  /** Drena a fila paceada até esvaziar — mesmo padrão do describe de pacing. */
+  function drainQueue(rounds = 200): void {
+    for (let i = 0; i < rounds; i++) mock.timers.tick(AUDIO_FRAME_INTERVAL_MS);
+  }
+
+  it('não abre sessão de provider nenhuma — é PCM puro pela fila existente', () => {
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    // Nenhum handleAudioChunk/getOrCreateProvider foi chamado neste teste:
+    // se ringOnce dependesse de provider, harness.provider (nunca "criado"
+    // aqui) não teria como ter emitido nada — e mesmo assim o chime saiu.
+    assert.ok(audioFrames(harness).length > 0, 'nenhum frame de áudio saiu');
+  });
+
+  it('manda speaking_start, o chime fragmentado, e speaking_end nessa ordem', () => {
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    const tipos = controlMessages(harness.sent).map((msg) => msg.type);
+    assert.deepEqual(
+      tipos.filter((t) => t === 'speaking_start' || t === 'speaking_end'),
+      ['speaking_start', 'speaking_end'],
+      'esperava exatamente um par speaking_start/speaking_end',
+    );
+
+    const startIndex = harness.sent.findIndex(
+      (item) => typeof item === 'string' && parseControlMessage(item)?.type === 'speaking_start',
+    );
+    const endIndex = harness.sent.findIndex(
+      (item) => typeof item === 'string' && parseControlMessage(item)?.type === 'speaking_end',
+    );
+    const frameIndices = harness.sent
+      .map((item, i) => (Buffer.isBuffer(item) ? i : -1))
+      .filter((i) => i !== -1);
+
+    assert.ok(frameIndices.length > 0, 'nenhum frame de áudio enfileirado');
+    assert.ok(startIndex < frameIndices[0]!, 'speaking_start deveria vir antes do primeiro frame');
+    assert.ok(
+      endIndex > frameIndices[frameIndices.length - 1]!,
+      'speaking_end deveria vir depois do último frame',
+    );
+  });
+
+  it('todo pedaço de PCM do chime cabe no teto de MAX_AUDIO_FRAME_BYTES', () => {
+    // O frame no fio é header JSON + pedaço de PCM (Buffer.concat em
+    // drainAudioQueue) — MAX_AUDIO_FRAME_BYTES é o teto do PEDAÇO, não do
+    // frame inteiro; o header soma uns 60-100B a mais por cima, e é o mesmo
+    // caminho que qualquer audio_response de provider já usa.
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    const frames = audioFrames(harness);
+    assert.ok(frames.length > 1, 'o bipe de 1s deveria fragmentar em mais de um frame');
+    for (const frame of frames) {
+      const headerEnd = frame.indexOf(0x7d) + 1; // '}' fecha o envelope JSON
+      const piece = frame.subarray(headerEnd);
+      assert.ok(
+        piece.length <= MAX_AUDIO_FRAME_BYTES,
+        `pedaço de ${piece.length}B acima do teto de ${MAX_AUDIO_FRAME_BYTES}B`,
+      );
+    }
+  });
+
+  it('reconstitui o mesmo PCM que chime.ts gera, sem perda nem reordenação', async () => {
+    const { CHIME_PCM16 } = await import('../reminders/chime.js');
+
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    const payloads = harness.sent
+      .filter((item): item is Buffer => Buffer.isBuffer(item))
+      .map((frame) => frame.subarray(frame.indexOf(0x7d) + 1)); // após o header JSON
+    const reassembled = Buffer.concat(payloads);
+
+    assert.deepEqual(reassembled, CHIME_PCM16);
+  });
+
+  it('endereça o cômodo certo: outra sala não ouve nada', () => {
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    assert.deepEqual(harness.sentRooms.filter((r) => r !== ROOM_ID), []);
+  });
+
+  it('devolve 0 e não enfileira nada quando o cômodo já está falando (turno em voo)', async () => {
+    await feedAudio(harness);
+    harness.provider.emitAudioResponse(Buffer.alloc(64));
+    const antes = harness.sent.length;
+
+    const delivered = harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    assert.equal(delivered, 0);
+    assert.equal(harness.sent.length, antes, 'ringOnce não deveria ter enfileirado nada por cima do turno');
+  });
+
+  it('sala vazia (sendToRoom devolve 0): ainda assim completa o ciclo, sem travar speakingByRoom', () => {
+    // Um `sendToRoom` real devolve 0 quando ninguém está conectado no cômodo
+    // (ver WsServer.sendToRoom). O ciclo inteiro precisa terminar mesmo
+    // assim — senão a sala fica com `speakingByRoom` travado em `true` e a
+    // próxima fala de verdade nunca manda `speaking_start`.
+    // `ringOnce` não toca `getOrCreateProvider`/`getRingBuffer`/`evictRoom` —
+    // só `setProviderBinder` precisa existir, chamado direto pelo construtor
+    // do Orchestrator.
+    const { fetchImpl } = mockFetch(() => new Response('[]', { status: 200 }));
+    const haClient = new HomeAssistantClient(baseConfig, fetchImpl);
+    const roomManagerStub = { setProviderBinder: () => {} } as unknown as RoomManager;
+
+    const orchestrator = new Orchestrator(
+      baseConfig,
+      roomManagerStub,
+      haClient,
+      registrySource,
+      () => 0, // sala vazia: sempre 0 entregues.
+    );
+
+    const primeiroDisparo = orchestrator.ringOnce(ROOM_ID);
+    const segundoDisparo = orchestrator.ringOnce(ROOM_ID);
+
+    assert.equal(primeiroDisparo, 0);
+    assert.equal(
+      segundoDisparo,
+      0,
+      'um segundo ringOnce logo depois do primeiro não deveria ser bloqueado por speakingByRoom preso',
+    );
+  });
+});

@@ -4,6 +4,7 @@ import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { createControlDeviceHandler } from './tools/controlDevice.js';
 import { INVALID_ARGS_RESULT, type ToolContext, type ToolHandler } from './tools/types.js';
+import { CHIME_PCM16 } from '../reminders/chime.js';
 import { getLogger } from '../logging/logger.js';
 import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
@@ -176,67 +177,6 @@ export class Orchestrator {
     const tracker = this.getTtfabTracker(roomId);
     const providerName = getActiveProviderName(this.config);
 
-    const clearSilenceTimer = (): void => {
-      const timer = this.silenceTimerByRoom.get(roomId);
-      if (timer) {
-        clearTimeout(timer);
-        this.silenceTimerByRoom.delete(roomId);
-      }
-    };
-
-    const clearSpeakingWatchdog = (): void => {
-      const timer = this.speakingWatchdogByRoom.get(roomId);
-      if (timer) {
-        clearTimeout(timer);
-        this.speakingWatchdogByRoom.delete(roomId);
-      }
-    };
-
-    // Rearmado a cada chunk de áudio de resposta (ver onAudioResponse): só
-    // dispara quando o áudio *para* de chegar, então uma resposta longa nunca
-    // aciona o watchdog sozinha.
-    const armSpeakingWatchdog = (): void => {
-      clearSpeakingWatchdog();
-      this.speakingWatchdogByRoom.set(
-        roomId,
-        setTimeout(() => {
-          this.speakingWatchdogByRoom.delete(roomId);
-          getLogger().warn(
-            { event: 'speaking_watchdog', room_id: roomId, timeout_ms: SPEAKING_WATCHDOG_MS },
-            `Sem áudio de resposta há ${SPEAKING_WATCHDOG_MS}ms: forçando speaking_end`,
-          );
-          endSpeaking();
-        }, SPEAKING_WATCHDOG_MS),
-      );
-    };
-
-    // Único ponto que efetivamente manda speaking_start: tanto o debounce de
-    // silêncio quanto o primeiro áudio de resposta passam por aqui, com a
-    // flag `speakingByRoom` evitando o envio duplicado — o mais rápido dos
-    // dois vence.
-    const startSpeaking = (): void => {
-      if (this.speakingByRoom.get(roomId)) return;
-      this.speakingByRoom.set(roomId, true);
-      // Endereça o cômodo, não uma conexão: o bind roda uma vez só por
-      // provider, e o conjunto de satélites da sala muda embaixo dele
-      // (reconexão, segundo satélite entrando). Quem resolve é o `WsServer`.
-      this.sendToRoom(roomId, serializeControlMessage(createEnvelope('speaking_start', roomId)));
-      armSpeakingWatchdog();
-    };
-
-    // Espelho de startSpeaking. Único ponto que efetivamente manda
-    // speaking_end — turno concluído, erro do provider, sessão encerrada ou
-    // watchdog de silêncio, todos passam por aqui, com a mesma flag evitando
-    // o envio duplicado. Enfileirado, não enviado direto: se ainda houver
-    // frame de áudio deste turno pendente de pacing, speaking_end precisa
-    // sair DEPOIS dele, nunca antes (ver comentário de audioQueueByRoom).
-    const endSpeaking = (): void => {
-      clearSpeakingWatchdog();
-      if (!this.speakingByRoom.get(roomId)) return;
-      this.speakingByRoom.set(roomId, false);
-      this.enqueueSend(roomId, { kind: 'speaking_end' });
-    };
-
     provider.onUserSpeech(() => {
       tracker.markUserSpeech();
 
@@ -244,12 +184,12 @@ export class Orchestrator {
       // silêncio sustentado. No Gemini isso dispara a cada pedaço de
       // transcrição (ainda falando); no OpenAI é um único evento discreto
       // (fala já parou), então o timer só soma um atraso fixo pequeno.
-      clearSilenceTimer();
+      this.clearSilenceTimer(roomId);
       this.silenceTimerByRoom.set(
         roomId,
         setTimeout(() => {
           this.silenceTimerByRoom.delete(roomId);
-          startSpeaking();
+          this.startSpeaking(roomId);
         }, this.config.userSilenceCutoffMs),
       );
     });
@@ -272,13 +212,13 @@ export class Orchestrator {
       // Áudio já chegou: o corte por silêncio, se ainda pendente, perdeu a
       // corrida — cancela para não disparar um speaking_start supérfluo
       // (já sem efeito, guardado por speakingByRoom) depois do turno seguir.
-      clearSilenceTimer();
-      startSpeaking();
+      this.clearSilenceTimer(roomId);
+      this.startSpeaking(roomId);
       // Rearma mesmo quando startSpeaking() foi no-op (já estava falando):
       // é o áudio fluindo que prova que o turno segue vivo, não o envio do
       // speaking_start (que só acontece uma vez). Sem isto, uma resposta
       // longa acionaria o watchdog no meio dela mesma.
-      armSpeakingWatchdog();
+      this.armSpeakingWatchdog(roomId);
 
       // Fragmenta e enfileira — não envia direto: ver AUDIO_FRAME_INTERVAL_MS.
       this.enqueueAudioFrames(roomId, chunk);
@@ -289,7 +229,7 @@ export class Orchestrator {
       // debounce ainda pendente dispararia speaking_start depois do turno já
       // ter acabado, sem speaking_end correspondente no rastro — a luz
       // apagaria e não voltaria a acender sozinha.
-      clearSilenceTimer();
+      this.clearSilenceTimer(roomId);
 
       // Sem isto não dá pra distinguir, pelo log, um comando que gerou UM
       // turno (fala + tool call juntos) de dois turnos separados (ex.: fala
@@ -313,7 +253,7 @@ export class Orchestrator {
           .appendTurn(roomId, turn.userText ?? '', turn.assistantText ?? '');
       }
 
-      endSpeaking();
+      this.endSpeaking(roomId);
 
       tracker.reset();
     });
@@ -388,7 +328,7 @@ export class Orchestrator {
       // preso em RESPONDING (TX suspenso, wake word desligada) até o teto de
       // 20s do firmware — `onError` sozinho nunca fechava o par
       // speaking_start/speaking_end.
-      endSpeaking();
+      this.endSpeaking(roomId);
     });
 
     // Sessão morreu de ociosidade (ver GeminiLiveAdapter.handleGoAway) ou o
@@ -399,7 +339,7 @@ export class Orchestrator {
     provider.onSessionEnded(() => {
       // Idem onError: se a sessão morreu no meio de uma resposta, o par
       // speaking_start/speaking_end nunca fecharia sozinho.
-      endSpeaking();
+      this.endSpeaking(roomId);
       // Estado por sala do Orchestrator (timers, watchdog, tracker de TTFAB):
       // a próxima fala recria tudo do zero via bindProviderCallbacksOnce no
       // provider novo. O endereçamento não está aqui — quem sabe quais
@@ -419,6 +359,125 @@ export class Orchestrator {
    * sessão daquela sala nunca mandar `speaking_start` (`startSpeaking()`
    * checa a flag e retorna cedo) — um bug de estado atravessando sessões.
    *
+  /**
+   * Métodos de fala por cômodo: `startSpeaking`/`endSpeaking` e o timer de
+   * silêncio/watchdog que os cercam.
+   *
+   * Extraídos do closure de `bindProviderCallbacks` de propósito: os mapas
+   * que guardam o estado (`speakingByRoom`, `speakingWatchdogByRoom`,
+   * `silenceTimerByRoom`) já são de classe, chaveados por `roomId` — a única
+   * coisa que os prendia ao closure de um provider era a conveniência de não
+   * repassar `roomId`. Presos lá, só quem tem uma sessão de provider viva
+   * conseguiria mandar `speaking_start`/`speaking_end` — e o chime (`ringOnce`,
+   * abaixo) não tem provider nenhum: é PCM puro pela fila existente.
+   */
+
+  private clearSilenceTimer(roomId: string): void {
+    const timer = this.silenceTimerByRoom.get(roomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.silenceTimerByRoom.delete(roomId);
+    }
+  }
+
+  private clearSpeakingWatchdog(roomId: string): void {
+    const timer = this.speakingWatchdogByRoom.get(roomId);
+    if (timer) {
+      clearTimeout(timer);
+      this.speakingWatchdogByRoom.delete(roomId);
+    }
+  }
+
+  /**
+   * Rearmado a cada chunk de áudio de resposta (ver `onAudioResponse`): só
+   * dispara quando o áudio *para* de chegar, então uma resposta longa nunca
+   * aciona o watchdog sozinha. Um `ringOnce` também arma e imediatamente
+   * limpa: como o chime tem duração conhecida e `endSpeaking` é chamado logo
+   * depois de enfileirar, o watchdog nunca chega a disparar para ele.
+   */
+  private armSpeakingWatchdog(roomId: string): void {
+    this.clearSpeakingWatchdog(roomId);
+    this.speakingWatchdogByRoom.set(
+      roomId,
+      setTimeout(() => {
+        this.speakingWatchdogByRoom.delete(roomId);
+        getLogger().warn(
+          { event: 'speaking_watchdog', room_id: roomId, timeout_ms: SPEAKING_WATCHDOG_MS },
+          `Sem áudio de resposta há ${SPEAKING_WATCHDOG_MS}ms: forçando speaking_end`,
+        );
+        this.endSpeaking(roomId);
+      }, SPEAKING_WATCHDOG_MS),
+    );
+  }
+
+  /**
+   * Único ponto que efetivamente manda `speaking_start`: o debounce de
+   * silêncio, o primeiro áudio de resposta do provider e `ringOnce` passam
+   * todos por aqui, com a flag `speakingByRoom` evitando o envio duplicado —
+   * o mais rápido dos três vence.
+   *
+   * Devolve quantos satélites do cômodo receberam de fato (mesmo contrato de
+   * `SendToRoom`) — 0 tanto para "sala vazia" quanto para "já estava
+   * falando" (no-op). Só `ringOnce` usa o valor; os outros chamadores
+   * ignoram.
+   */
+  private startSpeaking(roomId: string): number {
+    if (this.speakingByRoom.get(roomId)) return 0;
+    this.speakingByRoom.set(roomId, true);
+    // Endereça o cômodo, não uma conexão: o conjunto de satélites da sala
+    // muda embaixo (reconexão, segundo satélite entrando). Quem resolve é o
+    // `WsServer`.
+    const delivered = this.sendToRoom(
+      roomId,
+      serializeControlMessage(createEnvelope('speaking_start', roomId)),
+    );
+    this.armSpeakingWatchdog(roomId);
+    return delivered;
+  }
+
+  /**
+   * Espelho de `startSpeaking`. Único ponto que efetivamente manda
+   * `speaking_end` — turno concluído, erro do provider, sessão encerrada,
+   * watchdog de silêncio ou fim de um `ringOnce`, todos passam por aqui, com a
+   * mesma flag evitando o envio duplicado. Enfileirado, não enviado direto: se
+   * ainda houver frame de áudio pendente de pacing, `speaking_end` precisa
+   * sair DEPOIS dele, nunca antes (ver comentário de `audioQueueByRoom`).
+   */
+  private endSpeaking(roomId: string): void {
+    this.clearSpeakingWatchdog(roomId);
+    if (!this.speakingByRoom.get(roomId)) return;
+    this.speakingByRoom.set(roomId, false);
+    this.enqueueSend(roomId, { kind: 'speaking_end' });
+  }
+
+  /**
+   * Toca o chime uma vez no cômodo: `speaking_start` → o PCM fragmentado pela
+   * mesma fila paceada do `audio_response` → `speaking_end`. Nenhum provider
+   * envolvido — é a rota que o marco 6 (`set_reminder`) e o marco 7
+   * (`AlarmRinger`) vão chamar quando um lembrete vence, sessão de IA viva ou
+   * não.
+   *
+   * Devolve quantos satélites do cômodo receberam o `speaking_start`: 0 é o
+   * sinal de "sala muda" que o fallback de sala offline (marco 6) vai
+   * precisar.
+   *
+   * Um turno de verdade já em progresso na sala (`speakingByRoom` true — o
+   * provider está no meio de uma resposta) também devolve 0, sem enfileirar
+   * nada: empurrar o chime por cima truncaria a fala em andamento, que é pior
+   * que não tocar. A guarda completa contra interromper a fala do *usuário*
+   * (`lastAudioAtByRoom`, decisão 9 do plano) é do marco 7 — esta aqui é só o
+   * caso mais óbvio, checável com o estado que já existe.
+   */
+  ringOnce(roomId: string): number {
+    if (this.speakingByRoom.get(roomId)) return 0;
+
+    const delivered = this.startSpeaking(roomId);
+    this.enqueueAudioFrames(roomId, CHIME_PCM16);
+    this.endSpeaking(roomId);
+    return delivered;
+  }
+
+  /**
    * Chamado em dois pontos: quando o último cliente WS da sala desconecta
    * (`WsServer.handleDisconnect`, via `RoomManager.unregisterClient`) e
    * quando o provider encerra a sessão sozinho (`onSessionEnded` acima) — os
