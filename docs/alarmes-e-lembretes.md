@@ -1,6 +1,6 @@
 # Alarmes e lembretes — plano de implementação
 
-**Status:** Em desenvolvimento — marco 0 (relógio único) entregue
+**Status:** Em desenvolvimento — marcos 0 (relógio único) e 1 (endereçamento por sala) entregues
 **Data:** 2026-08-19
 
 ## Objetivo

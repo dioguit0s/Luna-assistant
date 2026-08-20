@@ -186,7 +186,10 @@ function toolCall(args: Record<string, unknown>, name = 'control_device'): ToolC
 interface Harness {
   orchestrator: Orchestrator;
   provider: FakeAudioProvider;
+  /** Payloads que o Orchestrator endereçou a um cômodo, em ordem de envio. */
   sent: Array<Buffer | string>;
+  /** Cômodo de destino de cada item de `sent`, no mesmo índice. */
+  sentRooms: string[];
   haCalls: FetchCall[];
   evictRoomCalls: string[];
 }
@@ -198,12 +201,7 @@ interface Harness {
 const ringBuffers: ConversationRingBuffer[] = [];
 
 async function feedAudio(h: Harness): Promise<void> {
-  await h.orchestrator.handleAudioChunk(
-    ROOM_ID,
-    DEVICE_ID,
-    Buffer.alloc(640),
-    (data) => h.sent.push(data),
-  );
+  await h.orchestrator.handleAudioChunk(ROOM_ID, DEVICE_ID, Buffer.alloc(640));
 }
 
 function buildHarness(
@@ -225,10 +223,26 @@ function buildHarness(
   const { fetchImpl, calls } = mockFetch(respond);
   const haClient = new HomeAssistantClient(baseConfig, fetchImpl);
 
+  // O fan-out real vive no WsServer (ver WsServer.fanout.test.ts); aqui o que
+  // importa é que o Orchestrator só endereça cômodo, nunca conexão.
+  const sent: Array<Buffer | string> = [];
+  const sentRooms: string[] = [];
+
   return {
-    orchestrator: new Orchestrator(baseConfig, roomManager, haClient, registrySource),
+    orchestrator: new Orchestrator(
+      baseConfig,
+      roomManager,
+      haClient,
+      registrySource,
+      (roomId, payload) => {
+        sentRooms.push(roomId);
+        sent.push(payload);
+        return 1;
+      },
+    ),
     provider,
-    sent: [],
+    sent,
+    sentRooms,
     haCalls: calls,
     evictRoomCalls,
   };
@@ -307,47 +321,25 @@ describe('Orchestrator: despacho de comandos de automação', () => {
     assert.equal(results[0]!.entity_id, 'switch.luz_bancada');
   });
 
-  it('reconexão do satélite: respostas seguem a conexão atual, não a original', async () => {
-    // O provider (RoomManager) sobrevive à reconexão — é o próprio cenário do
-    // bug: uma queda abrupta (energia, cabo USB) não manda close frame, o
-    // servidor não percebe, e o cômodo segue com o mesmo provider quando o
-    // satélite volta com uma conexão (e um sendToClient) novos.
-    const sentFirstConnection: Array<Buffer | string> = [];
-    const sentSecondConnection: Array<Buffer | string> = [];
+  it('endereça tudo pelo cômodo, sem guardar conexão nenhuma', async () => {
+    // Era aqui que morava o `sendToClientByRoom`: uma closure por cômodo,
+    // reposta a cada chunk de áudio. Ela sobrevivia à reconexão do satélite,
+    // mas guardava só a ÚLTIMA conexão que falou — com dois satélites no mesmo
+    // cômodo, um deles ficava sem `speaking_start` e sem áudio. Quem sabe
+    // quais satélites existem na sala agora é o WsServer; o Orchestrator só
+    // diz o cômodo.
+    await feedAudio(harness);
 
-    await harness.orchestrator.handleAudioChunk(
-      ROOM_ID,
-      DEVICE_ID,
-      Buffer.alloc(640),
-      (data) => sentFirstConnection.push(data),
-    );
-    await harness.orchestrator.handleAudioChunk(
-      ROOM_ID,
-      DEVICE_ID,
-      Buffer.alloc(640),
-      (data) => sentSecondConnection.push(data),
-    );
-
+    harness.provider.emitAudioResponse(Buffer.alloc(64));
     await harness.provider.emitToolCall(
       toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }),
     );
 
-    const resultsOnDeadConnection = controlMessages(sentFirstConnection).filter(
-      (msg) => msg.type === 'command_result',
-    );
-    assert.equal(
-      resultsOnDeadConnection.length,
-      0,
-      'a conexão original (morta) não deveria receber nada',
-    );
-
-    const resultsOnCurrentConnection = controlMessages(sentSecondConnection).filter(
-      (msg) => msg.type === 'command_result',
-    );
-    assert.equal(
-      resultsOnCurrentConnection.length,
-      1,
-      'command_result deveria sair pela conexão atual',
+    assert.ok(harness.sentRooms.length > 0, 'nada foi endereçado');
+    assert.deepEqual(
+      [...new Set(harness.sentRooms)],
+      [ROOM_ID],
+      'todo envio deveria ser endereçado ao cômodo da sessão',
     );
   });
 

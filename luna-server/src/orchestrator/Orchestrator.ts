@@ -1,4 +1,3 @@
-import type { WebSocket } from 'ws';
 import type { RoomManager } from '../rooms/RoomManager.js';
 import type { CompletedTurn } from '../providers/types.js';
 import { isControlDeviceCall } from '../providers/types.js';
@@ -46,6 +45,12 @@ export const AUDIO_FRAME_INTERVAL_MS = Math.round(
   ((MAX_AUDIO_FRAME_BYTES / 2 / AUDIO_RESPONSE_SAMPLE_RATE_HZ) * 1000),
 );
 
+/**
+ * Fan-out de um payload para todos os satélites de um cômodo. Devolve quantos
+ * receberam de fato — 0 significa cômodo mudo (ninguém conectado).
+ */
+export type SendToRoom = (roomId: string, payload: Buffer | string) => number;
+
 /** Item da fila por sala: um frame de áudio paceado, ou o speaking_end do turno. */
 type AudioQueueItem =
   | { kind: 'audio'; header: Buffer; piece: Buffer }
@@ -73,33 +78,29 @@ export class Orchestrator {
   // seq monotônico por sala: Date.now() repetia entre frames emitidos no
   // mesmo milissegundo, inutilizando o campo para ordenação/detecção de perda.
   private readonly audioSeqByRoom = new Map<string, number>();
-  // Provider é cacheado por cômodo (RoomManager) e sobrevive à reconexão do
-  // satélite; a conexão WS, não. Se o dispositivo cair sem handshake de close
-  // (queda de energia, cabo USB arrancado — não manda close frame) e o
-  // servidor não perceber, `bindProviderCallbacksOnce` roda só uma vez por
-  // provider e prenderia a resposta para sempre no `sendToClient` da conexão
-  // morta. Indireção por cômodo: cada chunk de áudio atualiza a entrada, e as
-  // respostas saem sempre pela conexão mais recente, não pela que existia
-  // quando o provider foi criado.
-  private readonly sendToClientByRoom = new Map<string, (data: Buffer | string) => void>();
 
   constructor(
     private readonly config: AppConfig,
     private readonly roomManager: RoomManager,
     private readonly haClient: HomeAssistantClient,
     private readonly deviceRegistry: DeviceRegistrySource,
+    /**
+     * Endereçamento por cômodo, resolvido pelo `WsServer` no momento do envio.
+     * O Orchestrator não guarda conexão nenhuma: o provider é cacheado por
+     * cômodo e sobrevive à reconexão do satélite, a conexão WS não. Guardar
+     * um `sendToClient` aqui prendia a resposta na conexão que existia quando
+     * o provider foi criado — e, com um `sendToClient` por cômodo, no ÚLTIMO
+     * satélite que falou: os outros da mesma sala ficavam sem `speaking_start`
+     * e sem áudio, e um satélite ocioso (que só acorda por wake word e nunca
+     * transmitiu nada) era inalcançável.
+     */
+    private readonly sendToRoom: SendToRoom,
   ) {}
 
-  async handleAudioChunk(
-    roomId: string,
-    deviceId: string,
-    pcm: Buffer,
-    sendToClient: (data: Buffer | string) => void,
-  ): Promise<void> {
+  async handleAudioChunk(roomId: string, deviceId: string, pcm: Buffer): Promise<void> {
     const tracker = this.getTtfabTracker(roomId);
     tracker.markClientAudioReceived();
 
-    this.sendToClientByRoom.set(roomId, sendToClient);
     this.roomManager.getRingBuffer().touch(roomId);
 
     const provider = await this.roomManager.getOrCreateProvider(roomId);
@@ -132,13 +133,6 @@ export class Orchestrator {
 
     const tracker = this.getTtfabTracker(roomId);
     const providerName = getActiveProviderName(this.config);
-
-    // Nunca captura o `sendToClient` do momento do bind (só acontece uma vez,
-    // na primeira mensagem do cômodo): resolve pela entrada mais recente do
-    // mapa a cada envio, para sobreviver a reconexões do satélite.
-    const sendToClient = (data: Buffer | string): void => {
-      this.sendToClientByRoom.get(roomId)?.(data);
-    };
 
     const clearSilenceTimer = (): void => {
       const timer = this.silenceTimerByRoom.get(roomId);
@@ -181,7 +175,10 @@ export class Orchestrator {
     const startSpeaking = (): void => {
       if (this.speakingByRoom.get(roomId)) return;
       this.speakingByRoom.set(roomId, true);
-      sendToClient(serializeControlMessage(createEnvelope('speaking_start', roomId)));
+      // Endereça o cômodo, não uma conexão: o bind roda uma vez só por
+      // provider, e o conjunto de satélites da sala muda embaixo dele
+      // (reconexão, segundo satélite entrando). Quem resolve é o `WsServer`.
+      this.sendToRoom(roomId, serializeControlMessage(createEnvelope('speaking_start', roomId)));
       armSpeakingWatchdog();
     };
 
@@ -380,7 +377,8 @@ export class Orchestrator {
 
           // `success` reflete o resultado real: o satélite não pode tratar um
           // HA fora do ar como comando executado.
-          sendToClient(
+          this.sendToRoom(
+            roomId,
             serializeControlMessage(
               createEnvelope('command_result', roomId, {
                 success: result.success,
@@ -395,7 +393,7 @@ export class Orchestrator {
         })
         .catch((err: unknown) => {
           // `callService` em si nunca lança (contrato do HomeAssistantClient),
-          // mas este `.then` chama `sendToClient` (socket morto) e
+          // mas este `.then` chama `sendToRoom` (socket morto) e
           // `provider.sendToolResult` (ex.: `session.sendToolResponse` do
           // Gemini numa sessão já fechada) — os dois podem lançar. Sem este
           // `.catch`, a rejeição derrubava o processo inteiro (era o mesmo
@@ -449,10 +447,9 @@ export class Orchestrator {
       endSpeaking();
       // Estado por sala do Orchestrator (timers, watchdog, tracker de TTFAB):
       // a próxima fala recria tudo do zero via bindProviderCallbacksOnce no
-      // provider novo. sendToClientByRoom especificamente é reposto no
-      // primeiro handleAudioChunk seguinte, então apagar aqui não perde nada
-      // — só evita que fique presa em `true` (bug de estado atravessando
-      // sessões: ver releaseRoom).
+      // provider novo. O endereçamento não está aqui — quem sabe quais
+      // satélites existem no cômodo é o `WsServer`, e ele não perde nada
+      // quando a sessão do provider morre.
       this.releaseRoom(roomId);
       this.roomManager.evictRoom(roomId);
     });
@@ -461,9 +458,9 @@ export class Orchestrator {
   /**
    * Libera o estado por sala que o Orchestrator mantém fora do RoomManager
    * (TTFAB, flag de fala, debounce de silêncio, watchdog de speaking_end,
-   * `sendToClient` da conexão atual). Sem isto: um timer de silêncio pendente
-   * dispara depois do satélite ter ido embora, chamando `sendToClient` numa
-   * conexão morta; e, pior, `speakingByRoom` preso em `true` faz a *próxima*
+   * fila de envio). Sem isto: um timer de silêncio pendente
+   * dispara depois do satélite ter ido embora, mandando `speaking_start`
+   * para um cômodo vazio; e, pior, `speakingByRoom` preso em `true` faz a *próxima*
    * sessão daquela sala nunca mandar `speaking_start` (`startSpeaking()`
    * checa a flag e retorna cedo) — um bug de estado atravessando sessões.
    *
@@ -475,7 +472,6 @@ export class Orchestrator {
   releaseRoom(roomId: string): void {
     this.ttfabByRoom.delete(roomId);
     this.speakingByRoom.delete(roomId);
-    this.sendToClientByRoom.delete(roomId);
 
     const silenceTimer = this.silenceTimerByRoom.get(roomId);
     if (silenceTimer) {
@@ -568,9 +564,9 @@ export class Orchestrator {
    * de áudio são espaçados por AUDIO_FRAME_INTERVAL_MS — o ritmo em que o
    * alto-falante do satélite realmente consome o áudio; speaking_end não tem
    * conteúdo a pacear e sai assim que chega a vez dele na fila.
-   * `sendToClientByRoom` é resolvido aqui dentro (não capturado), pela mesma
-   * razão do `sendToClient` em `bindProviderCallbacksOnce`: sobreviver a uma
-   * reconexão do satélite no meio de uma resposta longa.
+   * O destino é resolvido aqui dentro, a cada item — nunca capturado no
+   * enfileiramento: entre o primeiro frame e o último de uma resposta longa o
+   * satélite pode reconectar, ou um segundo satélite pode entrar no cômodo.
    */
   private drainAudioQueue(roomId: string): void {
     const queue = this.audioQueueByRoom.get(roomId);
@@ -581,11 +577,10 @@ export class Orchestrator {
     }
 
     const item = queue.shift()!;
-    const sendToClient = this.sendToClientByRoom.get(roomId);
     if (item.kind === 'audio') {
-      sendToClient?.(Buffer.concat([item.header, item.piece]));
+      this.sendToRoom(roomId, Buffer.concat([item.header, item.piece]));
     } else {
-      sendToClient?.(serializeControlMessage(createEnvelope('speaking_end', roomId)));
+      this.sendToRoom(roomId, serializeControlMessage(createEnvelope('speaking_end', roomId)));
     }
 
     if (queue.length === 0) {
@@ -620,11 +615,4 @@ export class Orchestrator {
     }
     return tracker;
   }
-}
-
-export interface ClientConnection {
-  ws: WebSocket;
-  roomId: string;
-  deviceId: string;
-  authenticated: boolean;
 }

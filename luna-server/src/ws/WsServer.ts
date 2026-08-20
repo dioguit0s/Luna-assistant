@@ -51,6 +51,12 @@ export class WsServer {
   private httpServer: HttpServer | null = null;
   private staleCheckTimer: ReturnType<typeof setInterval> | null = null;
   private readonly clients = new Map<WebSocket, ClientState>();
+  // Índice de cômodo → satélites conectados nele. Os membros são os próprios
+  // sockets, não `device_id`: dois satélites no mesmo cômodo são duas conexões
+  // distintas, e chavear por `device_id` colapsaria os dois numa entrada só —
+  // exatamente o bug que este índice existe para corrigir. Sempre espelho de
+  // `clients`, mantido nos mesmos três pontos (auth, re-auth, disconnect).
+  private readonly clientsByRoom = new Map<string, Set<WebSocket>>();
   private readonly pendingAuthTimers = new Map<WebSocket, NodeJS.Timeout>();
   private readonly orchestrator: Orchestrator;
 
@@ -62,7 +68,74 @@ export class WsServer {
   ) {
     // O client do HA e o registro são construídos em `index.ts`: o registro tem
     // ciclo de vida próprio (start/stop) e ambos compartilham o mesmo client.
-    this.orchestrator = new Orchestrator(config, roomManager, haClient, deviceRegistry);
+    this.orchestrator = new Orchestrator(
+      config,
+      roomManager,
+      haClient,
+      deviceRegistry,
+      (roomId, payload) => this.sendToRoom(roomId, payload),
+    );
+  }
+
+  /**
+   * Fan-out de um payload para todos os satélites autenticados de um cômodo.
+   * Único caminho de saída endereçado por sala — o Orchestrator não guarda
+   * mais conexão nenhuma.
+   *
+   * Devolve quantos satélites de fato receberam: um cômodo sem ninguém
+   * conectado devolve 0, que é o sinal de "sala muda" de que o disparo de
+   * alarme vai precisar.
+   *
+   * Uma conexão zumbi (queda de energia, cabo arrancado — não manda close
+   * frame) continua no índice e continua contando aqui até o
+   * `reapStaleConnections` derrubá-la, no teto de STALE_CONNECTION_TIMEOUT_MS.
+   * Isso é de propósito: quem decide o que é conexão viva é o reaper, num
+   * lugar só, e o satélite que está de fato ouvindo recebe tudo do mesmo jeito.
+   */
+  sendToRoom(roomId: string, payload: Buffer | string): number {
+    const sockets = this.clientsByRoom.get(roomId);
+    if (!sockets) return 0;
+
+    let delivered = 0;
+    for (const ws of sockets) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      try {
+        ws.send(payload);
+        delivered += 1;
+      } catch (err) {
+        // Um socket morto não pode calar os outros satélites do cômodo: o
+        // 'close' dele chega depois e o tira do índice sozinho.
+        getLogger().warn(
+          {
+            err: err instanceof Error ? err.message : String(err),
+            room_id: roomId,
+            event: 'ws_send_failed',
+          },
+          'Falha ao enviar para um satélite do cômodo',
+        );
+      }
+    }
+
+    return delivered;
+  }
+
+  private indexClient(ws: WebSocket, roomId: string): void {
+    let sockets = this.clientsByRoom.get(roomId);
+    if (!sockets) {
+      sockets = new Set();
+      this.clientsByRoom.set(roomId, sockets);
+    }
+    sockets.add(ws);
+  }
+
+  /** Remove a entrada e o próprio cômodo quando ele fica sem satélites. */
+  private deindexClient(ws: WebSocket, roomId: string): void {
+    const sockets = this.clientsByRoom.get(roomId);
+    if (!sockets) return;
+    sockets.delete(ws);
+    if (sockets.size === 0) {
+      this.clientsByRoom.delete(roomId);
+    }
   }
 
   start(): void {
@@ -193,6 +266,7 @@ export class WsServer {
       ws.terminate();
     }
     this.clients.clear();
+    this.clientsByRoom.clear();
     this.wss?.close();
     this.wss = null;
 
@@ -215,22 +289,12 @@ export class WsServer {
     if (state?.authenticated && isBinary) {
       const parsed = parseAudioMessage(buf);
       if (parsed && parsed.pcm.length > 0) {
-        await this.orchestrator.handleAudioChunk(
-          state.roomId,
-          state.deviceId,
-          parsed.pcm,
-          (payload) => ws.send(payload),
-        );
+        await this.orchestrator.handleAudioChunk(state.roomId, state.deviceId, parsed.pcm);
         return;
       }
 
       if (buf[0] !== 0x7b) {
-        await this.orchestrator.handleAudioChunk(
-          state.roomId,
-          state.deviceId,
-          buf,
-          (payload) => ws.send(payload),
-        );
+        await this.orchestrator.handleAudioChunk(state.roomId, state.deviceId, buf);
         return;
       }
     }
@@ -312,6 +376,7 @@ export class WsServer {
     // disconnect deste socket derrubaria o refcount só para 1).
     const previous = this.clients.get(ws);
     if (previous) {
+      this.deindexClient(ws, previous.roomId);
       this.roomManager
         .unregisterClient(previous.roomId)
         .then((roomDestroyed) => {
@@ -335,6 +400,7 @@ export class WsServer {
       authenticated: true,
       lastSeenAt: Date.now(),
     });
+    this.indexClient(ws, room_id);
     this.roomManager.registerClient(room_id);
 
     ws.send(serializeControlMessage(createEnvelope('auth_ok', room_id, { device_id })));
@@ -348,11 +414,15 @@ export class WsServer {
   private async handleDisconnect(ws: WebSocket): Promise<void> {
     const state = this.clients.get(ws);
     if (state) {
+      // Antes de qualquer await: `releaseRoom` e o drain de áudio pendente não
+      // podem enxergar um socket que já foi embora.
+      this.deindexClient(ws, state.roomId);
       const roomDestroyed = await this.roomManager.unregisterClient(state.roomId);
       // Só libera o estado por sala do Orchestrator (speakingByRoom, timers,
-      // sendToClient) quando este era de fato o último cliente da sala — com
+      // fila de áudio) quando este era de fato o último cliente da sala — com
       // outro satélite ainda conectado na mesma sala, apagar essa memória
-      // agora derrubaria o `speaking_start`/`speaking_end` que ele depende.
+      // agora derrubaria o `speaking_start`/`speaking_end` de que ele depende
+      // e cortaria a resposta em curso no meio.
       if (roomDestroyed) {
         this.orchestrator.releaseRoom(state.roomId);
       }
