@@ -39,6 +39,15 @@ export interface ProviderSessionConfig {
   systemPrompt: string;
   history: ConversationTurn[];
   tools: ToolDefinition[];
+  /**
+   * Reconstrói o `systemPrompt` com a hora atual. `systemPrompt` já nasce
+   * congelado no instante do `connect()`; providers que renovam a sessão sem
+   * recriá-la do zero (ver `GeminiLiveAdapter.renewSession`) devem chamar isto
+   * em vez de reusar o texto velho, senão "que horas são" fica preso na hora
+   * em que a sala foi aberta pela primeira vez — potencialmente horas atrás
+   * numa conversa longa.
+   */
+  refreshSystemPrompt: () => string;
 }
 
 export const CONTROL_DEVICE_TOOL: ToolDefinition = {

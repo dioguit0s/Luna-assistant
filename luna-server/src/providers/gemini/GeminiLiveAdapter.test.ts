@@ -43,6 +43,7 @@ const SESSION_CONFIG: ProviderSessionConfig = {
   systemPrompt: 'x',
   history: [],
   tools: [],
+  refreshSystemPrompt: () => 'x',
 };
 
 interface LiveCallbacks {
@@ -61,6 +62,7 @@ interface FakeSession {
 interface CapturedConnectCall {
   session: FakeSession;
   callbacks: LiveCallbacks;
+  systemInstruction: unknown;
 }
 
 /**
@@ -74,7 +76,10 @@ function buildFakeClient(): { client: GoogleGenAI; calls: CapturedConnectCall[] 
 
   const client = {
     live: {
-      connect: (params: { callbacks: LiveCallbacks }): Promise<FakeSession> => {
+      connect: (params: {
+        callbacks: LiveCallbacks;
+        config?: { systemInstruction?: unknown };
+      }): Promise<FakeSession> => {
         const session: FakeSession = {
           closed: false,
           close: () => {
@@ -83,7 +88,11 @@ function buildFakeClient(): { client: GoogleGenAI; calls: CapturedConnectCall[] 
           sendRealtimeInput: () => {},
           sendToolResponse: () => {},
         };
-        calls.push({ session, callbacks: params.callbacks });
+        calls.push({
+          session,
+          callbacks: params.callbacks,
+          systemInstruction: params.config?.systemInstruction,
+        });
         return Promise.resolve(session);
       },
     },
@@ -171,5 +180,42 @@ describe('GeminiLiveAdapter: guarda de sessionGeneration', () => {
     // dispara de novo.
     calls[0]!.callbacks.onclose?.();
     assert.equal(sessionEndedCount, 1);
+  });
+});
+
+describe('GeminiLiveAdapter: renovação de sessão pega hora atual', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  it('renewSession chama refreshSystemPrompt em vez de reusar o texto do connect original', async () => {
+    const { client, calls } = buildFakeClient();
+    let promptCalls = 0;
+    const sessionConfig: ProviderSessionConfig = {
+      ...SESSION_CONFIG,
+      systemPrompt: 'Agora são 07:00',
+      refreshSystemPrompt: () => {
+        promptCalls += 1;
+        return `Agora são 07:0${promptCalls}`;
+      },
+    };
+
+    const adapter = new GeminiLiveAdapter(baseConfig, () => client);
+    await adapter.connect(sessionConfig);
+
+    assert.equal(calls[0]!.systemInstruction, 'Agora são 07:00', 'connect inicial usa o prompt já pronto');
+    assert.equal(promptCalls, 0, 'connect inicial não deveria chamar refreshSystemPrompt');
+
+    adapter.sendAudio(Buffer.alloc(4));
+    calls[0]!.callbacks.onmessage({ goAway: { timeLeft: '5s' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(calls.length, 2, 'renewSession deveria ter aberto uma segunda sessão');
+    assert.equal(promptCalls, 1, 'renewSession deveria ter pedido um prompt novo');
+    assert.equal(
+      calls[1]!.systemInstruction,
+      'Agora são 07:01',
+      'a sessão renovada deveria usar o prompt refeito, não o congelado do connect original',
+    );
   });
 });

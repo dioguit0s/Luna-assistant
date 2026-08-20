@@ -210,7 +210,17 @@ export class GeminiLiveAdapter implements IAudioProvider {
 
     const oldSession = this.session;
     try {
-      const newSession = await this.openLiveSession(this.sessionConfig);
+      // `this.sessionConfig.systemPrompt` está congelado no `connect()`
+      // original — reusá-lo aqui prende "Agora são HH:MM" na hora em que a
+      // sala foi criada, potencialmente horas atrás numa conversa ativa há
+      // muito tempo (é exatamente o caso que justifica renovar em vez de
+      // deixar expirar). Refaz o prompt com a hora de agora antes de reabrir.
+      const refreshedConfig: ProviderSessionConfig = {
+        ...this.sessionConfig,
+        systemPrompt: this.sessionConfig.refreshSystemPrompt(),
+      };
+      this.sessionConfig = refreshedConfig;
+      const newSession = await this.openLiveSession(refreshedConfig);
       this.session = newSession;
       oldSession?.close();
       getLogger().info(

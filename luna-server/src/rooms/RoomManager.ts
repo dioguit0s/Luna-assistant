@@ -71,6 +71,10 @@ export class RoomManager {
       systemPrompt,
       history,
       tools: [CONTROL_DEVICE_TOOL, SET_REMINDER_TOOL],
+      // Chamado por providers que renovam a sessão sem passar por
+      // `createProviderSession` de novo (ver `GeminiLiveAdapter.renewSession`):
+      // precisa da hora de agora, não da hora em que a sala foi criada.
+      refreshSystemPrompt: () => buildLunaSystemPrompt(roomId, this.ringBuffer.getHistory(roomId)),
     });
 
     await this.awaitConnectWithTimeout(roomId, provider, connectPromise);
