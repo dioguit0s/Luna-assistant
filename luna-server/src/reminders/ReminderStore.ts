@@ -364,8 +364,13 @@ export class ReminderStore {
     this.stmt('UPDATE reminders SET status = ?, updated_at = ? WHERE id = ?').run(status, now, id);
   }
 
-  /** Soneca é `UPDATE next_due_utc`: sem tabela à parte, uma linha segue um lembrete. */
-  snooze(id: number, nextDueUtc: number, now = Date.now()): void {
+  /**
+   * Volta o lembrete para `armed` num novo vencimento. É a operação da soneca
+   * ("mais cinco minutos") e também a do recorrente que avança sem tocar — as
+   * duas são `UPDATE next_due_utc`, sem tabela à parte: o `list` depende do
+   * invariante "uma linha = um lembrete visível ao usuário".
+   */
+  rearm(id: number, nextDueUtc: number, now = Date.now()): void {
     this.stmt(
       `UPDATE reminders SET status = 'armed', next_due_utc = ?, updated_at = ? WHERE id = ?`,
     ).run(nextDueUtc, now, id);

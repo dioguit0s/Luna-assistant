@@ -31,6 +31,9 @@ const baseConfig: AppConfig = {
   openaiDebugMessages: false,
   openaiVoice: 'marin',
   dbPath: ':memory:',
+  missedGraceMs: 15 * 60_000,
+  alarmMaxRingMs: 5 * 60_000,
+  reminderMaxConcurrent: 20,
 };
 
 const SESSION_CONFIG: ProviderSessionConfig = {

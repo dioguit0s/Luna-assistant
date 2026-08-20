@@ -174,11 +174,11 @@ describe('ReminderStore: CRUD em memória', () => {
     assert.equal(store.get(recente.id)!.status, 'ringing');
   });
 
-  it('snooze rearma no novo horário, sem linha nova', () => {
+  it('rearm volta para armed no novo horário, sem linha nova', () => {
     const criado = store.insertOnce({ roomId: ROOM, label: null, dueAtUtc: T0 }, T0);
     store.markRinging(criado.id, T0, T0);
 
-    store.snooze(criado.id, T0 + 5 * 60_000, T0 + 1);
+    store.rearm(criado.id, T0 + 5 * 60_000, T0 + 1);
 
     const adiado = store.get(criado.id)!;
     assert.equal(adiado.status, 'armed');

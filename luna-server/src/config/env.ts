@@ -67,6 +67,12 @@ export interface AppConfig {
    * some. Em produção vem do `$STATE_DIRECTORY` que o systemd cria.
    */
   dbPath: string;
+  /** Carência do catch-up: lembrete mais atrasado que isto no boot não toca. */
+  missedGraceMs: number;
+  /** Teto do ciclo de toque; usado para fechar `ringing` órfão no boot. */
+  alarmMaxRingMs: number;
+  /** Teto de disparos simultâneos: 20 alarmes não podem abrir 20 sessões de provider. */
+  reminderMaxConcurrent: number;
 }
 
 export type EndSensitivityName = 'HIGH' | 'LOW';
@@ -196,6 +202,9 @@ export function loadConfig(): AppConfig {
     openaiDebugMessages: process.env.OPENAI_DEBUG_MESSAGES === 'true',
     openaiVoice: process.env.OPENAI_VOICE ?? 'marin',
     dbPath: resolveDbPath(),
+    missedGraceMs: parseOptionalNumber('MISSED_GRACE_MS') ?? 15 * 60_000,
+    alarmMaxRingMs: parseOptionalNumber('ALARM_MAX_RING_MS') ?? 5 * 60_000,
+    reminderMaxConcurrent: parseOptionalNumber('REMINDER_MAX_CONCURRENT') ?? 20,
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {

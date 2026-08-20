@@ -9,6 +9,7 @@ import { ConversationRingBuffer } from './rooms/ConversationRingBuffer.js';
 import { RoomManager } from './rooms/RoomManager.js';
 import { WsServer } from './ws/WsServer.js';
 import { ReminderStore } from './reminders/ReminderStore.js';
+import { ReminderScheduler } from './reminders/ReminderScheduler.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -56,6 +57,24 @@ async function main(): Promise<void> {
     { event: 'reminder_store_open', db_path: config.dbPath },
     'Banco de lembretes aberto',
   );
+
+  // Zero áudio ainda: `onFire` só loga. O ciclo de toque de verdade
+  // (AlarmRinger) é o marco 7 — aqui é só o timer sabendo quando acordar.
+  const reminderScheduler = new ReminderScheduler({
+    store: reminderStore,
+    onFire: (reminder) => {
+      getLogger().info(
+        { event: 'reminder_ring_todo', reminder_id: reminder.id, room_id: reminder.roomId },
+        `Lembrete ${reminder.shortId} venceu em ${reminder.roomId} (toque ainda não implementado)`,
+      );
+    },
+    missedGraceMs: config.missedGraceMs,
+    maxRingMs: config.alarmMaxRingMs,
+    maxConcurrent: config.reminderMaxConcurrent,
+  });
+  // Rehydrate: fecha `ringing` órfão de um processo anterior e arma o timer a
+  // partir do banco — é o que faz um alarme sobreviver ao deploy.
+  reminderScheduler.start();
 
   const ringBuffer = new ConversationRingBuffer();
   const roomManager = new RoomManager(config, ringBuffer);
@@ -114,6 +133,7 @@ async function main(): Promise<void> {
 
     await wsServer.stop();
     deviceRegistry.stop();
+    reminderScheduler.stop();
     await roomManager.destroy();
     ringBuffer.destroy();
     reminderStore.close();
