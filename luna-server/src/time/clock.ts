@@ -143,3 +143,34 @@ export function formatLocalTimestamp(instant: Date = systemNow()): string {
 
   return `${date}T${time}.${ms}${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
 }
+
+/**
+ * Constrói o instante (epoch ms UTC) de uma hora de parede em São Paulo.
+ * Inverso de `localDateTime`: os lembretes resolvem "amanhã às 07:00" com
+ * isto, o mesmo relógio único que decompõe hora para o prompt e o scheduler.
+ *
+ * Sem DST, a conversão é aritmética pura sobre o offset fixo — nada de motor
+ * de fuso genérico (ver o comentário do topo do arquivo).
+ */
+export function localWallClockToUtc(parts: {
+  year: number;
+  /** 1-12. */
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second?: number;
+}): number {
+  const asIfUtc = Date.UTC(
+    parts.year,
+    parts.month - 1,
+    parts.day,
+    parts.hour,
+    parts.minute,
+    parts.second ?? 0,
+  );
+  // `Date.UTC` tratou os números como se já fossem UTC; São Paulo está atrás,
+  // então o instante real é mais tarde — subtrair o offset negativo soma.
+  return asIfUtc - LUNA_UTC_OFFSET_MINUTES * 60_000;
+}
+

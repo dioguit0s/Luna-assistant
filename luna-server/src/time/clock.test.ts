@@ -7,6 +7,7 @@ import {
   formatLocalTime,
   formatLocalTimestamp,
   localDateTime,
+  localWallClockToUtc,
   offsetMinutes,
   systemNow,
 } from './clock.js';
@@ -66,6 +67,20 @@ describe('clock', () => {
     assert.equal(
       formatLocalTimestamp(utc('2026-07-19T13:45:07.042Z')),
       '2026-07-19T10:45:07.042-03:00',
+    );
+  });
+
+  it('localWallClockToUtc é o inverso de localDateTime', () => {
+    const instant = utc('2026-07-19T10:45:07Z');
+    const parts = localDateTime(instant);
+
+    assert.equal(localWallClockToUtc(parts), instant.getTime());
+  });
+
+  it('localWallClockToUtc: 07:00 em São Paulo é 10:00 UTC', () => {
+    assert.equal(
+      localWallClockToUtc({ year: 2026, month: 8, day: 20, hour: 7, minute: 0 }),
+      Date.UTC(2026, 7, 20, 10, 0, 0),
     );
   });
 

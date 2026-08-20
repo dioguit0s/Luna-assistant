@@ -73,6 +73,15 @@ export interface AppConfig {
   alarmMaxRingMs: number;
   /** Teto de disparos simultâneos: 20 alarmes não podem abrir 20 sessões de provider. */
   reminderMaxConcurrent: number;
+  /** Teto de lembretes vivos por sala: um loop de tool calls não pode inserir milhares de linhas. */
+  reminderMaxPerRoom: number;
+  /**
+   * Cômodo de fallback quando o satélite de origem está offline no disparo.
+   * Burro de propósito — config fixa, não "onde tem gente". Vazio desliga o
+   * fallback: o alarme só toca na sala de origem, e se ninguém estiver lá,
+   * silêncio (melhor que adivinhar errado onde tem gente).
+   */
+  reminderFallbackRoomId: string;
 }
 
 export type EndSensitivityName = 'HIGH' | 'LOW';
@@ -205,6 +214,8 @@ export function loadConfig(): AppConfig {
     missedGraceMs: parseOptionalNumber('MISSED_GRACE_MS') ?? 15 * 60_000,
     alarmMaxRingMs: parseOptionalNumber('ALARM_MAX_RING_MS') ?? 5 * 60_000,
     reminderMaxConcurrent: parseOptionalNumber('REMINDER_MAX_CONCURRENT') ?? 20,
+    reminderMaxPerRoom: parseOptionalNumber('REMINDER_MAX_PER_ROOM') ?? 20,
+    reminderFallbackRoomId: process.env.REMINDER_FALLBACK_ROOM_ID ?? '',
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {

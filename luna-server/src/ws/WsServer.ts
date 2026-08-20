@@ -5,6 +5,8 @@ import type { RoomManager } from '../rooms/RoomManager.js';
 import { Orchestrator } from '../orchestrator/Orchestrator.js';
 import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
+import type { ReminderStore } from '../reminders/ReminderStore.js';
+import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import { validateAuthToken } from './auth.js';
 import { parseAudioMessage } from './messageParser.js';
 import {
@@ -65,6 +67,7 @@ export class WsServer {
     private readonly roomManager: RoomManager,
     haClient: HomeAssistantClient,
     deviceRegistry: DeviceRegistrySource,
+    reminderStore: ReminderStore,
   ) {
     // O client do HA e o registro são construídos em `index.ts`: o registro tem
     // ciclo de vida próprio (start/stop) e ambos compartilham o mesmo client.
@@ -74,7 +77,29 @@ export class WsServer {
       haClient,
       deviceRegistry,
       (roomId, payload) => this.sendToRoom(roomId, payload),
+      reminderStore,
     );
+  }
+
+  /**
+   * Passthrough para `Orchestrator.setReminderScheduler`: `index.ts` chama
+   * isto depois de `start()`, quando o `ReminderScheduler` já existe (ver o
+   * comentário lá — nenhum dos dois pode nascer primeiro). O Orchestrator
+   * continua um detalhe de implementação do `WsServer`, então nada aqui expõe
+   * a instância inteira.
+   */
+  setReminderScheduler(scheduler: ReminderScheduler): void {
+    this.orchestrator.setReminderScheduler(scheduler);
+  }
+
+  /**
+   * Passthrough para `Orchestrator.ringOnce`: toca o chime uma vez no cômodo.
+   * `index.ts` chama isto do `onFire` do `ReminderScheduler`, com o fallback
+   * de sala offline por cima (ver ali) — este método não sabe nada de
+   * fallback, só endereça o cômodo pedido.
+   */
+  ringOnce(roomId: string): number {
+    return this.orchestrator.ringOnce(roomId);
   }
 
   /**

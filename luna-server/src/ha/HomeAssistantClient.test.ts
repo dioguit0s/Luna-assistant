@@ -32,6 +32,8 @@ const baseConfig: AppConfig = {
   missedGraceMs: 15 * 60_000,
   alarmMaxRingMs: 5 * 60_000,
   reminderMaxConcurrent: 20,
+  reminderMaxPerRoom: 20,
+  reminderFallbackRoomId: '',
 };
 
 interface FetchCall {

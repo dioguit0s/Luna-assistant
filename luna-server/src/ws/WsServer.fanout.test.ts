@@ -7,6 +7,7 @@ import { ConversationRingBuffer } from '../rooms/ConversationRingBuffer.js';
 import { RoomManager } from '../rooms/RoomManager.js';
 import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
+import { ReminderStore } from '../reminders/ReminderStore.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../providers/types.js';
 import { WsServer } from './WsServer.js';
@@ -42,6 +43,8 @@ const config: AppConfig = {
   missedGraceMs: 15 * 60_000,
   alarmMaxRingMs: 5 * 60_000,
   reminderMaxConcurrent: 20,
+  reminderMaxPerRoom: 20,
+  reminderFallbackRoomId: '',
 };
 
 const ROOM = 'sala_de_estar';
@@ -134,6 +137,7 @@ describe('WsServer: endereçamento por sala', () => {
   let ringBuffer: ConversationRingBuffer;
   let roomManager: RoomManager;
   let server: WsServer;
+  let reminderStore: ReminderStore;
   let provider: FakeProvider;
   let wsUrl: string;
   const openSockets: WebSocket[] = [];
@@ -147,7 +151,8 @@ describe('WsServer: endereçamento por sala', () => {
     provider = new FakeProvider();
     roomManager = new RoomManager(config, ringBuffer, () => provider);
     const haClient = new HomeAssistantClient(config);
-    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient));
+    reminderStore = ReminderStore.open(':memory:');
+    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient), reminderStore);
     server.start();
 
     while (server.port === null) {
@@ -159,6 +164,7 @@ describe('WsServer: endereçamento por sala', () => {
   afterEach(async () => {
     for (const ws of openSockets.splice(0)) ws.close();
     await server.stop();
+    reminderStore.close();
     await roomManager.destroy();
     ringBuffer.destroy();
   });

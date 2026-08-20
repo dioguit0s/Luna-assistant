@@ -3,8 +3,12 @@ import type { CompletedTurn } from '../providers/types.js';
 import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { createControlDeviceHandler } from './tools/controlDevice.js';
+import { createSetReminderHandler } from './tools/setReminder.js';
 import { INVALID_ARGS_RESULT, type ToolContext, type ToolHandler } from './tools/types.js';
 import { CHIME_PCM16 } from '../reminders/chime.js';
+import { SET_REMINDER_TOOL } from '../reminders/tools.js';
+import type { ReminderStore } from '../reminders/ReminderStore.js';
+import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import { getLogger } from '../logging/logger.js';
 import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
@@ -94,6 +98,14 @@ export class Orchestrator {
    * coisa, ele pediu algo que o servidor não sabe executar.
    */
   private readonly toolHandlers: Map<string, ToolHandler>;
+  /**
+   * Late-bound: no boot, o `ReminderScheduler` só existe depois que o
+   * `WsServer` (e o Orchestrator dentro dele) já subiu — o scheduler precisa
+   * do `ringOnce` do Orchestrator para disparar, e o Orchestrator precisa do
+   * scheduler para o handler de `set_reminder` chamar `reschedule()`. Ver
+   * `setReminderScheduler`.
+   */
+  private reminderScheduler: ReminderScheduler | null = null;
 
   constructor(
     private readonly config: AppConfig,
@@ -111,6 +123,7 @@ export class Orchestrator {
      * transmitiu nada) era inalcançável.
      */
     private readonly sendToRoom: SendToRoom,
+    reminderStore: ReminderStore,
   ) {
     this.toolHandlers = new Map<string, ToolHandler>([
       [
@@ -119,6 +132,22 @@ export class Orchestrator {
           haClient,
           deviceRegistry,
           sendToRoom: (targetRoom, payload) => this.sendToRoom(targetRoom, payload),
+        }),
+      ],
+      [
+        SET_REMINDER_TOOL.name,
+        createSetReminderHandler({
+          store: reminderStore,
+          getScheduler: () => {
+            if (!this.reminderScheduler) {
+              // Só aconteceria se o boot estivesse fora de ordem
+              // (`setReminderScheduler` chamado depois de o modelo já poder
+              // falar) — um bug de wiring, não uma entrada de usuário.
+              throw new Error('ReminderScheduler ainda não registrado no Orchestrator');
+            }
+            return this.reminderScheduler;
+          },
+          reminderMaxPerRoom: config.reminderMaxPerRoom,
         }),
       ],
     ]);
@@ -130,6 +159,17 @@ export class Orchestrator {
     roomManager.setProviderBinder((roomId, provider) =>
       this.bindProviderCallbacks(roomId, provider),
     );
+  }
+
+  /**
+   * Chamado por `index.ts` depois que o `WsServer` (e este Orchestrator)
+   * sobem: o `ReminderScheduler` é criado depois porque o `onFire` dele
+   * precisa do `ringOnce` deste Orchestrator, e o Orchestrator precisa do
+   * scheduler para o handler de `set_reminder` chamar `reschedule()` —
+   * nenhum dos dois pode nascer primeiro sem esta injeção tardia.
+   */
+  setReminderScheduler(scheduler: ReminderScheduler): void {
+    this.reminderScheduler = scheduler;
   }
 
   async handleAudioChunk(roomId: string, deviceId: string, pcm: Buffer): Promise<void> {

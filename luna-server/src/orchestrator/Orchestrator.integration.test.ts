@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import type { AppConfig } from '../config/env.js';
 import { createLogger } from '../logging/logger.js';
 import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import { ReminderStore } from '../reminders/ReminderStore.js';
+import { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import { DeviceRegistry, toDeviceEntry } from '../ha/deviceRegistry.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import { ConversationRingBuffer } from '../rooms/ConversationRingBuffer.js';
@@ -49,6 +51,8 @@ const baseConfig: AppConfig = {
   missedGraceMs: 15 * 60_000,
   alarmMaxRingMs: 5 * 60_000,
   reminderMaxConcurrent: 20,
+  reminderMaxPerRoom: 20,
+  reminderFallbackRoomId: '',
 };
 
 const ROOM_ID = 'sala_de_estar';
@@ -190,6 +194,7 @@ function toolCall(args: Record<string, unknown>, name = 'control_device'): ToolC
 interface Harness {
   orchestrator: Orchestrator;
   provider: FakeAudioProvider;
+  reminderStore: ReminderStore;
   /** Cria a sessão do cômodo sem ninguém ter falado — o caminho do alarme. */
   startSession: () => Promise<void>;
   /** Payloads que o Orchestrator endereçou a um cômodo, em ordem de envio. */
@@ -205,6 +210,8 @@ interface Harness {
  * o processo de teste nunca encerra.
  */
 const ringBuffers: ConversationRingBuffer[] = [];
+/** Mesmo padrão de `ringBuffers`: cada harness abre um `:memory:` próprio. */
+const reminderStores: ReminderStore[] = [];
 
 async function feedAudio(h: Harness): Promise<void> {
   await h.orchestrator.handleAudioChunk(ROOM_ID, DEVICE_ID, Buffer.alloc(640));
@@ -244,6 +251,9 @@ function buildHarness(
   const { fetchImpl, calls } = mockFetch(respond);
   const haClient = new HomeAssistantClient(baseConfig, fetchImpl);
 
+  const reminderStore = ReminderStore.open(':memory:');
+  reminderStores.push(reminderStore);
+
   // O fan-out real vive no WsServer (ver WsServer.fanout.test.ts); aqui o que
   // importa é que o Orchestrator só endereça cômodo, nunca conexão.
   const sent: Array<Buffer | string> = [];
@@ -263,8 +273,10 @@ function buildHarness(
         sent.push(payload);
         return 1;
       },
+      reminderStore,
     ),
     provider,
+    reminderStore,
     sent,
     sentRooms,
     haCalls: calls,
@@ -287,6 +299,11 @@ describe('Orchestrator: despacho de comandos de automação', () => {
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -448,7 +465,7 @@ describe('Orchestrator: despacho de comandos de automação', () => {
     await feedAudio(harness);
 
     await harness.provider.emitToolCall(
-      toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }, 'set_reminder'),
+      toolCall({ device: 'luz_bancada', action: 'on', room_id: ROOM_ID }, 'manage_reminders'),
     );
 
     assert.equal(harness.haCalls.length, 0);
@@ -507,6 +524,11 @@ describe('Orchestrator: corte de silêncio antecipa speaking_start', () => {
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -590,6 +612,11 @@ describe('Orchestrator: speaking_end garantido em todo caminho de encerramento',
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -661,6 +688,11 @@ describe('Orchestrator: watchdog de speaking_end sem áudio novo', () => {
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -715,6 +747,11 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -873,6 +910,11 @@ describe('Orchestrator: ringOnce (chime)', () => {
 
   after(() => {
     for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: `reminderStores` é compartilhado entre describes
+    // deste arquivo, e `ReminderStore.close()` — ao contrário de
+    // `ConversationRingBuffer.destroy()` — não é idempotente. Um `for...of`
+    // fecharia de novo o que o `after()` do describe anterior já fechou.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
   });
 
   let harness: Harness;
@@ -998,6 +1040,8 @@ describe('Orchestrator: ringOnce (chime)', () => {
     const { fetchImpl } = mockFetch(() => new Response('[]', { status: 200 }));
     const haClient = new HomeAssistantClient(baseConfig, fetchImpl);
     const roomManagerStub = { setProviderBinder: () => {} } as unknown as RoomManager;
+    const reminderStore = ReminderStore.open(':memory:');
+    reminderStores.push(reminderStore);
 
     const orchestrator = new Orchestrator(
       baseConfig,
@@ -1005,6 +1049,7 @@ describe('Orchestrator: ringOnce (chime)', () => {
       haClient,
       registrySource,
       () => 0, // sala vazia: sempre 0 entregues.
+      reminderStore,
     );
 
     const primeiroDisparo = orchestrator.ringOnce(ROOM_ID);
@@ -1016,5 +1061,94 @@ describe('Orchestrator: ringOnce (chime)', () => {
       0,
       'um segundo ringOnce logo depois do primeiro não deveria ser bloqueado por speakingByRoom preso',
     );
+  });
+});
+
+describe('Orchestrator: set_reminder ponta a ponta', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  let harness: Harness;
+  let scheduler: ReminderScheduler;
+  let fired: string[];
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    fired = [];
+    scheduler = new ReminderScheduler({
+      store: harness.reminderStore,
+      onFire: (reminder) => {
+        fired.push(reminder.shortId);
+      },
+      missedGraceMs: 15 * 60_000,
+      maxRingMs: 5 * 60_000,
+      maxConcurrent: 20,
+    });
+    // Mesma injeção tardia do boot real (ver index.ts): o Orchestrator
+    // precisa do scheduler para o handler de set_reminder chamar reschedule().
+    harness.orchestrator.setReminderScheduler(scheduler);
+  });
+
+  afterEach(() => {
+    scheduler.stop();
+  });
+
+  it('tool → store → scheduler: "daqui a 10 minutos" cria o lembrete e o scheduler o vê', async () => {
+    await feedAudio(harness);
+
+    await harness.provider.emitToolCall(toolCall({ in_seconds: 600 }, 'set_reminder'));
+
+    const results = harness.provider.toolResults;
+    assert.equal(results.length, 1);
+    const result = results[0]!.result as { success: boolean; reminder_id: string; spoken_when: string };
+    assert.equal(result.success, true);
+    assert.match(result.spoken_when, /10 minutos/);
+
+    const live = harness.reminderStore.listLiveByRoom(ROOM_ID);
+    assert.equal(live.length, 1);
+    assert.equal(live[0]!.shortId, result.reminder_id);
+
+    // O scheduler já foi cutucado (reschedule() dentro do handler): sem
+    // esperar a próxima acordada, ele já enxerga o lembrete recém-criado como
+    // o próximo a vencer.
+    assert.equal(harness.reminderStore.nextArmed()?.shortId, result.reminder_id);
+  });
+
+  it('args inválidos: erro falável ao modelo, nenhuma linha no banco', async () => {
+    await feedAudio(harness);
+
+    await harness.provider.emitToolCall(
+      toolCall({ in_seconds: 600, at_time: '19:00' }, 'set_reminder'),
+    );
+
+    const result = harness.provider.toolResults[0]!.result as { success: boolean; error: string };
+    assert.equal(result.success, false);
+    assert.equal(typeof result.error, 'string');
+    assert.equal(harness.reminderStore.countLiveByRoom(ROOM_ID), 0);
+  });
+
+  it('nenhum command_result nem chamada ao HA — set_reminder não é control_device', async () => {
+    await feedAudio(harness);
+
+    await harness.provider.emitToolCall(toolCall({ in_seconds: 60 }, 'set_reminder'));
+
+    assert.equal(harness.haCalls.length, 0);
+    assert.equal(
+      controlMessages(harness.sent).filter((msg) => msg.type === 'command_result').length,
+      0,
+    );
+  });
+
+  it('o cômodo do lembrete é sempre o da sessão, mesmo sem room_id nos args', async () => {
+    await feedAudio(harness);
+    await harness.provider.emitToolCall(toolCall({ in_seconds: 60 }, 'set_reminder'));
+
+    assert.equal(harness.reminderStore.countLiveByRoom(ROOM_ID), 1);
   });
 });

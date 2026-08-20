@@ -2,6 +2,7 @@ import type { AppConfig } from '../config/env.js';
 import { createAudioProvider } from '../providers/AudioProviderFactory.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
+import { SET_REMINDER_TOOL } from '../reminders/tools.js';
 import { buildLunaSystemPrompt } from '../prompts/luna-system-prompt.js';
 import { ConversationRingBuffer } from './ConversationRingBuffer.js';
 import { getLogger } from '../logging/logger.js';
@@ -69,7 +70,7 @@ export class RoomManager {
       roomId,
       systemPrompt,
       history,
-      tools: [CONTROL_DEVICE_TOOL],
+      tools: [CONTROL_DEVICE_TOOL, SET_REMINDER_TOOL],
     });
 
     await this.awaitConnectWithTimeout(roomId, provider, connectPromise);
