@@ -25,10 +25,14 @@
             "id": "da969141566e1ee4",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "Home.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Home"
             }
           }
         ],
@@ -110,6 +114,7 @@
             "state": {
               "type": "backlink",
               "state": {
+                "file": "Home.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -128,6 +133,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
+                "file": "Home.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
@@ -170,6 +176,7 @@
             "state": {
               "type": "outline",
               "state": {
+                "file": "Home.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
@@ -199,7 +206,25 @@
   },
   "active": "da969141566e1ee4",
   "lastOpenFiles": [
+    "2026-08-21.md",
     "Home.md",
+    "arquitetura-servidor.md",
+    "alarmes-e-lembretes.md",
+    "adr/004-wake-word-no-desktop.md",
+    "adr/001-audio-provider-abstraction.md",
+    "adr/_template.md",
+    "Home.md.tmp.10608.2081cc6127e3",
+    "PROJETO LUNA.md.tmp.10608.0034f47a0fa4",
+    "PROJETO LUNA.md.tmp.10608.f77d15eab7b5",
+    "PROJETO LUNA.md.tmp.10608.21ae37fc9569",
+    "PROJETO LUNA.md.tmp.10608.7635aec617d8",
+    "PROJETO LUNA.md.tmp.10608.935a36306783",
+    "PROJETO LUNA.md.tmp.10608.f9fd9b2aa8b8",
+    "onboarding.md",
+    "onboarding.md.tmp.10608.ed32e69b07ba",
+    "arquitetura-servidor.md.tmp.10608.754b8dbc4c97",
+    "protocolo-websocket.md",
+    "protocolo-websocket.md.tmp.10608.13a0cac9ac6b",
     "PROJETO LUNA.md"
   ]
 }
