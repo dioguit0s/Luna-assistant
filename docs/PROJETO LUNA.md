@@ -1,7 +1,13 @@
 # PROJETO LUNA
 
 **Documento de Arquitetura de Software e Plano de Execução**
-**Versão 2.0 — Revisado com decisões arquiteturais**
+**Versão 2.1 — Revisado em 21/08/2026 contra o código entregue**
+
+> Este é o documento de referência da arquitetura e do porquê das escolhas. Para
+> detalhe operacional, veja as notas dedicadas:
+> [protocolo WebSocket](protocolo-websocket.md) ·
+> [arquitetura do servidor](arquitetura-servidor.md) ·
+> [onboarding](onboarding.md) · [ADRs](adr/)
 
 ***
 
@@ -70,11 +76,19 @@ Todas as mensagens de controle seguem o envelope JSON padrão abaixo. Chunks de 
 | ---------------- | ------------------- | ------------------------------------------------------------------------ |
 | `auth`           | Satélite → Servidor | Handshake inicial com token HMAC-SHA256 e device\_id                     |
 | `audio_chunk`    | Satélite → Servidor | Chunk de 640 bytes de PCM 16kHz mono. Campo `seq` para detecção de perda |
+| `activity_end`   | Satélite → Servidor | Push-to-talk: fim de fala explícito (só com `GEMINI_MANUAL_ACTIVITY=true`) |
+| `auth_ok`        | Servidor → Satélite | Token validado — o firmware reseta a FSM ao receber                       |
+| `auth_error`     | Servidor → Satélite | Handshake recusado, com o motivo no campo `reason`                        |
 | `speaking_start` | Servidor → Satélite | Enviado antes do primeiro chunk de resposta — ativa AEC                  |
 | `audio_response` | Servidor → Satélite | Chunk de áudio de resposta sintetizada                                   |
 | `speaking_end`   | Servidor → Satélite | Fim da resposta — satélite aguarda 150ms e reativa captura               |
 | `command_result` | Servidor → Satélite | Resultado de execução de comando de automação                            |
 | `ping` / `pong`  | Bidirecional        | Keep-alive e medição de RTT                                              |
+
+> **Referência completa:** [`protocolo-websocket.md`](protocolo-websocket.md) — campos
+> do envelope, formato dos frames, sequência de autenticação, timings e o checklist
+> das **quatro** cópias do contrato no repositório. Esta tabela é o resumo; aquela
+> nota é a fonte canônica.
 
 ### **4.1 Ritmo de `audio_response` e recuperação de `speaking_end`**
 
@@ -113,17 +127,27 @@ até o teto do firmware nos demais casos.
 * O servidor valida o token no momento do handshake. Conexões sem token válido são encerradas imediatamente.
 * O segredo base é armazenado na **NVS (Non-Volatile Storage)** do ESP32, partição protegida contra leitura por firmware não autorizado.
 
-### **5.2 Variáveis de Ambiente Obrigatórias**
+### **5.2 Variáveis de Ambiente**
+
+O mínimo para o servidor subir:
 
 ```
-GEMINI_API_KEY=
-OPENAI_API_KEY=          # provider de fallback
-HA_TOKEN=                # token do Home Assistant
-WS_AUTH_SECRET=          # base para HMAC dos tokens dos satélites
-LOG_LEVEL=info
+AUDIO_PROVIDER=gemini    # ou "openai"
+GEMINI_API_KEY=          # obrigatória quando AUDIO_PROVIDER=gemini
+OPENAI_API_KEY=          # obrigatória quando AUDIO_PROVIDER=openai
+WS_AUTH_SECRET=          # base para HMAC dos tokens dos satélites — única sem default
 ```
 
-O arquivo `.env` deve estar no `.gitignore` desde o primeiro commit. Usar `dotenv` no desenvolvimento e variáveis de ambiente nativas em produção.
+`WS_AUTH_SECRET` é a **única** variável sem default: sem ela o processo falha no boot.
+As demais (~30 no total — knobs de VAD, `thinkingBudget`, Home Assistant, registro de
+dispositivos, banco de lembretes) têm default utilizável e estão documentadas uma a
+uma na [tabela do `luna-server/README.md`](../luna-server/README.md#variáveis-de-ambiente),
+que é a referência canônica. A fonte da verdade no código é
+[`config/env.ts`](../luna-server/src/config/env.ts).
+
+O arquivo `.env` está no `.gitignore` desde o primeiro commit. `dotenv` no
+desenvolvimento; em produção o systemd carrega um `EnvironmentFile` fora da release
+(ver [`deploy/README.md`](../luna-server/deploy/README.md)).
 
 ***
 
@@ -131,30 +155,64 @@ O arquivo `.env` deve estar no `.gitignore` desde o primeiro commit. Usar `doten
 
 ```
 luna/
-├── luna-server/          # Orquestrador Node.js (TypeScript)
+├── luna-server/          # Orquestrador Node.js (TypeScript, ESM, Node >= 22.5)
 │   ├── src/
+│   │   ├── config/       # AppConfig — toda variável de ambiente passa aqui
+│   │   ├── ws/           # WebSocket server, protocolo, auth HMAC, /health
+│   │   ├── orchestrator/ # Ciclo do turno, fila de áudio, dispatch de tools
+│   │   ├── rooms/        # Sessão por room_id e ring buffer de contexto
 │   │   ├── providers/    # IAudioProvider, GeminiLiveAdapter, OpenAIRealtimeAdapter
-│   │   ├── rooms/        # Gerenciamento de room_id e ring buffer de contexto
-│   │   ├── ws/           # WebSocket server e protocolo de mensagens
-│   │   └── ha/           # Integração com Home Assistant
+│   │   ├── ha/           # Home Assistant: client e registro de dispositivos
+│   │   ├── reminders/    # Alarmes e lembretes (node:sqlite, scheduler, chime)
+│   │   ├── prompts/      # System prompt da Luna
+│   │   ├── time/         # Relógio único do processo (America/Sao_Paulo)
+│   │   ├── metrics/      # Medição de TTFAB
+│   │   └── logging/      # pino
+│   ├── deploy/           # activate.sh, unit systemd, runbook de deploy
+│   ├── config/           # devices.json (overrides do registro)
 │   └── .env.example
 ├── luna-firmware/        # Firmware do satélite ESP32-S3 (PlatformIO / C++)
 │   ├── src/
-│   │   ├── audio/        # Pipeline I2S, captura, empacotamento
-│   │   ├── ws/           # Client WebSocket + autenticação HMAC
-│   │   └── fsm/          # Máquina de estados IDLE_LISTENING / ACTIVE_STREAMING
+│   │   ├── audio/        # Pipeline I2S: captura, playback
+│   │   ├── wake/         # Wake word "Hey Luna" (microWakeWord / TFLite-micro)
+│   │   ├── ws/           # Client WebSocket, auth HMAC, NVS, Wi-Fi
+│   │   ├── fsm/          # FSM IDLE_LISTENING / ACTIVE_STREAMING / RESPONDING
+│   │   └── ui/           # LED de status
+│   ├── include/config.h  # Pinagem e todas as constantes de timing
 │   └── platformio.ini
+├── luna-desktop/         # Satélite para Windows (Electron + sidecar Python)
 ├── luna-firmware-actuator/  # Firmware ESP32 atuador (ESPHome YAML)
-├── luna-client-test/     # Cliente de testes com microfone do PC
+├── luna-client-test/     # Cliente de bancada: microfone do PC ou WAV
+├── wake-training/        # Pipeline de treino da wake word (Docker)
 ├── infra/
-│   └── docker-compose.yml   # Home Assistant + Redis
-└── docs/
+│   └── docker-compose.yml   # Home Assistant
+└── docs/                 # Vault Obsidian
     └── adr/              # Architecture Decision Records
 ```
+
+> `luna-affine-mcp/` sobrou de um experimento abandonado: está vazio e fora do
+> controle de versão. Não faz parte do sistema.
+
+Mapa detalhado dos módulos do servidor em
+[`arquitetura-servidor.md`](arquitetura-servidor.md).
 
 ***
 
 ## **7. Cronograma de Desenvolvimento (Épicos e Fases)**
+
+> **Estado em 21/08/2026.** Os quatro épicos foram entregues; o texto de cada um é
+> mantido como registro do escopo e dos critérios de aceite originais, não como
+> trabalho pendente. As exceções estão marcadas na tabela.
+
+| Épico | Escopo | Estado |
+| ----- | ------ | ------ |
+| 1 — O Cérebro | Servidor, `IAudioProvider`, ring buffer, cliente de bancada | **Entregue** |
+| 2 — O Satélite | Hardware, firmware, I2S, FSM, AEC | **Entregue** — botão físico nunca foi conectado (GPIO2 reservado); a wake word do Épico 4 tornou-o desnecessário |
+| 3 — Sistema Nervoso Motor | Home Assistant, ESPHome, function calling | **Entregue** — o registro de dispositivos evoluiu para descoberta automática via HA, com `devices.json` só para overrides |
+| 4 — Autonomia | Wake word on-device, multi-satélite, fan-out por sala | **Entregue** — exceto a troca do `Map` por **Redis**, ainda pendente |
+
+Fora do plano original, também entregues: o [`luna-desktop`](luna-desktop.md) (satélite
+Windows) e, parcialmente, [alarmes e lembretes](alarmes-e-lembretes.md).
 
 ### **ÉPICO 1: O Cérebro da Luna (Core Backend & IA) — Fase 1**
 
@@ -218,16 +276,38 @@ luna/
 
 ***
 
-## **8. Próximos Passos Imediatos (Primeiras 48 Horas)**
+## **8. Trabalho em Aberto**
 
-As primeiras 48 horas focam exclusivamente no Épico 1 (software) e na aquisição de hardware:
+Substitui o plano de arranque original (criação do repositório, boilerplate do
+servidor, aquisição de hardware), todo concluído.
 
-1. Criação do repositório Git com estrutura de pastas definida na seção 6, incluindo `.gitignore` com `.env` desde o commit inicial.
-2. Estruturação do boilerplate do servidor Node.js com TypeScript, `ws`, `pino` e `dotenv`.
-3. Implementação da interface `IAudioProvider` com os dois adapters — definir o contrato antes de qualquer lógica de negócio.
-4. Aquisição de hardware em ordem de prioridade:
-   * (1) **ESP32-S3 DevKit** — bloqueante para todo o firmware
-   * (2) **INMP441** (microfone I2S) — bloqueante para Épico 2
-   * (3) **MAX98357A** (amplificador I2S) — pode ser validado com buzzer passivo inicialmente
-   * (4) **Segundo ESP32** para atuadores — somente no Épico 3
-5. Criação do primeiro ADR (`docs/adr/001-audio-provider-abstraction.md`) documentando a decisão de abstração do provider de IA.
+**Em andamento**
+
+* **Alarmes e lembretes** — marcos 0 a 6 entregues (relógio único, endereçamento por
+  sala, fan-out, `ReminderStore`, `ReminderScheduler`, `Chime`, `set_reminder`).
+  Faltam o ciclo de toque com janela de escuta e a tool `manage_reminders`. Plano
+  completo em [`alarmes-e-lembretes.md`](alarmes-e-lembretes.md).
+
+**Pendências herdadas dos épicos**
+
+* **Redis no lugar do `Map` em memória** (Épico 4). O contexto conversacional ainda
+  não sobrevive a restart — e o CI reinicia o serviço a cada push em `main`.
+* **Botão físico** (Épico 2). GPIO2 reservado, nunca conectado. Deixou de ser
+  bloqueante com a wake word, mas continua sendo o escape hatch natural para
+  dispensar um alarme sem falar.
+
+**ADRs previstos**
+
+* **005 — Persistência no `luna-server`.** Reverte uma propriedade declarada do
+  sistema ("o processo não escreve em disco") e cria invariante nova de deploy.
+* **006 — Agendamento server-side e contrato de tempo.**
+* **007 — Áudio não solicitado e endereçamento por sala.** Emenda os ADRs 001/002 em
+  vez de substituí-los.
+
+**Dívida de documentação conhecida**
+
+* O contrato WebSocket vive em **quatro** cópias (servidor, firmware, desktop,
+  bancada) sem nenhum gerador ou teste cruzado que force a sincronia. O checklist em
+  [`protocolo-websocket.md`](protocolo-websocket.md) é hoje o único controle.
+* O CI só cobre `luna-server/**`. Firmware, ESPHome e wake-training dependem
+  exclusivamente de revisão e teste manual.
