@@ -43,8 +43,11 @@ src/
 ├── reminders/            # alarmes e lembretes
 │   ├── ReminderStore.ts  #   SQLite (node:sqlite)
 │   ├── ReminderScheduler.ts # timer único auto-corretivo
+│   ├── AlarmRinger.ts    #   ciclo de toque por sala: rajada/janela/dispensa
 │   ├── resolveOnce.ts    #   "daqui a 20min" / "às 7" → instante
-│   ├── tools.ts          #   schema da tool set_reminder
+│   ├── recurrence.ts     #   "todo dia útil às 6:30" → próxima ocorrência
+│   ├── spoken.ts         #   como um lembrete é dito em voz alta
+│   ├── tools.ts          #   schema das duas tools de lembrete
 │   └── chime.ts          #   PCM do toque, pré-renderizado
 ├── prompts/luna-system-prompt.ts  # personalidade + contexto de cômodo e hora
 └── metrics/ttfab.ts      # medição da métrica de performance do projeto
@@ -159,7 +162,8 @@ Contrato agnóstico ao provider — ver [ADR 002](adr/002-function-calling-contr
 | Tool | Handler | O que faz |
 |---|---|---|
 | `control_device` | `orchestrator/tools/controlDevice.ts` | Liga/desliga um dispositivo no HA e emite `command_result` |
-| `set_reminder` | `orchestrator/tools/setReminder.ts` | Cria alarme/lembrete/timer |
+| `set_reminder` | `orchestrator/tools/setReminder.ts` | Cria alarme/lembrete/timer, único ou recorrente |
+| `manage_reminders` | `orchestrator/tools/manageReminders.ts` | `dismiss`/`snooze` do que toca agora, `list`/`cancel` do que está marcado |
 
 **O vocabulário é deliberadamente enxuto por causa do TTFAB:** cada schema a mais infla
 o `model_decision_ms`, sobretudo com `thinkingBudget: 0`. Adicionar tool é decisão de
@@ -214,9 +218,33 @@ Resumo do que está no código:
   release anterior, e uma migração que a versão antiga não lê tornaria o rollback letal.
 - **`ReminderScheduler`** — **um** timer auto-corretivo (`MAX_TIMER_DELAY_MS`, 60 s),
   não um `setTimeout` por alarme.
-- **`chime.ts`** — PCM do toque pré-renderizado; falar ao vivo é fallback.
-- Caminho de entrega: `Orchestrator.ringOnce(roomId)` reusa
+- **`AlarmRinger`** — o ciclo de toque, uma FSM por sala: rajada → janela de escuta
+  → rajada, até dispensa, soneca ou o teto de `alarmMaxRingMs`. A janela existe
+  porque em `RESPONDING` o firmware **desliga a wake word**: um alarme que toca
+  continuamente é um alarme que não se desliga por voz.
+- **`chime.ts`** — PCM do bipe, gerado uma vez no load do módulo.
+- Caminho de entrega: `Orchestrator.ringBurst(roomId, force, speech)` reusa
   `speaking_start` → `audio_response` → `speaking_end` e o fan-out por sala.
+  Nenhum `MessageType` novo, nenhuma mudança de firmware.
+
+Três invariantes que não são óbvios lendo o código:
+
+- **O `onFire` do scheduler só resolve no fim do ciclo.** É a promise dele que
+  segura a vaga em `firingRooms` enquanto o alarme toca; liberando cedo, um segundo
+  lembrete da mesma sala seria disparado por cima, com `markRinging` já gravado e
+  `fire_count` incrementado num lembrete que nunca tocou.
+- **O guard de barge-in vem de `onUserSpeech`, não do áudio recebido.** Em open-mic
+  o satélite transmite continuamente, então "chegou áudio agora" seria sempre
+  verdadeiro e o alarme nunca tocaria — mesma armadilha que o `TtfabTracker`
+  documenta para a âncora de TTFAB.
+- **O estado do ciclo não é limpo por `releaseRoom`.** Uma sala cujo provider morreu
+  continua tendo alarmes.
+
+**A fala do lembrete é pré-renderizada na criação** e guardada como BLOB em
+`reminder_audio`. No disparo o servidor só enfileira bytes — o alarme funciona com o
+provider fora do ar. Sem BLOB, o toque degrada para só-chime, sem erro visível.
+A poda desse áudio é **explícita e por status**: o `ON DELETE CASCADE` da tabela
+nunca dispara, porque lembrete não é `DELETE`ado em lugar nenhum.
 
 **Onde o banco fica** (`resolveDbPath`), em ordem de precedência:
 `LUNA_DB_PATH` explícito → `$STATE_DIRECTORY` do systemd → `./.luna-state/luna.db`.

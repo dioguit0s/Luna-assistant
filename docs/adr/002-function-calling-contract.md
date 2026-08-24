@@ -97,6 +97,8 @@ O catálogo de dispositivos é **descoberto no próprio Home Assistant**, não d
 
 ### Negativas
 
+- **O schema das tools é mais pobre do que JSON Schema.** `providers/gemini/tool-mapping.ts` só propaga `type`, `description` e `enum` por propriedade — sem `items`, sem objeto aninhado — e `toSchemaType` **lança** em tipo desconhecido. Na prática todo schema de tool tem que ser **plano**: um array de dias da semana quebraria o adapter do Gemini. Foi por isso que a recorrência de lembretes virou um par de campos `enum` ortogonais (`repeat` + `when_day`) em vez de uma lista de dias — ver [ADR 006](006-agendamento-e-contrato-de-tempo.md).
+- **Cada tool nova custa TTFAB.** O schema entra no orçamento de instrução de toda sessão Live e sobe o `model_decision_ms`, e com `geminiThinkingBudget: 0` o modelo não tem folga para deliberar. Daí o gerenciamento de lembretes ser **uma** tool com `action: enum`, não quatro.
 - `args` como `Record<string, unknown>` empurra a validação para runtime; esquecê-la é um erro silencioso que o compilador não pega.
 - Correlação por `callId` exige que cada adapter mantenha o mapeamento para o identificador nativo do seu SDK.
 - Um terceiro provider sem function calling nativo não conseguiria implementar o port sem emulação por prompt.
