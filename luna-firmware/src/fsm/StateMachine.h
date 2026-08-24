@@ -9,8 +9,8 @@ namespace StateMachine {
 
 enum class State {
   IDLE_LISTENING,   // microfone aberto localmente, nada sai pela rede
-  ACTIVE_STREAMING, // captura + transmite; LED ON
-  RESPONDING,       // Luna falando: TX suspenso (AEC), LED OFF
+  ACTIVE_STREAMING, // captura + transmite
+  RESPONDING,       // Luna falando: TX suspenso (AEC)
 };
 
 void begin();
@@ -36,7 +36,17 @@ bool shouldDetectWake();
 // o detector não consegue subir — melhor degradado que mudo.
 void setWakeWordAvailable(bool available);
 
-// Trigger da wake word -> ACTIVE_STREAMING (LED on, volta a transmitir).
+// Espelho do anterior, para o indicador visual distinguir o modo degradado.
+bool wakeWordAvailable();
+
+// Tempo desde o último chunk com energia acima de WAKE_LISTEN_VOICE_PEAK. Em
+// ACTIVE_STREAMING serve como "o usuário parou de falar" — é o que o LED usa
+// para mostrar "pensando" sem precisar de um estado novo na FSM nem de uma
+// mensagem nova no protocolo. Só tem sentido em ACTIVE_STREAMING: fora dele
+// noteCapturePeak() não roda e o valor apenas cresce.
+uint32_t msSinceVoice();
+
+// Trigger da wake word -> ACTIVE_STREAMING (volta a transmitir).
 void onWakeWord();
 
 // Alimenta o pico de captura (0..32767) a cada chunk. Usado para fechar a janela
@@ -44,7 +54,7 @@ void onWakeWord();
 void noteCapturePeak(int16_t peak);
 
 // Eventos vindos do servidor.
-void onSpeakingStart(); // -> RESPONDING (LED off, para TX)
+void onSpeakingStart(); // -> RESPONDING (para TX)
 void onSpeakingEnd();   // agenda retorno a IDLE_LISTENING após AEC_RESUME_DELAY_MS
 
 // Rearma o teto do RESPONDING_TIMEOUT_MS (ver config.h): chamar a cada

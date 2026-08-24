@@ -1,6 +1,5 @@
 #include "StateMachine.h"
 #include "config.h"
-#include "ui/StatusLed.h"
 
 namespace StateMachine {
 
@@ -24,15 +23,10 @@ static volatile uint32_t respondingSince = 0;
 // open-mic, que é degradado mas utilizável, e o motivo fica no log.
 static volatile bool wakeAvailable = WAKE_WORD_ENABLED;
 
-static void enter(State next) {
-  state = next;
-  if (next == State::ACTIVE_STREAMING) {
-    StatusLed::on();
-  } else {
-    // IDLE e RESPONDING compartilham o LED apagado: em ambos nada é transmitido.
-    StatusLed::off();
-  }
-}
+// O LED não é acionado daqui de propósito: a cor exibida depende também do
+// Wi-Fi e do WebSocket, que a FSM não enxerga. Quem arbitra é updateStatusLed()
+// em main.cpp, lendo current() a cada iteração do loop.
+static void enter(State next) { state = next; }
 
 void begin() { enter(State::IDLE_LISTENING); }
 
@@ -86,6 +80,10 @@ bool shouldStream() { return state == State::ACTIVE_STREAMING; }
 bool shouldDetectWake() { return wakeAvailable && state == State::IDLE_LISTENING; }
 
 void setWakeWordAvailable(bool available) { wakeAvailable = available; }
+
+bool wakeWordAvailable() { return wakeAvailable; }
+
+uint32_t msSinceVoice() { return millis() - lastVoiceMs; }
 
 void onWakeWord() {
   if (state != State::IDLE_LISTENING) return;

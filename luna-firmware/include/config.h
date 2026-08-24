@@ -16,8 +16,73 @@
 #define SPK_BCLK 16 // BCLK — bit clock     (ESP32 -> MAX98357A) [movido de GPIO8: ruído]
 #define SPK_LRC 17  // LRC (WS) — word select (ESP32 -> MAX98357A) [movido de GPIO9]
 
-// --- LED indicador de escuta ---
-#define LED_PIN 10 // HIGH enquanto capturando; LOW enquanto a Luna responde
+// --- LED RGB indicador de estado (cátodo comum) ---
+// Ver docs/PINAGEM_EPICO_2.md seção 4. Montagem atual: 300Ω nos TRÊS canais.
+#define LED_R_PIN 10
+#define LED_G_PIN 13
+#define LED_B_PIN 14
+
+// PWM (LEDC). Frequência baixa de propósito: o GPIO13 é vizinho do GPIO12 (SD do
+// microfone) no header, e quanto menos bordas por segundo menor o acoplamento na
+// linha de dado do I2S. 2 kHz já fica bem acima do limiar de cintilação visível.
+#define LED_PWM_FREQ_HZ 2000
+#define LED_PWM_BITS 10
+#define LED_MAX_DUTY ((1 << LED_PWM_BITS) - 1)
+
+// Brilho global (0..100). Em 100 porque com 300Ω no verde e no azul esses dois
+// canais já saem no limite do que conseguem: qualquer teto abaixo disso os apaga
+// antes de domar o vermelho, que é o que de fato precisa ser contido. Quem
+// contém o vermelho é o LED_GAIN_R abaixo. Baixar este valor faz sentido depois
+// de trocar os resistores do G/B (ver comentário do ganho).
+#define LED_BRIGHTNESS_PCT 100
+
+// Ganho por canal (0..100), compensa Vf e resistor diferentes.
+//
+// Montagem atual — 300Ω nos três canais, rail de 3,3V:
+//   R: Vf ~2,0V -> ~4,3 mA     G e B: Vf ~3,0V -> ~1,0 mA
+// O vermelho puxa ~4x a corrente dos outros, então em duty igual ele domina e
+// toda mistura sai rosa. Daí o ganho baixo só nele.
+//
+// RECOMENDADO trocar os resistores do verde e do azul para 100Ω (ou 68Ω). Não é
+// só brilho: com 300Ω sobram ~0,3V acima do Vf, e nessa faixa a corrente é uma
+// função quase vertical do Vf — a variação normal entre peças muda o brilho em
+// 3x, e o VOH do pino sob carga come parte dessa folga. É calibração que não
+// para em pé. Com 100Ω no G/B, use LED_BRIGHTNESS_PCT 55 e LED_GAIN_R 45.
+//
+// Em qualquer um dos casos, o ajuste fino é OLHANDO o LED: suba/desça
+// LED_GAIN_R até o branco do BOOTING (todos os canais no máximo) sair neutro.
+#define LED_GAIN_R 30
+#define LED_GAIN_G 100
+#define LED_GAIN_B 100
+
+// Paleta sem verde. Com 300Ω no canal verde não sobra tensão acima do Vf e ele
+// simplesmente não acende — verificado no hardware: LISTENING (verde puro)
+// aparecia como LED APAGADO, e o âmbar de THINKING saía vermelho puro. Isso não
+// tem correção por software: duty de PWM não cria tensão direta.
+//
+// Com 1 ligado, a paleta usa só vermelho, azul e a mistura dos dois, e passa a
+// distinguir os estados principalmente pelo PADRÃO (sólido / respirando /
+// piscando) em vez da cor. Voltar para 0 depois de trocar os resistores do verde
+// e do azul para 100Ω — a paleta de oito cores é melhor quando o verde existe.
+#define LED_NO_GREEN_PALETTE 1
+
+// Brilho do repouso (0..100), aplicado sobre o azul de IDLE. Único estado que
+// fica aceso indefinidamente, inclusive de madrugada num quarto — por isso tem
+// knob próprio em vez de sair embutido na cor. Se depois de trocar os
+// resistores do G/B o repouso ficar incomodando, é aqui que se mexe.
+#define LED_IDLE_BRIGHTNESS_PCT 70
+
+// "Pensando" é inferido localmente: em ACTIVE_STREAMING, este tanto de tempo sem
+// fala significa que a pergunta acabou e estamos esperando o servidor. Não existe
+// estado equivalente na FSM nem no protocolo — é só dica visual, o áudio continua
+// sendo transmitido normalmente. Deve ficar bem abaixo de WAKE_LISTEN_SILENCE_MS,
+// que é quem de fato fecha a janela de escuta.
+//
+// 700ms era curto demais na prática: a pausa natural entre "Hey Luna" e o
+// comando já bastava para o LED sair do verde, ou seja, ele anunciava "pensando"
+// enquanto ainda esperava VOCÊ falar. 1200ms tolera essa pausa e a do meio de
+// frase, que é o mesmo fenômeno que levou WAKE_LISTEN_SILENCE_MS a 5000.
+#define LED_THINKING_AFTER_MS 1200
 
 // GPIO2 reservado para o botão físico (não usado nesta rodada — open-mic)
 

@@ -12,13 +12,14 @@ Placa **ESP32-S3 N16R8**. Pinagem completa em [`../docs/PINAGEM_EPICO_2.md`](../
 
 | Módulo | Sinais | GPIOs |
 |---|---|---|
-| INMP441 (mic, I2S0 RX) | SD / WS / SCK | 4 / 5 / 6 |
+| INMP441 (mic, I2S0 RX) | SD / WS / SCK | **12** / 5 / 6 |
 | MAX98357A (amp, I2S1 TX) | DIN / BCLK / LRC | 7 / **16** / **17** |
-| LED de escuta | — | 10 |
+| LED RGB de estado (cátodo comum) | R / G / B | 10 / 13 / 14 |
 
 > O `VIN` do amplificador vai no pino **`5VIN`**, não no 3.3V. E o BCLK/LRC ficam
-> em 16/17 (não 8/9): no GPIO8 o amplificador só emitia ruído. Detalhes na
-> seção 9 da pinagem.
+> em 16/17 (não 8/9): no GPIO8 o amplificador só emitia ruído. O SD do mic saiu do
+> GPIO4 (pad danificado nesta unidade) para o **GPIO12**. Detalhes na seção 9 da
+> pinagem; o mapa de estados → cores do LED está na seção 4.
 
 ## Wake word
 
@@ -83,10 +84,13 @@ pio device monitor      # log serial (115200)
 3. **Rede + Auth:** com o `luna-server` no ar, o serial mostra `auth_ok` e o servidor loga `auth_ok`.
 4. **Wake word:** com o servidor no ar e ninguém falando, o `luna-server` **não** deve receber
    `audio_chunk` nenhum. Dizer "Hey Luna" a ~1m e a ~3m: o serial loga `[wake] DETECTADO`, o LED
-   acende, sai um bipe curto e o servidor passa a receber áudio.
-5. **E2E:** "Hey Luna, ligar luz de teste" e ouvir a resposta. LED **aceso** ao capturar,
-   **apaga** enquanto a Luna fala e o satélite volta a exigir a wake word depois (AEC de 150ms
-   mais o dreno do buffer de playback).
+   sai do azul fraco e fica **sólido**, sai um bipe curto e o servidor passa a receber áudio.
+5. **E2E:** "Hey Luna, ligar luz de teste" e ouvir a resposta. Com a paleta atual
+   (`LED_NO_GREEN_PALETTE 1`, canal verde morto nos 300Ω) a sequência é azul respirando
+   devagar (repouso) → **magenta sólido** (falando) → **vermelho respirando** (parou de
+   falar, esperando) → **azul respirando** (Luna respondendo) → azul lento de novo. O que
+   distingue os estados é o padrão, não a cor. **Piscar rápido com borda dura** = Wi-Fi
+   (vermelho) ou servidor (magenta) fora. Tabela das duas paletas na seção 4 da pinagem.
 
 ## Arquitetura
 

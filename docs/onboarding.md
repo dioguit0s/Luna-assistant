@@ -171,7 +171,7 @@ Valide em fases, não tudo de uma vez — a sequência está no
 ### Verificação do nível 3
 
 - [ ] Conecta no Wi-Fi e recebe `auth_ok` no monitor serial
-- [ ] "Hey Luna" acende o LED (GPIO10) e dispara o chirp
+- [ ] "Hey Luna" deixa o LED RGB **sólido** (era azul respirando devagar) e dispara o chirp
 - [ ] Resposta audível e inteligível no speaker
 - [ ] Falar durante a resposta **não** reacorda o satélite (AEC + wake word desligada
       em `RESPONDING`)

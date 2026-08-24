@@ -8,6 +8,7 @@
 #endif
 
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "freertos/stream_buffer.h"
 
 #include "audio/AudioCapture.h"
@@ -36,6 +37,28 @@ static uint32_t lastPingMs = 0;
 static uint32_t lastAuthedMs = 0;
 static uint32_t lastWarnMs = 0;
 static uint32_t lastWakeStatsMs = 0;
+
+// Motivo do boot anterior. Distingue de graça três coisas que se parecem no
+// comportamento e agora também no LED: queda de alimentação (o amplificador em
+// rajada mais o pico de TX do Wi-Fi passam do que a porta USB entrega — ver
+// seção 5 da pinagem), travamento por watchdog e crash de software. Sem isto,
+// todo reset espontâneo vira "a Luna parou de responder" sem pista nenhuma, e a
+// primeira suspeita cai no LED novo justamente porque ele é o que se vê.
+static const char *resetReasonStr(esp_reset_reason_t r) {
+  switch (r) {
+  case ESP_RST_POWERON:   return "power-on";
+  case ESP_RST_EXT:       return "reset externo (botão)";
+  case ESP_RST_SW:        return "reset por software";
+  case ESP_RST_PANIC:     return "PANIC — exceção não tratada";
+  case ESP_RST_INT_WDT:   return "watchdog de interrupção";
+  case ESP_RST_TASK_WDT:  return "watchdog de task";
+  case ESP_RST_WDT:       return "watchdog";
+  case ESP_RST_DEEPSLEEP: return "saída de deep sleep";
+  case ESP_RST_BROWNOUT:  return "BROWNOUT — alimentação caiu";
+  case ESP_RST_SDIO:      return "SDIO";
+  default:                return "desconhecido";
+  }
+}
 
 // ============================================================================
 // Callbacks do servidor (executam no contexto do loop principal via ws.loop())
@@ -205,6 +228,48 @@ static void playbackTask(void *) {
 }
 
 // ============================================================================
+// Indicador visual
+// ============================================================================
+// O LED responde a três donos que não se enxergam (Wi-Fi, WebSocket e FSM), por
+// isso a decisão mora aqui e não dentro da FSM. Ordem de prioridade: uma falha
+// de conectividade esconde o estado da conversa, porque nesse caso o estado da
+// conversa não significa mais nada — em IDLE_LISTENING sem servidor a wake word
+// dispara e o áudio não vai a lugar nenhum.
+static void updateStatusLed() {
+  StatusLed::Ui ui;
+
+  if (!WifiManager::isConnected()) {
+    ui = StatusLed::Ui::NO_WIFI;
+  } else if (!LunaWsClient::isAuthenticated()) {
+    ui = StatusLed::Ui::NO_SERVER;
+  } else {
+    switch (StateMachine::current()) {
+    case StateMachine::State::ACTIVE_STREAMING:
+      if (!StateMachine::wakeWordAvailable()) {
+        // Open-mic: ACTIVE_STREAMING é permanente, então verde fixo mentiria
+        // dizendo "estou te ouvindo agora" o tempo todo.
+        ui = StatusLed::Ui::DEGRADED;
+      } else if (StateMachine::msSinceVoice() >= LED_THINKING_AFTER_MS) {
+        ui = StatusLed::Ui::THINKING;
+      } else {
+        ui = StatusLed::Ui::LISTENING;
+      }
+      break;
+    case StateMachine::State::RESPONDING:
+      ui = StatusLed::Ui::SPEAKING;
+      break;
+    case StateMachine::State::IDLE_LISTENING:
+    default:
+      ui = StatusLed::Ui::IDLE;
+      break;
+    }
+  }
+
+  StatusLed::set(ui);
+  StatusLed::update();
+}
+
+// ============================================================================
 // Setup / Loop
 // ============================================================================
 void setup() {
@@ -214,6 +279,7 @@ void setup() {
   delay(1200);
   Serial.println("\n=== Luna — Satélite ESP32-S3 (Épico 2) ===");
   Serial.printf("PSRAM: %s\n", psramFound() ? "detectada" : "AUSENTE");
+  Serial.printf("Boot anterior: %s\n", resetReasonStr(esp_reset_reason()));
 
   StatusLed::begin();
   SecretStore::begin();
@@ -306,6 +372,7 @@ void loop() {
   }
 
   StateMachine::update();
+  updateStatusLed();
 
   // Drena a fila de captura, mas com orçamento de tempo. Um `while` sem limite
   // aqui reintroduz um travamento pior que o que ele resolveu: sendAudioChunk()

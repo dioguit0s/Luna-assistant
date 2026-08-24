@@ -9,13 +9,15 @@
 
 | GPIO | Componente | Função | Direção |
 |------|-----------|--------|---------|
-| **GPIO11** | INMP441 | SD (DOUT) — dado do microfone | ESP32 ← INMP441 |
+| **GPIO12** | INMP441 | SD (DOUT) — dado do microfone | ESP32 ← INMP441 |
 | GPIO5 | INMP441 | WS (LRCLK) — word select | ESP32 → INMP441 |
 | GPIO6 | INMP441 | SCK (BCLK) — bit clock | ESP32 → INMP441 |
 | GPIO7 | MAX98357A | DIN — dado de áudio | ESP32 → MAX98357A |
 | **GPIO16** | MAX98357A | BCLK — bit clock | ESP32 → MAX98357A |
 | **GPIO17** | MAX98357A | LRC (WS) — word select | ESP32 → MAX98357A |
-| GPIO10 | LED indicador | Estado de escuta (`ACTIVE_STREAMING`) | ESP32 → LED |
+| GPIO10 | LED RGB | Canal **R** (vermelho) | ESP32 → LED |
+| GPIO13 | LED RGB | Canal **G** (verde) | ESP32 → LED |
+| GPIO14 | LED RGB | Canal **B** (azul) | ESP32 → LED |
 | GPIO2 | Botão físico (pendente) | Trigger — reservado, não conectado nesta rodada | Botão → ESP32 |
 
 > **⚠️ Revisado após validação com hardware real.** O BCLK e o LRC do amplificador
@@ -26,7 +28,12 @@
 >
 > **⚠️ 2026-08-24 — segundo pino perdido.** O SD do microfone era o **GPIO4** e
 > passou a ler silêncio digital absoluto. O pad de entrada do GPIO4 estava
-> danificado; SD→**GPIO11** resolveu. Ver seção 9.
+> danificado; SD→**GPIO12** resolveu. Ver seção 9.
+>
+> **Nota de correção.** Esta tabela dizia GPIO11 (e a mensagem do commit
+> `75bbc49` também), mas `include/config.h` define `MIC_SD 12` — e é esse o
+> firmware que captura áudio. O 11 era erro de redação; o pino real é o **12**,
+> e o **GPIO11 está livre**.
 
 Barramentos I2S separados por design: **I2S0 dedicado ao microfone (RX)**, **I2S1 dedicado ao amplificador (TX)** — nenhum pino é compartilhado entre captura e playback.
 
@@ -38,7 +45,7 @@ Barramentos I2S separados por design: **I2S0 dedicado ao microfone (RX)**, **I2S
 |---|---|---|
 | VDD | 3.3V | |
 | GND | GND | |
-| SD (DOUT) | **GPIO11** | movido do GPIO4 — ver seção 9 |
+| SD (DOUT) | **GPIO12** | movido do GPIO4 — ver seção 9 |
 | WS (LRCLK) | GPIO5 | |
 | SCK (BCLK) | GPIO6 | |
 | L/R | GND | fixa canal esquerdo (captura mono) |
@@ -60,14 +67,132 @@ Barramentos I2S separados por design: **I2S0 dedicado ao microfone (RX)**, **I2S
 
 ---
 
-## 4. LED indicador (estado de escuta)
+## 4. LED RGB indicador de estado
+
+LED RGB discreto de 4 pernas, **cátodo comum** (o comum vai ao GND). Substituiu o
+LED simples de escuta que ocupava só o GPIO10; a lógica é PWM por canal via LEDC,
+com nível alto = aceso.
 
 ```
-GPIO10 → resistor 220–330Ω → anodo (perna longa) do LED
-Catodo (perna curta) do LED → GND
+GPIO10 ──[ 300Ω ]── R
+GPIO13 ──[ 300Ω ]── G     (recomendado trocar para 100Ω — ver abaixo)
+GPIO14 ──[ 300Ω ]── B     (recomendado trocar para 100Ω — ver abaixo)
+                     comum (perna longa) ── GND
 ```
 
-**Lógica no firmware:** `digitalWrite(10, HIGH)` na entrada do estado `ACTIVE_STREAMING`, `digitalWrite(10, LOW)` ao retornar para `IDLE_LISTENING`. Reaproveita as transições de estado já mapeadas na FSM — nenhuma lógica nova além do toggle do pino.
+**Um resistor por canal, nunca um só no comum.** Com resistor único no cátodo a
+corrente se divide entre os canais acesos e a cor muda conforme quantos estão
+ligados — branco sai esverdeado, amarelo sai diferente de vermelho+verde
+separados.
+
+**O verde e o azul pedem resistor menor que o vermelho.** O die vermelho tem
+Vf ≈ 2,0 V contra ≈ 3,0 V dos outros dois, então o mesmo resistor produz correntes
+muito diferentes:
+
+| Canal | Vf típico | com 300Ω | com 100Ω |
+|---|---|---|---|
+| R | ~2,0 V | ~4,3 mA | (manter 300Ω) |
+| G | ~3,0 V | ~1,0 mA | ~3,0 mA |
+| B | ~3,0 V | ~1,0 mA | ~3,0 mA |
+
+A montagem atual usa **300Ω nos três**, o que deixa o vermelho ~4× mais forte e
+domina toda mistura. O ganho por canal em `config.h` (`LED_GAIN_R`) compensa o
+desbalanço no duty do PWM, mas não resolve o problema de fundo: com 300Ω sobram
+só ~0,3 V acima do Vf do verde e do azul, e nessa faixa a corrente vira uma função
+quase vertical do Vf. A variação normal entre peças (3,0 V vs 3,2 V) muda o brilho
+em 3×, e o VOH do pino sob carga come parte dessa folga — é ponto de operação que
+não se calibra de forma estável por software.
+
+**Trocar G e B para 100Ω** (68Ω se quiser mais brilho) e manter 300Ω no vermelho
+põe os três em ~3–4 mA, com folga de tensão suficiente para o brilho ser
+previsível. Todos bem abaixo dos 40 mA absolutos do pino. Feita a troca, ajustar
+`config.h`: `LED_BRIGHTNESS_PCT 55` e `LED_GAIN_R 45`.
+
+**Ordem das pernas conferida** canal a canal em 2026-08-24: GPIO13 = verde,
+GPIO14 = azul, seguindo o encapsulamento padrão **R – comum – G – B**.
+
+**GPIO13 é vizinho do GPIO12 (SD do microfone) no header.** A ordem física do
+header esquerdo é `… 9, 10, 11, 12, 13, 14`, então um canal de PWM chaveando fica
+encostado na linha de dado do I2S de captura. Não houve problema observado, mas
+se o `audio_peak` ficar errático depois desta mudança, este é o primeiro suspeito:
+o teste é deixar o LED apagado e ver se o sintoma some. Se confirmar, mover o
+canal para o header direito (GPIO21, 47, 40–42 estão livres).
+
+### Mapa de estados → cores
+
+Definido em `luna-firmware/src/ui/StatusLed.cpp` (`lookFor`). Quem escolhe o
+estado é `updateStatusLed()` em `main.cpp`, não a FSM: a cor depende de Wi-Fi,
+WebSocket e FSM ao mesmo tempo, e nenhum dos três enxerga os outros.
+
+**Paleta em uso hoje (`LED_NO_GREEN_PALETTE 1`).** Com 300Ω no canal verde ele
+não acende — verificado no hardware, não é estimativa: `LISTENING` (verde puro)
+aparecia como LED apagado e o âmbar de `THINKING` saía vermelho puro. Não sobra
+tensão acima do Vf, e duty de PWM não cria tensão direta. Enquanto os resistores
+não trocam, a paleta usa só vermelho, azul e magenta, e quem separa os estados é
+o **padrão**:
+
+| Estado | Cor | Padrão | Significado |
+|---|---|---|---|
+| `BOOTING` | magenta | respirando 0,8 s | `setup()` ainda rodando |
+| `NO_WIFI` | vermelho | **piscando 0,4 s** | sem associação Wi-Fi |
+| `NO_SERVER` | magenta | **piscando 0,4 s** | Wi-Fi ok, sem `auth_ok` do servidor |
+| `IDLE` | azul fraco | respirando 4 s | repouso — aguardando a wake word |
+| `LISTENING` | magenta | **sólido** | capturando e transmitindo sua voz |
+| `THINKING` | vermelho | respirando 1,2 s | você parou de falar, esperando resposta |
+| `SPEAKING` | azul | respirando 1,6 s | Luna respondendo |
+| `DEGRADED` | magenta | respirando 3 s | open-mic: o detector de wake word não subiu |
+
+As duas falhas piscam com borda dura e rápida — a coisa mais distante de
+"respirar" que o LED sabe fazer. É isso que as separa de `THINKING` e `DEGRADED`,
+que reusam as mesmas cores.
+
+**Paleta cheia (`LED_NO_GREEN_PALETTE 0`),** para depois de trocar os resistores
+do verde e do azul por ~100Ω:
+
+| Estado | Cor | Padrão |
+|---|---|---|
+| `BOOTING` | branco | respirando 1,2 s |
+| `NO_WIFI` | vermelho | piscando 1 s |
+| `NO_SERVER` | âmbar | piscando 2 s |
+| `IDLE` | azul fraco | respirando 4 s |
+| `LISTENING` | **verde** | **sólido** |
+| `THINKING` | âmbar | respirando 1,2 s |
+| `SPEAKING` | ciano | respirando 1,6 s |
+| `DEGRADED` | magenta | respirando 2,5 s |
+
+Definidas em `luna-firmware/src/ui/StatusLed.cpp` (`lookFor`). Quem escolhe o
+estado é `updateStatusLed()` em `main.cpp`, não a FSM: a cor depende de Wi-Fi,
+WebSocket e FSM ao mesmo tempo, e nenhum dos três enxerga os outros.
+
+Falha de conectividade tem prioridade sobre o estado da conversa. Não é
+arbitrário: em `IDLE_LISTENING` sem servidor a wake word ainda dispara e o áudio
+não vai a lugar nenhum, então mostrar "repouso" ali esconderia justamente a
+informação que o usuário precisa.
+
+`LISTENING` é o único estado sólido, de propósito — é o único em que a voz está
+saindo pela rede, e é o que precisa de leitura inequívoca a três metros.
+
+**`THINKING` é inferido, não informado.** O protocolo não tem esse evento: o
+satélite não sabe quando o modelo começou a pensar. O que ele sabe é que parou de
+chegar fala (`StateMachine::msSinceVoice()` acima de `LED_THINKING_AFTER_MS`, 700 ms),
+e nesse ponto a captura continua sendo transmitida normalmente — a mudança é só
+visual. Um estado de verdade exigiria uma mensagem nova nos quatro pontos do
+contrato WS (ver `docs/protocolo-websocket.md`).
+
+**Calibração do vermelho.** Ajuste `LED_GAIN_R` olhando o **magenta de
+`LISTENING`** (diga "Hey Luna" — é o estado mais fácil de provocar e fica sólido
+por segundos, ao contrário do branco do boot, que passa num relance). Suba se
+puxar para azul, desça se puxar para vermelho; o alvo é um roxo/rosa claramente
+diferente do azul do repouso. Com a paleta cheia o alvo passa a ser o branco
+neutro do `BOOTING`.
+
+**Brilho do repouso.** `LED_IDLE_BRIGHTNESS_PCT` é knob separado porque `IDLE` é o
+único estado que fica aceso indefinidamente — inclusive de madrugada, num quarto.
+
+Por que RGB discreto e não WS2812: o addressable gastaria um pino só, mas exige
+3,3 V de dado contra Vih de 3,5 V a 5 V (ou level shifter), e puxa ~60 mA por
+pixel da mesma rail 3V3 do WiFi. Para um indicador de estado com meia dúzia de
+cores fixas, três pinos de PWM saem mais previsíveis.
 
 ---
 
@@ -90,6 +215,14 @@ Relevante ao adicionar o display ILI9341 (SPI) ou outros periféricos nos próxi
 | GPIO43, 44 | UART0 (monitor serial / programação) | Sim, a menos que não precise de debug serial |
 | GPIO33–37 | Reservado em variantes com Octal PSRAM (ex: N16R8) | Confirmar variante da placa antes de usar |
 | GPIO19, 20 | D-/D+ USB nativo (se a placa usa USB-JTAG) | Evitar se for usar USB simultaneamente |
+| GPIO26–32 | Flash SPI interna | Sim, sempre |
+| **GPIO4** | **Pad de entrada danificado** nesta unidade (fuga de ~22 µA) | Sim — ver seção 9 |
+| GPIO8, GPIO9 | Já corromperam o clock do I2S nesta placa (seção 9) | Preferir outros |
+
+**Pinos livres nesta montagem:** 1, 11, 15, 18, 21, 39, 40, 41, 42, 47 e o par
+38/48 (um dos dois é o WS2812 embutido da DevKitC-1, conforme a revisão). Os do
+header direito (21, 40–42, 47) são a melhor escolha para periféricos que chaveiam,
+por ficarem longe das linhas I2S.
 
 ---
 
@@ -104,8 +237,11 @@ Relevante ao adicionar o display ILI9341 (SPI) ou outros periféricos nos próxi
 Firmware em `luna-firmware/` (PlatformIO + Arduino, core 3.x via pioarduino).
 Placa confirmada: **ESP32-S3 N16R8** (`board_build.arduino.memory_type = qio_opi`).
 
-- `src/audio/`: I2S0 (RX, pinos 4/5/6) e I2S1 (TX, pinos 7/16/17) como instâncias separadas. ✅
-- `src/fsm/`: LED (GPIO10) nas transições `IDLE_LISTENING` ↔ `ACTIVE_STREAMING`. ✅
+- `src/audio/`: I2S0 (RX, pinos 12/5/6) e I2S1 (TX, pinos 7/16/17) como instâncias separadas. ✅
+- `src/ui/StatusLed.*`: LED RGB (GPIO10/13/14) em PWM via LEDC, oito estados
+  visuais com padrões de animação. Arbitragem em `main.cpp:updateStatusLed()`. ✅
+- `src/fsm/`: a FSM não aciona mais o LED — só expõe `current()`,
+  `wakeWordAvailable()` e `msSinceVoice()`. ✅
 - Trigger atual é **open-mic** (sem botão); a FSM já está estruturada para o botão e o wake word. ✅
 - Segredo de auth armazenado na **NVS** (`src/ws/SecretStore.cpp`); `secrets.h` só provisiona o primeiro boot. ✅
 
