@@ -1033,6 +1033,26 @@ describe('Orchestrator: ringOnce (chime)', () => {
     assert.equal(harness.sent.length, antes, 'ringOnce não deveria ter enfileirado nada por cima do turno');
   });
 
+  it('fallback de dispensa: qualquer conversa na sala durante o toque desliga o alarme', async () => {
+    // Ter falado com a Luna já prova que a pessoa acordou. Cobre o caso de o
+    // modelo simplesmente não chamar `manage_reminders`.
+    const store = harness.reminderStore;
+    const criado = store.insertOnce({ roomId: ROOM_ID, label: null, dueAtUtc: Date.now() });
+    store.markRinging(criado.id, criado.nextDueUtc);
+
+    const ringer = harness.orchestrator.getAlarmRinger();
+    const ciclo = ringer.ring(store.get(criado.id)!);
+    await Promise.resolve();
+    assert.equal(ringer.isRinging(ROOM_ID), true);
+
+    await feedAudio(harness);
+    harness.provider.emitTurnComplete({ userText: 'já acordei', assistantText: 'Bom dia.' });
+    await ciclo;
+
+    assert.equal(ringer.isRinging(ROOM_ID), false);
+    assert.equal(store.get(criado.id)!.status, 'done');
+  });
+
   it('não interrompe o usuário: com fala recente na sala, devolve 0 e não enfileira nada', async () => {
     // `speaking_start` faz o firmware dar xQueueReset(txQueue): uma rajada no
     // meio da frase corta o comando e o provider recebe meia pergunta.

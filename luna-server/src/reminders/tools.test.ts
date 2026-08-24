@@ -1,6 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { SET_REMINDER_TOOL, isSetReminderArgs } from './tools.js';
+import {
+  SET_REMINDER_TOOL,
+  isSetReminderArgs,
+  MANAGE_REMINDERS_TOOL,
+  isManageRemindersArgs,
+} from './tools.js';
 
 describe('isSetReminderArgs', () => {
   it('aceita args vazios (label ausente, sem in_seconds/at_time — a exclusividade é do resolveOnce)', () => {
@@ -53,5 +58,36 @@ describe('SET_REMINDER_TOOL', () => {
       'sat',
       'sun',
     ]);
+  });
+});
+
+describe('isManageRemindersArgs', () => {
+  it('aceita as duas ações do marco 7, com e sem minutes', () => {
+    assert.equal(isManageRemindersArgs({ action: 'dismiss' }), true);
+    assert.equal(isManageRemindersArgs({ action: 'snooze' }), true);
+    assert.equal(isManageRemindersArgs({ action: 'snooze', minutes: 5 }), true);
+  });
+
+  it('rejeita ação ausente, fora do enum, ou minutes que não é número', () => {
+    assert.equal(isManageRemindersArgs({}), false);
+    // `cancel` e `list` só entram no marco 10 — até lá o guard os rejeita em
+    // vez de aceitar uma ação que o handler não sabe executar.
+    assert.equal(isManageRemindersArgs({ action: 'cancel' }), false);
+    assert.equal(isManageRemindersArgs({ action: 'list' }), false);
+    assert.equal(isManageRemindersArgs({ action: 'snooze', minutes: '5' }), false);
+  });
+});
+
+describe('MANAGE_REMINDERS_TOOL', () => {
+  it('schema é plano, com action em enum explícito e obrigatório', () => {
+    for (const [name, prop] of Object.entries(MANAGE_REMINDERS_TOOL.parameters.properties)) {
+      const schema = prop as { type: string };
+      assert.notEqual(schema.type, 'array', `${name} não pode ser array`);
+      assert.notEqual(schema.type, 'object', `${name} não pode ser objeto`);
+    }
+
+    const action = MANAGE_REMINDERS_TOOL.parameters.properties.action as { enum?: string[] };
+    assert.deepEqual(action.enum, ['dismiss', 'snooze']);
+    assert.deepEqual(MANAGE_REMINDERS_TOOL.parameters.required, ['action']);
   });
 });

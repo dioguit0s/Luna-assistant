@@ -85,3 +85,71 @@ export function isSetReminderArgs(
 
   return true;
 }
+
+/**
+ * Ações que o marco 7 embarca. `list` e `cancel` entram no marco 10
+ * **alargando** este enum — alargar é retrocompatível para o modelo, e embarcar
+ * agora duas ações que respondem "ainda não sei fazer isso" gastaria orçamento
+ * de instrução da sessão Live (decisão 15 do plano, o vetor de TTFAB) e
+ * ensinaria o modelo a chamar a tool para nada.
+ */
+const MANAGE_ACTIONS = ['dismiss', 'snooze'] as const;
+
+export type ManageAction = (typeof MANAGE_ACTIONS)[number];
+
+/**
+ * Segunda tool do vocabulário de lembretes. Duas, e não cinco (`set`, `list`,
+ * `cancel`, `snooze`, `dismiss`): cada schema entra no orçamento de instrução
+ * da sessão e sobe o `model_decision_ms` — e com `geminiThinkingBudget: 0` o
+ * modelo não tem folga para deliberar.
+ *
+ * `dismiss` e `snooze` agem sobre o alarme que está tocando **naquela sala**, e
+ * por isso não pedem id: o modelo não tem como saber qual é. O system prompt
+ * foi congelado no `connect`, antes de o alarme existir, então injetar uma nota
+ * quando o toque começa não é opção.
+ */
+export const MANAGE_REMINDERS_TOOL: ToolDefinition = {
+  name: 'manage_reminders',
+  description:
+    'Age sobre o alarme que está TOCANDO agora neste cômodo. Use "dismiss" ' +
+    'quando pedirem para parar, desligar ou calar o alarme, e "snooze" para ' +
+    'adiar ("mais cinco minutos", "soneca", "me chama de novo daqui a pouco"). ' +
+    'Não serve para cancelar um lembrete que ainda não tocou. Se nada estiver ' +
+    'tocando, a ferramenta avisa — não invente que desligou.',
+  parameters: {
+    type: 'object',
+    properties: {
+      action: {
+        type: 'string',
+        enum: [...MANAGE_ACTIONS],
+        description: 'dismiss para parar o alarme, snooze para adiar.',
+      },
+      minutes: {
+        type: 'number',
+        description: 'Só para snooze: de 1 a 60 minutos. Ausente vira 5.',
+      },
+    },
+    required: ['action'],
+  },
+};
+
+export interface ManageRemindersArgs {
+  action: ManageAction;
+  minutes?: number;
+}
+
+/**
+ * Mesma paranoia de `isSetReminderArgs`: confere só *forma*. O clamp de
+ * `minutes` é do `AlarmRinger`, que devolve o valor efetivamente aplicado para
+ * a Luna confirmar em voz o que foi feito, não o que foi pedido.
+ */
+export function isManageRemindersArgs(
+  args: Record<string, unknown>,
+): args is Record<string, unknown> & ManageRemindersArgs {
+  const { action, minutes } = args;
+
+  if (!MANAGE_ACTIONS.includes(action as ManageAction)) return false;
+  if (minutes !== undefined && typeof minutes !== 'number') return false;
+
+  return true;
+}

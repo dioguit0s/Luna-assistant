@@ -4,9 +4,10 @@ import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { createControlDeviceHandler } from './tools/controlDevice.js';
 import { createSetReminderHandler } from './tools/setReminder.js';
+import { createManageRemindersHandler } from './tools/manageReminders.js';
 import { INVALID_ARGS_RESULT, type ToolContext, type ToolHandler } from './tools/types.js';
 import { CHIME_PCM16 } from '../reminders/chime.js';
-import { SET_REMINDER_TOOL } from '../reminders/tools.js';
+import { SET_REMINDER_TOOL, MANAGE_REMINDERS_TOOL } from '../reminders/tools.js';
 import type { ReminderStore } from '../reminders/ReminderStore.js';
 import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import { AlarmRinger, type AlarmAudioSink, type BurstResult } from '../reminders/AlarmRinger.js';
@@ -185,6 +186,10 @@ export class Orchestrator implements AlarmAudioSink {
           reminderMaxPerRoom: config.reminderMaxPerRoom,
         }),
       ],
+      [
+        MANAGE_REMINDERS_TOOL.name,
+        createManageRemindersHandler({ ringer: this.alarmRinger }),
+      ],
     ]);
 
     // O bind dos callbacks passa a acontecer na criação da sessão, não no
@@ -334,6 +339,13 @@ export class Orchestrator implements AlarmAudioSink {
       }
 
       this.endSpeaking(roomId);
+
+      // Fallback obrigatório do plano: ter conversado com a Luna já prova que a
+      // pessoa acordou. Se o modelo não chamou `manage_reminders` — ou chamou
+      // outra coisa, ou só conversou —, o fim do turno dispensa o alarme da
+      // sala assim mesmo. No-op quando nada toca, e idempotente quando o
+      // próprio modelo já dispensou (o ciclo já saiu do mapa).
+      this.alarmRinger.dismiss(roomId, 'turn_complete');
 
       tracker.reset();
     });
