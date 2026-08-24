@@ -172,7 +172,8 @@ function resolveRule(
   return { ok: true, rule: repeat };
 }
 
-function spokenRule(rule: RepeatRule): string {
+/** "todo dia útil", "toda sexta" — o rótulo falável de uma regra de repetição. */
+export function spokenRule(rule: RepeatRule): string {
   const fixo = REPEAT_LABEL_PT[rule];
   if (fixo) return fixo;
 

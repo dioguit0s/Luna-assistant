@@ -68,13 +68,19 @@ describe('isManageRemindersArgs', () => {
     assert.equal(isManageRemindersArgs({ action: 'snooze', minutes: 5 }), true);
   });
 
-  it('rejeita ação ausente, fora do enum, ou minutes que não é número', () => {
+  it('aceita os filtros de cancelamento', () => {
+    assert.equal(isManageRemindersArgs({ action: 'list' }), true);
+    assert.equal(isManageRemindersArgs({ action: 'cancel', at_time: '07:00' }), true);
+    assert.equal(isManageRemindersArgs({ action: 'cancel', label: 'remédio' }), true);
+    assert.equal(isManageRemindersArgs({ action: 'cancel', reminder_id: 'A7K3' }), true);
+  });
+
+  it('rejeita ação ausente, fora do enum, ou campo com tipo errado', () => {
     assert.equal(isManageRemindersArgs({}), false);
-    // `cancel` e `list` só entram no marco 10 — até lá o guard os rejeita em
-    // vez de aceitar uma ação que o handler não sabe executar.
-    assert.equal(isManageRemindersArgs({ action: 'cancel' }), false);
-    assert.equal(isManageRemindersArgs({ action: 'list' }), false);
+    assert.equal(isManageRemindersArgs({ action: 'reschedule' }), false);
     assert.equal(isManageRemindersArgs({ action: 'snooze', minutes: '5' }), false);
+    assert.equal(isManageRemindersArgs({ action: 'cancel', at_time: 7 }), false);
+    assert.equal(isManageRemindersArgs({ action: 'cancel', label: ['remédio'] }), false);
   });
 });
 
@@ -87,7 +93,7 @@ describe('MANAGE_REMINDERS_TOOL', () => {
     }
 
     const action = MANAGE_REMINDERS_TOOL.parameters.properties.action as { enum?: string[] };
-    assert.deepEqual(action.enum, ['dismiss', 'snooze']);
+    assert.deepEqual(action.enum, ['dismiss', 'snooze', 'list', 'cancel']);
     assert.deepEqual(MANAGE_REMINDERS_TOOL.parameters.required, ['action']);
   });
 });

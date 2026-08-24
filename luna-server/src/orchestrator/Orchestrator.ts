@@ -188,7 +188,16 @@ export class Orchestrator implements AlarmAudioSink {
       ],
       [
         MANAGE_REMINDERS_TOOL.name,
-        createManageRemindersHandler({ ringer: this.alarmRinger }),
+        createManageRemindersHandler({
+          ringer: this.alarmRinger,
+          store: reminderStore,
+          getScheduler: () => {
+            if (!this.reminderScheduler) {
+              throw new Error('ReminderScheduler ainda não registrado no Orchestrator');
+            }
+            return this.reminderScheduler;
+          },
+        }),
       ],
     ]);
 

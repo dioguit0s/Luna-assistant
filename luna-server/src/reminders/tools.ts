@@ -107,13 +107,14 @@ export function isSetReminderArgs(
 }
 
 /**
- * Ações que o marco 7 embarca. `list` e `cancel` entram no marco 10
- * **alargando** este enum — alargar é retrocompatível para o modelo, e embarcar
- * agora duas ações que respondem "ainda não sei fazer isso" gastaria orçamento
- * de instrução da sessão Live (decisão 15 do plano, o vetor de TTFAB) e
- * ensinaria o modelo a chamar a tool para nada.
+ * As quatro ações de gerenciamento, numa tool só.
+ *
+ * Uma tool com `action: enum` em vez de quatro tools separadas: cada schema
+ * entra no orçamento de instrução da sessão Live e sobe o `model_decision_ms`,
+ * e com `geminiThinkingBudget: 0` o modelo não tem folga para deliberar. Mais
+ * tools também sobem o falso-positivo em conversa fiada.
  */
-const MANAGE_ACTIONS = ['dismiss', 'snooze'] as const;
+const MANAGE_ACTIONS = ['dismiss', 'snooze', 'list', 'cancel'] as const;
 
 export type ManageAction = (typeof MANAGE_ACTIONS)[number];
 
@@ -131,22 +132,40 @@ export type ManageAction = (typeof MANAGE_ACTIONS)[number];
 export const MANAGE_REMINDERS_TOOL: ToolDefinition = {
   name: 'manage_reminders',
   description:
-    'Age sobre o alarme que está TOCANDO agora neste cômodo. Use "dismiss" ' +
-    'quando pedirem para parar, desligar ou calar o alarme, e "snooze" para ' +
-    'adiar ("mais cinco minutos", "soneca", "me chama de novo daqui a pouco"). ' +
-    'Não serve para cancelar um lembrete que ainda não tocou. Se nada estiver ' +
-    'tocando, a ferramenta avisa — não invente que desligou.',
+    'Consulta e mexe nos lembretes deste cômodo. "dismiss" e "snooze" agem no ' +
+    'alarme que está TOCANDO agora — para parar ("para o alarme") e para adiar ' +
+    '("mais cinco minutos", "soneca"). "list" diz quais lembretes existem ' +
+    '("quais alarmes eu tenho?"). "cancel" apaga um lembrete que ainda não ' +
+    'tocou ("cancela o das 7", "tira o do remédio"), identificado por horário ' +
+    'ou pelo texto. Se nada estiver tocando, dismiss e snooze avisam — não ' +
+    'invente que desligou.',
   parameters: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
         enum: [...MANAGE_ACTIONS],
-        description: 'dismiss para parar o alarme, snooze para adiar.',
+        description:
+          'dismiss para parar o alarme que toca agora, snooze para adiá-lo, ' +
+          'list para dizer quais existem, cancel para apagar um que ainda não tocou.',
       },
       minutes: {
         type: 'number',
         description: 'Só para snooze: de 1 a 60 minutos. Ausente vira 5.',
+      },
+      reminder_id: {
+        type: 'string',
+        description: 'Só para cancel: o código curto que o list devolveu.',
+      },
+      at_time: {
+        type: 'string',
+        description:
+          'Só para cancel: o horário do lembrete, "HH:MM" 24h ("cancela o das 7" → 07:00).',
+      },
+      label: {
+        type: 'string',
+        description:
+          'Só para cancel: parte do texto do lembrete ("cancela o do remédio" → remédio).',
       },
     },
     required: ['action'],
@@ -156,6 +175,9 @@ export const MANAGE_REMINDERS_TOOL: ToolDefinition = {
 export interface ManageRemindersArgs {
   action: ManageAction;
   minutes?: number;
+  reminder_id?: string;
+  at_time?: string;
+  label?: string;
 }
 
 /**
@@ -166,10 +188,13 @@ export interface ManageRemindersArgs {
 export function isManageRemindersArgs(
   args: Record<string, unknown>,
 ): args is Record<string, unknown> & ManageRemindersArgs {
-  const { action, minutes } = args;
+  const { action, minutes, reminder_id: reminderId, at_time: atTime, label } = args;
 
   if (!MANAGE_ACTIONS.includes(action as ManageAction)) return false;
   if (minutes !== undefined && typeof minutes !== 'number') return false;
+  if (reminderId !== undefined && typeof reminderId !== 'string') return false;
+  if (atTime !== undefined && typeof atTime !== 'string') return false;
+  if (label !== undefined && typeof label !== 'string') return false;
 
   return true;
 }
