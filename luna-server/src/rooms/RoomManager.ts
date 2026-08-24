@@ -40,6 +40,18 @@ export class RoomManager {
     this.bindProvider = bind;
   }
 
+  /**
+   * A sessão viva do cômodo, ou `null` se não há — **sem criar uma**.
+   *
+   * A pré-renderização da fala de lembrete usa isto: ela só faz sentido
+   * aproveitando a sessão que já existe (o usuário acabou de falar). Abrir uma
+   * sessão nova só para renderizar pagaria `connect` e cota por um áudio que
+   * ninguém está esperando.
+   */
+  getExistingProvider(roomId: string): IAudioProvider | null {
+    return this.sessions.get(roomId)?.provider ?? null;
+  }
+
   async getOrCreateProvider(roomId: string): Promise<IAudioProvider> {
     const existing = this.sessions.get(roomId);
     if (existing) {

@@ -2,7 +2,7 @@ import type { Reminder, ReminderStore } from './ReminderStore.js';
 import type { ReminderScheduler } from './ReminderScheduler.js';
 import type { NowFn } from '../time/clock.js';
 import { systemNow } from '../time/clock.js';
-import { CHIME_DURATION_MS } from './chime.js';
+import { CHIME_DURATION_MS, SAMPLE_RATE_HZ } from './chime.js';
 import { getLogger } from '../logging/logger.js';
 
 /**
@@ -34,8 +34,12 @@ export interface AlarmAudioSink {
    * `force` ignora **só** a guarda de fala do usuário (ver `RING_MAX_DEFER_MS`).
    * Um turno da própria Luna em voo continua bloqueando de qualquer jeito:
    * empurrar o chime por cima intercalaria frames no meio da resposta dela.
+   *
+   * `speech`, quando presente, é PCM16 16 kHz já renderizado, enfileirado
+   * **depois** do chime na mesma rajada — o bipe primeiro, para a pessoa
+   * orientar a atenção antes da frase começar.
    */
-  ringBurst(roomId: string, force?: boolean): BurstResult;
+  ringBurst(roomId: string, force?: boolean, speech?: Buffer | null): BurstResult;
 }
 
 /** Por que o ciclo terminou. */
@@ -65,6 +69,15 @@ export const RING_MAX_DEFER_MS = 3_000;
 
 /** Espera entre duas tentativas quando a rajada está adiada pelo barge-in. */
 const RING_DEFER_RETRY_MS = 1_000;
+
+/**
+ * A cada quantas rajadas a fala do lembrete se repete.
+ *
+ * A primeira leva chime + fala; as seguintes só o chime. Repetir a frase
+ * inteira a cada volta do ciclo (~7 s) é hostil — mas nunca repetir faz quem
+ * acordou no meio não saber do que se trata.
+ */
+const RING_SPEECH_EVERY_N_BURSTS = 4;
 
 export interface AlarmRingerOptions {
   store: ReminderStore;
@@ -102,6 +115,8 @@ interface RingCycle {
   timer: NodeJS.Timeout | null;
   done: boolean;
   snoozeUntil: number | null;
+  /** PCM da fala, lido do banco na primeira vez. `undefined` = ainda não olhei. */
+  speech?: Buffer | null;
   resolve: () => void;
 }
 
@@ -299,7 +314,7 @@ export class AlarmRinger {
     // cômodo que nunca silencia (o `--mic` do cliente de teste, o desktop) não
     // pode significar um alarme que nunca toca.
     const force = cycle.deferredMs >= RING_MAX_DEFER_MS;
-    const result = this.sink.ringBurst(cycle.roomId, force);
+    const result = this.sink.ringBurst(cycle.roomId, force, this.speechForBurst(cycle));
 
     if (result === 'busy') {
       // Uma rajada agora cortaria a frase pelo `xQueueReset(txQueue)` do
@@ -337,11 +352,26 @@ export class AlarmRinger {
     cycle.deferredMs = 0;
     cycle.lastBurstAt = this.now().getTime();
 
-    // Próxima rajada depois do bipe inteiro mais a janela de escuta. A fila de
-    // áudio é paceada em `AUDIO_FRAME_INTERVAL_MS` por frame, então drenar o
-    // chime leva a própria duração dele — nada de esperar confirmação, que o
-    // protocolo não tem (nenhum MessageType novo na v1).
-    this.schedule(cycle, CHIME_DURATION_MS + this.listenWindowMs);
+    // Próxima rajada depois da rajada inteira mais a janela de escuta. A fila de
+    // áudio é paceada em `AUDIO_FRAME_INTERVAL_MS` por frame, então drenar leva
+    // a própria duração do áudio — nada de esperar confirmação, que o protocolo
+    // não tem (nenhum MessageType novo na v1).
+    this.schedule(cycle, this.lastBurstDurationMs(cycle) + this.listenWindowMs);
+  }
+
+  /**
+   * O PCM da fala, quando é a vez de repeti-la.
+   *
+   * Sem BLOB renderizado, devolve `null` e o ciclo vira só-chime — degradação
+   * silenciosa de propósito: um alarme que bipa sempre vale mais que um que
+   * fala às vezes, e o disparo nunca pode depender de o provider estar no ar.
+   */
+  private speechForBurst(cycle: RingCycle): Buffer | null {
+    if (cycle.burstCount % RING_SPEECH_EVERY_N_BURSTS !== 0) return null;
+    if (cycle.speech === undefined) {
+      cycle.speech = this.store.getAudio(cycle.reminderId);
+    }
+    return cycle.speech;
   }
 
   /**
@@ -375,6 +405,18 @@ export class AlarmRinger {
       `${cycle.originRoomId} está mudo: alarme ${cycle.shortId} tocando em ${cycle.roomId}`,
     );
     return true;
+  }
+
+  /**
+   * Quanto tempo a rajada que acabou de sair leva para tocar: o bipe mais a
+   * fala, quando ela foi junto. Cortar a janela antes de o áudio terminar
+   * faria a rajada seguinte atropelar a fala desta.
+   */
+  private lastBurstDurationMs(cycle: RingCycle): number {
+    const falaEnviada = (cycle.burstCount - 1) % RING_SPEECH_EVERY_N_BURSTS === 0;
+    const falaMs =
+      falaEnviada && cycle.speech ? (cycle.speech.length / 2 / SAMPLE_RATE_HZ) * 1000 : 0;
+    return CHIME_DURATION_MS + Math.ceil(falaMs);
   }
 
   private schedule(cycle: RingCycle, delayMs: number): void {
@@ -412,6 +454,10 @@ export class AlarmRinger {
       if (atual && atual.status === 'ringing') {
         this.closeInStore(cycle, atual, outcome, now);
       }
+      // O `ON DELETE CASCADE` de `reminder_audio` nunca dispara: lembrete não é
+      // DELETEado em lugar nenhum, só muda de status. Sem esta poda, o áudio de
+      // tudo que já tocou ficaria no banco para sempre.
+      this.store.pruneAudio();
     } catch (err: unknown) {
       // Uma falha do SQLite não pode deixar a vaga de `firingRooms` presa: a
       // sala ficaria bloqueada até o restart.

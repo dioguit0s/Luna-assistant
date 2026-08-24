@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '../config/env.js';
 import { createLogger } from '../logging/logger.js';
-import { ReminderStore } from './ReminderStore.js';
+import { ReminderStore, MAX_REMINDER_AUDIO_BYTES } from './ReminderStore.js';
 
 // Só `logLevel` importa para o `createLogger`; montar um AppConfig inteiro aqui
 // só somaria mais um literal à lista dos que quebram a cada campo novo.
@@ -269,3 +269,77 @@ function userVersion(dbPath: string): number {
     db.close();
   }
 }
+
+describe('ReminderStore: áudio pré-renderizado', () => {
+  let store: ReminderStore;
+
+  before(() => {
+    createLogger(silentConfig);
+  });
+
+  beforeEach(() => {
+    store = ReminderStore.open(':memory:');
+  });
+
+  afterEach(() => {
+    store.close();
+  });
+
+  function criar(label: string | null = 'remédio'): number {
+    return store.insertOnce({ roomId: 'sala_de_estar', label, dueAtUtc: Date.now() + 60_000 }).id;
+  }
+
+  it('guarda e devolve o PCM como Buffer, não como Uint8Array cru', () => {
+    const id = criar();
+    const pcm = Buffer.from([1, 2, 3, 4]);
+
+    store.putAudio(id, pcm);
+
+    const lido = store.getAudio(id);
+    assert.ok(Buffer.isBuffer(lido));
+    assert.deepEqual(lido, pcm);
+  });
+
+  it('sem áudio devolve null — é o sinal de degradar para só-chime', () => {
+    assert.equal(store.getAudio(criar()), null);
+  });
+
+  it('re-renderizar sobrescreve: um lembrete tem uma fala só', () => {
+    const id = criar();
+    store.putAudio(id, Buffer.from([1, 1]));
+    store.putAudio(id, Buffer.from([2, 2, 2, 2]));
+
+    assert.deepEqual(store.getAudio(id), Buffer.from([2, 2, 2, 2]));
+  });
+
+  it('recusa BLOB acima do teto em vez de encher o disco em silêncio', () => {
+    const id = criar();
+    assert.throws(() => store.putAudio(id, Buffer.alloc(MAX_REMINDER_AUDIO_BYTES + 1)));
+  });
+
+  it('a poda apaga o áudio do que não vai mais tocar, e só dele', () => {
+    const vivo = criar('vivo');
+    const encerrado = criar('encerrado');
+    store.putAudio(vivo, Buffer.from([1]));
+    store.putAudio(encerrado, Buffer.from([2]));
+
+    // O CASCADE da tabela nunca dispara: lembrete não é DELETEado, só muda de
+    // status. Sem a poda explícita, este áudio ficaria para sempre.
+    store.markStatus(encerrado, 'done');
+    const podados = store.pruneAudio();
+
+    assert.equal(podados, 1);
+    assert.equal(store.getAudio(encerrado), null);
+    assert.deepEqual(store.getAudio(vivo), Buffer.from([1]));
+  });
+
+  it('lembrete tocando conta como vivo: a poda não apaga a fala no meio do toque', () => {
+    const id = criar();
+    store.putAudio(id, Buffer.from([1]));
+    store.markRinging(id, Date.now() + 60_000);
+
+    store.pruneAudio();
+
+    assert.notEqual(store.getAudio(id), null);
+  });
+});

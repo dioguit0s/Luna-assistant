@@ -12,7 +12,7 @@
  */
 
 /** Mesma taxa do áudio de resposta (AUDIO_RESPONSE_SAMPLE_RATE_HZ em Orchestrator.ts) e do firmware (config.h SAMPLE_RATE). */
-const SAMPLE_RATE_HZ = 16_000;
+export const SAMPLE_RATE_HZ = 16_000;
 
 /**
  * 1200 Hz: o mesmo tom do chirp local de wake word do firmware

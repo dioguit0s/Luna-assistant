@@ -155,6 +155,15 @@ class FakeAudioProvider implements IAudioProvider {
     this.nextResult = null;
   }
 
+  /** Registra as instruções de `speak` para o teste inspecionar. */
+  readonly spoken: string[] = [];
+  speakResult = true;
+
+  async speak(instruction: string): Promise<boolean> {
+    this.spoken.push(instruction);
+    return this.speakResult;
+  }
+
   async disconnect(): Promise<void> {}
 
   /**
@@ -250,6 +259,8 @@ function buildHarness(
     },
     getRingBuffer: () => ringBuffer,
     evictRoom: (roomId: string) => evictRoomCalls.push(roomId),
+    // A pré-renderização só aproveita sessão existente — nunca abre uma nova.
+    getExistingProvider: () => (bound ? provider : null),
   } as unknown as RoomManager;
 
   const { fetchImpl, calls } = mockFetch(respond);
@@ -1139,6 +1150,134 @@ describe('Orchestrator: ringOnce (chime)', () => {
       0,
       'um segundo ringOnce logo depois do primeiro não deveria ser bloqueado por speakingByRoom preso',
     );
+  });
+});
+
+describe('Orchestrator: pré-renderização da fala do lembrete', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+  });
+
+  it('captura o áudio da fala sem deixar vazar um frame sequer para o cômodo', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'tomar o remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'tomar o remédio',
+    );
+    await Promise.resolve();
+
+    harness.provider.emitAudioResponse(Buffer.from([1, 2, 3, 4]));
+    harness.provider.emitAudioResponse(Buffer.from([5, 6]));
+    harness.provider.emitTurnComplete({ assistantText: 'Está na hora: tomar o remédio.' });
+
+    assert.equal(await renderizando, true);
+    assert.deepEqual(
+      harness.reminderStore.getAudio(criado.id),
+      Buffer.from([1, 2, 3, 4, 5, 6]),
+    );
+    // Isto é o ponto: o áudio da renderização não pode sair pelo alto-falante.
+    assert.deepEqual(harness.sent, []);
+  });
+
+  it('a instrução pede a frase literal e passa o label pelo speak do provider', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'regar as plantas',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'regar as plantas',
+    );
+    await Promise.resolve();
+    harness.provider.emitAudioResponse(Buffer.from([1]));
+    harness.provider.emitTurnComplete({});
+    await renderizando;
+
+    assert.equal(harness.provider.spoken.length, 1);
+    assert.match(harness.provider.spoken[0]!, /regar as plantas/);
+    assert.match(harness.provider.spoken[0]!, /exatamente/i);
+  });
+
+  it('o turno da renderização não suja o histórico da conversa', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(ROOM_ID, criado.id, 'remédio');
+    await Promise.resolve();
+    harness.provider.emitAudioResponse(Buffer.from([1]));
+    // O turnComplete da renderização vem com userText vazio: appendTurn aqui
+    // encheria o ring buffer de falas que ninguém disse.
+    harness.provider.emitTurnComplete({ assistantText: 'Está na hora: remédio.' });
+    await renderizando;
+
+    assert.deepEqual(harness.orchestrator['roomManager'].getRingBuffer().getHistory(ROOM_ID), []);
+  });
+
+  it('speak recusado pelo provider degrada para só-chime, sem pendurar a sala', async () => {
+    await harness.startSession();
+    harness.provider.speakResult = false;
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizado = await harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'remédio',
+    );
+
+    assert.equal(renderizado, false);
+    assert.equal(harness.reminderStore.getAudio(criado.id), null);
+
+    // E a sala volta a funcionar normalmente: sem isto ela ficaria em modo
+    // captura para sempre e nenhuma resposta sairia mais pelo alto-falante.
+    harness.provider.emitAudioResponse(Buffer.from([9, 9]));
+    assert.ok(harness.sent.length > 0);
+  });
+
+  it('sem sessão viva não tenta nada — pré-render não abre sessão de provider', async () => {
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizado = await harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'remédio',
+    );
+
+    assert.equal(renderizado, false);
+    assert.equal(harness.provider.spoken.length, 0);
   });
 });
 

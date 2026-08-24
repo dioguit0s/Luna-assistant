@@ -89,6 +89,33 @@ if [[ -L "$CURRENT_LINK" ]]; then
   log "release atual: $PREVIOUS_RELEASE"
 fi
 
+# Backup do banco de lembretes ANTES de subir a release nova.
+#
+# O rollback de codigo nao desfaz uma migracao de schema: o ReminderStore
+# recusa abrir um banco com user_version maior que o numero de migracoes que
+# ele conhece (e falha rapido de proposito, para nao operar em cima de schema
+# que nao entende). Sem este backup, uma release nova que migra o schema e
+# depois falha o health check derruba o servico duas vezes -- a segunda no
+# rollback, que nao consegue mais abrir o banco.
+#
+# Usa `sqlite3 .backup` quando disponivel: um `cp` de banco em WAL pode pegar
+# um snapshot inconsistente com o -wal ao lado.
+DB_PATH="${LUNA_DB_PATH:-/var/lib/luna-server/luna.db}"
+DB_BACKUP="$DB_PATH.pre-$(date +%Y%m%d-%H%M%S)"
+if [[ -f "$DB_PATH" ]]; then
+  if command -v sqlite3 >/dev/null 2>&1; then
+    if sqlite3 "$DB_PATH" ".backup '$DB_BACKUP'" 2>/dev/null; then
+      log "backup do banco: $DB_BACKUP"
+    else
+      log "AVISO: backup do banco falhou -- rollback pode nao conseguir abrir o banco migrado."
+    fi
+  else
+    cp -p "$DB_PATH" "$DB_BACKUP" && log "backup do banco (cp): $DB_BACKUP"
+  fi
+  # Mantem os 5 mais recentes: o diretorio de estado nao pode crescer sem fim.
+  ls -1t "$DB_PATH".pre-* 2>/dev/null | tail -n +6 | xargs -r rm -f
+fi
+
 # Troca atomica: ln -sfn sozinho nao e atomico quando o alvo ja existe.
 swap_to() {
   local target="$1"

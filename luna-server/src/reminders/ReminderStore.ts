@@ -114,7 +114,35 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
         ON reminders (room_id, status);
     `);
   },
+  /**
+   * PCM16 pré-renderizado da fala de cada lembrete.
+   *
+   * Tabela nova, nenhuma coluna existente tocada: é o formato de migração que a
+   * versão anterior consegue ignorar sem quebrar. Mas atenção ao inverso — a
+   * versão anterior **não** consegue abrir um banco com `user_version` maior
+   * que o número de migrações que ela conhece (ver `migrate`), então esta é a
+   * primeira migração que torna o rollback do `activate.sh` letal se o banco
+   * não tiver backup. O `activate.sh` copia o `.db` antes de trocar o symlink
+   * justamente por isso.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS reminder_audio (
+        reminder_id INTEGER PRIMARY KEY REFERENCES reminders(id) ON DELETE CASCADE,
+        pcm16_16k   BLOB    NOT NULL,
+        rendered_at INTEGER NOT NULL
+      );
+    `);
+  },
 ];
+
+/**
+ * Teto do BLOB de um lembrete: ~16 s de fala a 16 kHz.
+ *
+ * O `label` já é capado em 200 caracteres na criação, então isto é rede de
+ * segurança contra resposta desgovernada do modelo, não o limite normal.
+ */
+export const MAX_REMINDER_AUDIO_BYTES = 512 * 1024;
 
 /** Nunca `SELECT *`: a ordem e o conjunto de colunas ficam explícitos aqui. */
 const REMINDER_COLUMNS = `
@@ -374,6 +402,52 @@ export class ReminderStore {
     this.stmt(
       `UPDATE reminders SET status = 'armed', next_due_utc = ?, updated_at = ? WHERE id = ?`,
     ).run(nextDueUtc, now, id);
+  }
+
+  /**
+   * Guarda o PCM16 já renderizado da fala deste lembrete. Sobrescreve o
+   * anterior: um lembrete tem uma fala só.
+   */
+  putAudio(reminderId: number, pcm16: Buffer, now = Date.now()): void {
+    if (pcm16.length > MAX_REMINDER_AUDIO_BYTES) {
+      throw new Error(
+        `Áudio de lembrete com ${pcm16.length}B acima do teto de ${MAX_REMINDER_AUDIO_BYTES}B`,
+      );
+    }
+    this.stmt(
+      `INSERT INTO reminder_audio (reminder_id, pcm16_16k, rendered_at)
+            VALUES (?, ?, ?)
+       ON CONFLICT(reminder_id) DO UPDATE SET pcm16_16k = excluded.pcm16_16k,
+                                              rendered_at = excluded.rendered_at`,
+    ).run(reminderId, pcm16, now);
+  }
+
+  /** `null` quando não houve pré-renderização — o toque degrada para só-chime. */
+  getAudio(reminderId: number): Buffer | null {
+    const row = this.stmt('SELECT pcm16_16k FROM reminder_audio WHERE reminder_id = ?').get(
+      reminderId,
+    ) as { pcm16_16k?: Uint8Array } | undefined;
+
+    // `node:sqlite` devolve BLOB como Uint8Array; o resto do servidor fala Buffer.
+    return row?.pcm16_16k ? Buffer.from(row.pcm16_16k) : null;
+  }
+
+  /**
+   * Poda o áudio de lembretes que não vão mais tocar.
+   *
+   * O `ON DELETE CASCADE` da tabela **nunca dispara**: lembrete não é
+   * `DELETE`ado em lugar nenhum, só muda de `status`. Sem esta poda explícita o
+   * áudio de tudo que já tocou, foi cancelado ou perdido ficaria no banco para
+   * sempre — 480 KB por lembrete, num diretório de estado que ninguém olha.
+   *
+   * @returns quantas linhas foram podadas.
+   */
+  pruneAudio(): number {
+    const result = this.stmt(
+      `DELETE FROM reminder_audio WHERE reminder_id IN
+         (SELECT id FROM reminders WHERE status NOT IN ${LIVE_STATUSES})`,
+    ).run();
+    return Number(result.changes);
   }
 
   /**

@@ -37,17 +37,22 @@ function fakeClock(startMs: number) {
  * relógios diferentes e o teste mediria outra coisa.
  */
 class FakeSink {
-  readonly bursts: Array<{ roomId: string; at: number; force: boolean }> = [];
+  readonly bursts: Array<{ roomId: string; at: number; force: boolean; hasSpeech: boolean }> = [];
   /** Resultado por cômodo; ausente = 'silent' (ninguém conectado ali). */
   readonly resultByRoom = new Map<string, BurstResult>([[ROOM, 'delivered']]);
 
   constructor(private readonly clock: ReturnType<typeof fakeClock>) {}
 
-  ringBurst(roomId: string, force = false): BurstResult {
+  ringBurst(roomId: string, force = false, speech: Buffer | null = null): BurstResult {
     const result = this.resultByRoom.get(roomId) ?? 'silent';
     // 'busy' não é entrega: não conta como rajada tocada.
     if (!(result === 'busy' && !force)) {
-      this.bursts.push({ roomId, at: this.clock.now().getTime(), force });
+      this.bursts.push({
+        roomId,
+        at: this.clock.now().getTime(),
+        force,
+        hasSpeech: speech !== null && speech.length > 0,
+      });
     }
     if (result === 'busy' && force) return 'delivered';
     return result;
@@ -428,5 +433,76 @@ describe('AlarmRinger', () => {
     const rajadas = h.sink.burstsIn(ROOM);
     await advance(h, CICLO_MS * 3);
     assert.equal(h.sink.burstsIn(ROOM), rajadas);
+  });
+});
+
+describe('AlarmRinger: fala do lembrete', () => {
+  before(() => {
+    createLogger(silentConfig);
+  });
+
+  beforeEach(() => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+    while (stores.length > 0) stores.pop()!.close();
+  });
+
+  /** PCM de 2 s: 16 kHz, 2 bytes por amostra. */
+  const FALA = Buffer.alloc(2 * 16_000 * 2);
+
+  it('a primeira rajada leva a fala; as seguintes, só o bipe', async () => {
+    const h = buildHarness();
+    const reminder = armarEDisparar(h, { label: 'tomar o remédio' });
+    h.store.putAudio(reminder.id, FALA);
+
+    const ciclo = h.ringer.ring(reminder);
+    await flushMicrotasks();
+    assert.equal(h.sink.bursts[0]!.hasSpeech, true, 'a primeira rajada precisa dizer o quê');
+
+    // Repetir a frase inteira a cada volta do ciclo é hostil.
+    await advance(h, CICLO_MS + FALA.length / 2 / 16);
+    assert.equal(h.sink.bursts[1]!.hasSpeech, false);
+
+    h.ringer.dismiss(ROOM, 'tool');
+    await ciclo;
+  });
+
+  it('sem PCM renderizado o ciclo vira só-chime, sem erro nenhum', async () => {
+    const h = buildHarness();
+    const reminder = armarEDisparar(h, { label: 'tomar o remédio' });
+    // Nada de putAudio: é o caso de a pré-renderização ter falhado.
+
+    const ciclo = h.ringer.ring(reminder);
+    await flushMicrotasks();
+
+    assert.equal(h.sink.bursts[0]!.hasSpeech, false);
+    // Um alarme que bipa sempre vale mais que um que fala às vezes.
+    assert.equal(h.sink.burstsIn(ROOM), 1);
+
+    h.ringer.dismiss(ROOM, 'tool');
+    await ciclo;
+  });
+
+  it('a janela de escuta só começa depois de a fala terminar', async () => {
+    const h = buildHarness();
+    const reminder = armarEDisparar(h, { label: 'tomar o remédio' });
+    h.store.putAudio(reminder.id, FALA);
+
+    const ciclo = h.ringer.ring(reminder);
+    await flushMicrotasks();
+
+    // Cortar a janela antes de o áudio terminar faria a rajada seguinte
+    // atropelar a fala desta.
+    await advance(h, CICLO_MS);
+    assert.equal(h.sink.burstsIn(ROOM), 1, 'a fala de 2s ainda estava tocando');
+
+    await advance(h, 2_000);
+    assert.equal(h.sink.burstsIn(ROOM), 2);
+
+    h.ringer.dismiss(ROOM, 'tool');
+    await ciclo;
   });
 });
