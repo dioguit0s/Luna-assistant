@@ -10,6 +10,7 @@ import { RoomManager } from './rooms/RoomManager.js';
 import { WsServer } from './ws/WsServer.js';
 import { ReminderStore } from './reminders/ReminderStore.js';
 import { ReminderScheduler } from './reminders/ReminderScheduler.js';
+import { nextDueAfter } from './reminders/recurrence.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -95,6 +96,10 @@ async function main(): Promise<void> {
     missedGraceMs: config.missedGraceMs,
     maxRingMs: config.alarmMaxRingMs,
     maxConcurrent: config.reminderMaxConcurrent,
+    // Sem esta injeção vale o default `REFUSE_RECURRING`, que transforma todo
+    // recorrente em `missed` — o lembrete de "todo dia útil às 6:30" tocaria
+    // uma vez e sumiria.
+    nextDueAfter,
   });
 
   wsServer.setReminderScheduler(reminderScheduler);

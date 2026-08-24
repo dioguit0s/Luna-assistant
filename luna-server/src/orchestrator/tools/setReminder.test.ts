@@ -164,3 +164,107 @@ describe('createSetReminderHandler', () => {
     assert.equal(store.countLiveByRoom('quarto'), 0);
   });
 });
+
+describe('createSetReminderHandler: recorrentes', () => {
+  let store: ReminderStore;
+  let scheduler: ReminderScheduler;
+
+  before(() => {
+    createLogger(silentConfig);
+  });
+
+  beforeEach(() => {
+    store = ReminderStore.open(':memory:');
+    scheduler = new ReminderScheduler({
+      store,
+      onFire: () => {},
+      missedGraceMs: 15 * 60_000,
+      maxRingMs: 5 * 60_000,
+      maxConcurrent: 20,
+      now: () => new Date(T0),
+    });
+  });
+
+  afterEach(() => {
+    scheduler.stop();
+    store.close();
+  });
+
+  function handler() {
+    return createSetReminderHandler({
+      store,
+      getScheduler: () => scheduler,
+      reminderMaxPerRoom: 20,
+      now: () => new Date(T0),
+    });
+  }
+
+  it('"todo dia útil às 6:30" grava a regra e a hora local, não um instante', async () => {
+    const resultado = (await handler()(
+      { at_time: '06:30', repeat: 'weekdays', label: 'academia' },
+      ctx(),
+    )) as { success: boolean; spoken_when: string };
+
+    assert.equal(resultado.success, true);
+    assert.equal(resultado.spoken_when, 'todo dia útil às 06:30');
+
+    const [criado] = store.listLiveByRoom(ROOM);
+    assert.equal(criado!.kind, 'recurring');
+    assert.equal(criado!.repeatRule, 'weekdays');
+    assert.equal(criado!.localHour, 6);
+    assert.equal(criado!.localMinute, 30);
+    assert.equal(criado!.dueAtUtc, null);
+    assert.ok(criado!.nextDueUtc > T0);
+  });
+
+  it('"toda sexta às 20h" vira repeat_rule = fri', async () => {
+    await handler()({ at_time: '20:00', repeat: 'weekly', when_day: 'fri' }, ctx());
+
+    const [criado] = store.listLiveByRoom(ROOM);
+    assert.equal(criado!.kind, 'recurring');
+    assert.equal(criado!.repeatRule, 'fri');
+  });
+
+  it('"sexta às 20h" sem repeat continua one-shot — é a distinção que o repeat existe para fazer', async () => {
+    await handler()({ at_time: '20:00', when_day: 'fri' }, ctx());
+
+    const [criado] = store.listLiveByRoom(ROOM);
+    assert.equal(criado!.kind, 'once');
+    assert.equal(criado!.repeatRule, null);
+  });
+
+  it('repeat none é explicitamente one-shot', async () => {
+    await handler()({ at_time: '07:00', repeat: 'none' }, ctx());
+
+    assert.equal(store.listLiveByRoom(ROOM)[0]!.kind, 'once');
+  });
+
+  it('repetir "daqui a tanto" não faz sentido e é rejeitado com erro falável', async () => {
+    const resultado = (await handler()({ in_seconds: 600, repeat: 'daily' }, ctx())) as {
+      success: boolean;
+      error: string;
+    };
+
+    assert.equal(resultado.success, false);
+    assert.match(resultado.error, /horário/);
+    assert.equal(store.countLiveByRoom(ROOM), 0);
+  });
+
+  it('weekly sem dia da semana devolve pergunta falável e não cria nada', async () => {
+    const resultado = (await handler()({ at_time: '20:00', repeat: 'weekly' }, ctx())) as {
+      success: boolean;
+      error: string;
+    };
+
+    assert.equal(resultado.success, false);
+    assert.equal(resultado.error, 'toda semana em qual dia?');
+    assert.equal(store.countLiveByRoom(ROOM), 0);
+  });
+
+  it('repeat fora do enum é argumento inválido, não é ignorado em silêncio', async () => {
+    const resultado = await handler()({ at_time: '07:00', repeat: 'monthly' }, ctx());
+
+    assert.deepEqual(resultado, { success: false, error: 'argumentos inválidos' });
+    assert.equal(store.countLiveByRoom(ROOM), 0);
+  });
+});

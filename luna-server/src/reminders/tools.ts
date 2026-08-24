@@ -1,5 +1,6 @@
 import type { ToolDefinition } from '../providers/types.js';
 import type { WhenDay } from './resolveOnce.js';
+import { REPEAT_FIELD_VALUES, type RepeatField } from './recurrence.js';
 
 /**
  * `ToolDefinition` + type guard, no mesmo molde de `CONTROL_DEVICE_TOOL`
@@ -7,8 +8,9 @@ import type { WhenDay } from './resolveOnce.js';
  * sem objeto aninhado: `providers/gemini/tool-mapping.ts` só propaga `type`,
  * `description` e `enum` por propriedade, e lança em tipo desconhecido.
  *
- * `repeat` fica de fora por enquanto — este marco só cobre one-shot (relativo
- * e absoluto). Recorrência entra com `recurrence.ts`, mais adiante.
+ * `repeat` e `when_day` são **ortogonais**, e é isso que desambigua o que um
+ * CSV de dias da semana não separa: `when_day: 'fri'` com `repeat: 'none'` é
+ * "sexta às 20h" (uma vez), e com `repeat: 'weekly'` é "toda sexta às 20h".
  */
 
 const WHEN_DAY_VALUES: WhenDay[] = [
@@ -56,6 +58,16 @@ export const SET_REMINDER_TOOL: ToolDefinition = {
           'Dia do at_time: today, tomorrow, ou o dia da semana (mon..sun). ' +
           'Omita para a próxima ocorrência desse horário.',
       },
+      repeat: {
+        type: 'string',
+        enum: REPEAT_FIELD_VALUES,
+        description:
+          'Repetição: none (padrão, toca uma vez só), daily ("todo dia"), ' +
+          'weekdays ("todo dia útil"), weekend ("todo fim de semana") ou ' +
+          'weekly, que exige when_day com o dia da semana ("toda sexta"). ' +
+          'Só use repeat quando a pessoa disser que é sempre — "sexta às 20h" ' +
+          'é uma vez só; "toda sexta às 20h" é weekly.',
+      },
     },
     required: [],
   },
@@ -66,6 +78,7 @@ export interface SetReminderArgs {
   in_seconds?: number;
   at_time?: string;
   when_day?: WhenDay;
+  repeat?: RepeatField;
 }
 
 /**
@@ -76,12 +89,19 @@ export interface SetReminderArgs {
 export function isSetReminderArgs(
   args: Record<string, unknown>,
 ): args is Record<string, unknown> & SetReminderArgs {
-  const { label, in_seconds: inSeconds, at_time: atTime, when_day: whenDay } = args;
+  const {
+    label,
+    in_seconds: inSeconds,
+    at_time: atTime,
+    when_day: whenDay,
+    repeat,
+  } = args;
 
   if (label !== undefined && typeof label !== 'string') return false;
   if (inSeconds !== undefined && typeof inSeconds !== 'number') return false;
   if (atTime !== undefined && typeof atTime !== 'string') return false;
   if (whenDay !== undefined && !WHEN_DAY_VALUES.includes(whenDay as WhenDay)) return false;
+  if (repeat !== undefined && !REPEAT_FIELD_VALUES.includes(repeat as RepeatField)) return false;
 
   return true;
 }

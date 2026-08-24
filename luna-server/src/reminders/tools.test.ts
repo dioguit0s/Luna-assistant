@@ -91,3 +91,16 @@ describe('MANAGE_REMINDERS_TOOL', () => {
     assert.deepEqual(MANAGE_REMINDERS_TOOL.parameters.required, ['action']);
   });
 });
+
+describe('SET_REMINDER_TOOL: campo repeat', () => {
+  it('repeat tem enum explícito, com none incluso', () => {
+    const repeat = SET_REMINDER_TOOL.parameters.properties.repeat as { enum?: string[] };
+    assert.deepEqual(repeat.enum, ['none', 'daily', 'weekdays', 'weekend', 'weekly']);
+  });
+
+  it('o guard rejeita repeat fora do enum em vez de descartá-lo em silêncio', () => {
+    assert.equal(isSetReminderArgs({ at_time: '07:00', repeat: 'daily' }), true);
+    assert.equal(isSetReminderArgs({ at_time: '07:00', repeat: 'monthly' }), false);
+    assert.equal(isSetReminderArgs({ at_time: '07:00', repeat: 7 }), false);
+  });
+});
