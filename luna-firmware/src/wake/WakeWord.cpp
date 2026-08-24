@@ -57,7 +57,13 @@ static int strideStep = 0;
 static volatile bool detectedFlag = false;
 static float lastProb = 0.0f;
 
-// Estatísticas de custo.
+// Estatísticas de custo. Dois acumuladores distintos de propósito:
+// `totalWorkUs` soma TODO o trabalho (preprocessador de cada slice + Invoke do
+// modelo quando a janela de stride fecha) e é a base do cpuLoadPct(); já
+// `totalInferenceUs` soma só os slices que terminam em invocação do modelo, que
+// é o universo de inferenceCount e peakInferenceUs. Misturar os dois inflava a
+// média em ~stride vezes (avg saía acima do max).
+static uint64_t totalWorkUs = 0;
 static uint64_t totalInferenceUs = 0;
 static uint32_t slicesFed = 0;    // features de 10ms processadas (base do load%)
 static uint32_t inferenceCount = 0; // invocações do modelo streaming
@@ -327,7 +333,7 @@ static void runFeature() {
 
   // Só roda a inferência quando a janela de `stride` slices fechou.
   if (strideStep < stride) {
-    totalInferenceUs += elapsed;
+    totalWorkUs += elapsed;
     return;
   }
 
@@ -342,6 +348,7 @@ static void runFeature() {
 #endif
 
   elapsed = (uint32_t)(esp_timer_get_time() - t0);
+  totalWorkUs += elapsed;
   totalInferenceUs += elapsed;
   inferenceCount++;
   if (elapsed > peakInferenceUs) peakInferenceUs = elapsed;
@@ -432,16 +439,17 @@ uint32_t maxInferenceUs() { return peakInferenceUs; }
 float cpuLoadPct() {
   if (!slicesFed) return 0.0f;
   // O preprocessador roda a cada slice (10ms) e o modelo streaming a cada
-  // `stride` slices; totalInferenceUs soma os dois. A base é o áudio real
+  // `stride` slices; totalWorkUs soma os dois. A base é o áudio real
   // processado (slices * 10ms), então isto é a fração de um núcleo gasta para
   // manter a escuta ligada.
   const float audioUs = (float)slicesFed * WAKE_FEATURE_STEP_MS * 1000.0f;
-  return (float)totalInferenceUs * 100.0f / audioUs;
+  return (float)totalWorkUs * 100.0f / audioUs;
 }
 
 float lastProbability() { return lastProb; }
 
 void resetStats() {
+  totalWorkUs = 0;
   totalInferenceUs = 0;
   slicesFed = 0;
   inferenceCount = 0;
