@@ -9,7 +9,7 @@
 
 | GPIO | Componente | Função | Direção |
 |------|-----------|--------|---------|
-| GPIO4 | INMP441 | SD (DOUT) — dado do microfone | ESP32 ← INMP441 |
+| **GPIO11** | INMP441 | SD (DOUT) — dado do microfone | ESP32 ← INMP441 |
 | GPIO5 | INMP441 | WS (LRCLK) — word select | ESP32 → INMP441 |
 | GPIO6 | INMP441 | SCK (BCLK) — bit clock | ESP32 → INMP441 |
 | GPIO7 | MAX98357A | DIN — dado de áudio | ESP32 → MAX98357A |
@@ -23,6 +23,10 @@
 > emitia ruído**, mesmo com dado de entrada comprovadamente limpo (um seno de
 > 440 Hz gerado na própria placa saía como ruído branco). Mover BCLK→**GPIO16** e
 > LRC→**GPIO17** resolveu. Ver seção 9.
+>
+> **⚠️ 2026-08-24 — segundo pino perdido.** O SD do microfone era o **GPIO4** e
+> passou a ler silêncio digital absoluto. O pad de entrada do GPIO4 estava
+> danificado; SD→**GPIO11** resolveu. Ver seção 9.
 
 Barramentos I2S separados por design: **I2S0 dedicado ao microfone (RX)**, **I2S1 dedicado ao amplificador (TX)** — nenhum pino é compartilhado entre captura e playback.
 
@@ -34,7 +38,7 @@ Barramentos I2S separados por design: **I2S0 dedicado ao microfone (RX)**, **I2S
 |---|---|---|
 | VDD | 3.3V | |
 | GND | GND | |
-| SD (DOUT) | GPIO4 | |
+| SD (DOUT) | **GPIO11** | movido do GPIO4 — ver seção 9 |
 | WS (LRCLK) | GPIO5 | |
 | SCK (BCLK) | GPIO6 | |
 | L/R | GND | fixa canal esquerdo (captura mono) |
@@ -120,8 +124,31 @@ Registro do que custou tempo, para não repetir na réplica do segundo satélite
 | Ruído contínuo no speaker, inclusive com silêncio digital | BCLK no **GPIO8** corrompia o clock do I2S | BCLK → **GPIO16**, LRC → **GPIO17** |
 | Ruído de fundo constante | VIN do amp no **3.3V** (rail do núcleo/WiFi) | VIN → pino **5VIN** |
 | Mic lendo `pico=0` ou picos de fundo de escala erráticos | Mau contato nas linhas I2S do mic na protoboard | Re-encaixar com jumpers curtos e firmes |
+| Mic em `audio_peak=0` **absoluto**, com VDD, GND, L/R e os dois clocks já conferidos no multímetro | Pad de entrada do **GPIO4** danificado (fuga de ~22 µA para o terra) | SD → **GPIO11** |
 | Placa desconectava do WS ao receber a resposta | Frame binário de **30720 bytes** derrubava o `arduinoWebSockets` | Servidor fragmenta `audio_response` em 1024 bytes |
 | Áudio da resposta picotado | Gemini envia >100 KB em ~1s; buffer de 24 KB estourava | Buffer de 512 KB na **PSRAM** |
 | Logs do firmware não apareciam no monitor | `Serial` ia para a UART0, monitor na USB nativa | `ARDUINO_USB_MODE=1` + `ARDUINO_USB_CDC_ON_BOOT=1`, `monitor_dtr/rts = 0` |
+
+**Pino do ESP32 também queima — e o sintoma imita mau contato.** No caso do
+GPIO4 (2026-08-24), continuidade, alimentação, terra, L/R e clocks passaram em
+todos os testes, e trocar jumpers, fileira da protoboard e conectores não mudou
+nada, porque o defeito estava dentro do micro. Dois testes resolvem sem chutar
+peça:
+
+- **Pull-up interno no pino de dados.** Com `gpio_set_pull_mode(pino,
+  GPIO_PULLUP_ONLY)` logo após o `i2s_channel_init_std_mode`, um pino solto passa
+  a ler `0xFFFFFFFF` e o `audio_peak` vai de 0 para **1** (porque `-1 >> shift`
+  continua -1). Se ficar em 0, há driver ativo na linha e o problema é outro.
+- **Tensão DC no pino com a linha aberta.** Com só o pull-up (~45 kΩ)
+  sustentando o nó, um pino são marca ~3,3 V. O GPIO4 marcava **2,3 V**, ou seja
+  ~22 µA de fuga para o terra — mil vezes acima dos nanoamperes de uma entrada
+  saudável. É a assinatura de diodo de proteção ESD danificado.
+
+Corolário para o multímetro: **continuidade que apita não prova conexão**. A
+pressão da ponta de prova fecha juntas rachadas. Quando dois pontos "ligados"
+medem tensões diferentes, a conexão está aberta em operação — acredite na
+tensão, não no bipe. Os clocks também se conferem com o multímetro em DC: SCK e
+WS são quadradas de 50% de duty, então devem marcar ~1,6 V (metade de 3,3 V) no
+pad do módulo; 0 V significa clock que não chega.
 
 **Instrumentação vale mais que palpite.** Os medidores que resolveram cada impasse: nível de pico do mic (`AudioCapture::lastPeak`), heap livre na desconexão do WS, e log do tamanho do chunk vindo do Gemini. Quando um sintoma reaparecer, meça antes de mexer.

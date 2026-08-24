@@ -6,7 +6,7 @@
 // ============================================================================
 
 // --- INMP441 (microfone I2S) — barramento I2S0 (RX) ---
-#define MIC_SD 4  // SD  (DOUT) — dado do microfone  (ESP32 <- INMP441)
+#define MIC_SD 12 // SD  (DOUT) — dado do microfone  (ESP32 <- INMP441) [movido de GPIO4]
 #define MIC_WS 5  // WS  (LRCLK) — word select        (ESP32 -> INMP441)
 #define MIC_SCK 6 // SCK (BCLK) — bit clock           (ESP32 -> INMP441)
 // L/R do INMP441 ligado a GND => captura no canal ESQUERDO (mono)
