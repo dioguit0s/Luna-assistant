@@ -41,6 +41,10 @@ const baseConfig: AppConfig = {
   reminderMaxConcurrent: 20,
   reminderMaxPerRoom: 20,
   reminderFallbackRoomId: '',
+  ringListenWindowMs: 6_000,
+  ringBargeInGuardMs: 2_000,
+  ringSilentRetryMs: 60_000,
+  reminderSnoozeMaxMinutes: 60,
 };
 
 /** Mock de `fetch` que devolve o corpo de `/api/template` que o teste quiser. */

@@ -92,6 +92,19 @@ export class Orchestrator {
   // pode nascer sem ninguém ter falado.
   private readonly lastDeviceIdByRoom = new Map<string, string>();
   /**
+   * Último instante (epoch ms) em que sabemos que **o usuário ainda estava
+   * falando** neste cômodo.
+   *
+   * A âncora NÃO pode ser "último chunk de áudio recebido", pelo mesmo motivo
+   * que o `TtfabTracker` documenta: em open-mic o satélite transmite
+   * continuamente (no firmware, `ACTIVE_STREAMING` é o estado permanente
+   * quando a wake word não está disponível), então esse marco viraria sempre
+   * "agora" e o guard de barge-in ficaria travado em "tem gente falando" — o
+   * alarme nunca tocaria. O sinal certo é a transcrição de entrada do
+   * provider, o mesmo que move a âncora do TTFAB.
+   */
+  private readonly lastUserSpeechAtByRoom = new Map<string, number>();
+  /**
    * Registro de dispatch: nome da tool → handler. A chave casa o nome; validar
    * os args é obrigação do handler (ver `ToolHandler`). Nome fora do mapa é
    * tratado igual a args inválidos — do ponto de vista do modelo é a mesma
@@ -219,6 +232,7 @@ export class Orchestrator {
 
     provider.onUserSpeech(() => {
       tracker.markUserSpeech();
+      this.lastUserSpeechAtByRoom.set(roomId, Date.now());
 
       // Reagenda a cada fragmento: só assume "parou de falar" depois de
       // silêncio sustentado. No Gemini isso dispara a cada pedaço de
@@ -434,6 +448,15 @@ export class Orchestrator {
    * aciona o watchdog sozinha. Um `ringOnce` também arma e imediatamente
    * limpa: como o chime tem duração conhecida e `endSpeaking` é chamado logo
    * depois de enfileirar, o watchdog nunca chega a disparar para ele.
+   *
+   * **Não** rearmar no enfileiramento (`enqueueAudioFrames`), por mais que
+   * pareça o ponto natural: o que este watchdog mede é *liveness do provider*,
+   * não estado de fila. Um provider que morresse depois de despejar 20 s de
+   * áudio na fila manteria o watchdog vivo por esses 20 s, e a única rede de
+   * segurança abaixo do `RESPONDING_TIMEOUT_MS` de 20 s do firmware sumiria
+   * justamente no caso para o qual ela existe. O ciclo de toque não precisa
+   * disso: cada rajada tem duração conhecida e fecha o par sincronicamente —
+   * há teste que trava esse invariante.
    */
   private armSpeakingWatchdog(roomId: string): void {
     this.clearSpeakingWatchdog(roomId);
@@ -510,11 +533,33 @@ export class Orchestrator {
    */
   ringOnce(roomId: string): number {
     if (this.speakingByRoom.get(roomId)) return 0;
+    // O usuário está no meio de uma frase: `speaking_start` faria o firmware
+    // dar `xQueueReset(txQueue)` e o provider receberia meio comando. Vale
+    // tanto para a primeira rajada quanto para a corrida na borda das
+    // seguintes — a wake word da dispensa caindo no instante do re-disparo.
+    if (this.isUserLikelySpeaking(roomId)) return 0;
 
     const delivered = this.startSpeaking(roomId);
     this.enqueueAudioFrames(roomId, CHIME_PCM16);
     this.endSpeaking(roomId);
     return delivered;
+  }
+
+  /**
+   * Há quanto tempo o usuário falou nesta sala, em ms — `null` quando não há
+   * fala conhecida (sala ociosa, ou sessão recém-criada pelo caminho do
+   * alarme). Quem toca alarme usa isto para distinguir "não entreguei porque
+   * a sala está vazia" de "não entreguei porque tem gente falando".
+   */
+  msSinceUserSpeech(roomId: string): number | null {
+    const at = this.lastUserSpeechAtByRoom.get(roomId);
+    return at === undefined ? null : Date.now() - at;
+  }
+
+  /** Guard de barge-in: fala do usuário recente o bastante para não ser cortada. */
+  isUserLikelySpeaking(roomId: string): boolean {
+    const since = this.msSinceUserSpeech(roomId);
+    return since !== null && since < this.config.ringBargeInGuardMs;
   }
 
   /**
@@ -527,6 +572,7 @@ export class Orchestrator {
     this.ttfabByRoom.delete(roomId);
     this.speakingByRoom.delete(roomId);
     this.lastDeviceIdByRoom.delete(roomId);
+    this.lastUserSpeechAtByRoom.delete(roomId);
 
     const silenceTimer = this.silenceTimerByRoom.get(roomId);
     if (silenceTimer) {

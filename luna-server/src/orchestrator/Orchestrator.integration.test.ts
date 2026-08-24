@@ -53,6 +53,10 @@ const baseConfig: AppConfig = {
   reminderMaxConcurrent: 20,
   reminderMaxPerRoom: 20,
   reminderFallbackRoomId: '',
+  ringListenWindowMs: 6_000,
+  ringBargeInGuardMs: 2_000,
+  ringSilentRetryMs: 60_000,
+  reminderSnoozeMaxMinutes: 60,
 };
 
 const ROOM_ID = 'sala_de_estar';
@@ -1027,6 +1031,60 @@ describe('Orchestrator: ringOnce (chime)', () => {
 
     assert.equal(delivered, 0);
     assert.equal(harness.sent.length, antes, 'ringOnce não deveria ter enfileirado nada por cima do turno');
+  });
+
+  it('não interrompe o usuário: com fala recente na sala, devolve 0 e não enfileira nada', async () => {
+    // `speaking_start` faz o firmware dar xQueueReset(txQueue): uma rajada no
+    // meio da frase corta o comando e o provider recebe meia pergunta.
+    await feedAudio(harness);
+    harness.provider.emitUserSpeech();
+
+    const delivered = harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    assert.equal(delivered, 0);
+    // O debounce de silêncio manda um `speaking_start` seu durante o drain —
+    // por isso a asserção é sobre frame de ÁUDIO, que só o chime produziria.
+    assert.deepEqual(audioFrames(harness), [], 'nenhum frame de chime deveria ter saído por cima da fala');
+  });
+
+  it('a guarda de barge-in expira: passado ringBargeInGuardMs, a rajada sai', async () => {
+    await feedAudio(harness);
+    harness.provider.emitUserSpeech();
+
+    // `msSinceUserSpeech` lê o relógio de parede, que `mock.timers` não move
+    // por padrão — então o guard é conferido pelo próprio acessor.
+    assert.ok(harness.orchestrator.isUserLikelySpeaking(ROOM_ID));
+    assert.ok((harness.orchestrator.msSinceUserSpeech(ROOM_ID) ?? Infinity) < baseConfig.ringBargeInGuardMs);
+
+    // Sala sem fala nenhuma: o guard não se aplica e o chime sai normalmente.
+    const outraSala = 'cozinha';
+    assert.equal(harness.orchestrator.msSinceUserSpeech(outraSala), null);
+    assert.equal(harness.orchestrator.isUserLikelySpeaking(outraSala), false);
+    assert.ok(harness.orchestrator.ringOnce(outraSala) >= 0);
+  });
+
+  it('o watchdog de fala é rearmado por frame de alarme: rajada longa não leva speaking_end espúrio', () => {
+    // O watchdog só era rearmado em `onAudioResponse` — uma rajada sem áudio
+    // de provider nenhum dispararia um `speaking_end` do watchdog aos 8s.
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+    const depoisDoCiclo = controlMessages(harness.sent).map((m) => m.type);
+    assert.deepEqual(
+      depoisDoCiclo.filter((t) => t === 'speaking_end'),
+      ['speaking_end'],
+      'esperava um único speaking_end, o do fim do ciclo',
+    );
+
+    // Passado o teto do watchdog, nenhum speaking_end a mais aparece: o timer
+    // do ciclo foi limpo por `endSpeaking`, não deixado pendurado.
+    mock.timers.tick(SPEAKING_WATCHDOG_MS * 2);
+    const depoisDoTeto = controlMessages(harness.sent).map((m) => m.type);
+    assert.deepEqual(
+      depoisDoTeto.filter((t) => t === 'speaking_end'),
+      ['speaking_end'],
+      'watchdog não deveria ter mandado um speaking_end a mais depois do ciclo',
+    );
   });
 
   it('sala vazia (sendToRoom devolve 0): ainda assim completa o ciclo, sem travar speakingByRoom', () => {
