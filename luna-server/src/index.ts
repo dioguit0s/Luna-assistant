@@ -72,50 +72,31 @@ async function main(): Promise<void> {
   await deviceRegistry.start();
 
   // O ReminderScheduler só pode nascer depois do WsServer estar construído: o
-  // onFire precisa do `ringOnce` do Orchestrator lá dentro, e o Orchestrator
-  // precisa do scheduler para o handler de set_reminder chamar reschedule()
-  // — nenhum dos dois nasce primeiro sozinho (ver o comentário em
+  // onFire precisa do ciclo de toque que vive no Orchestrator lá dentro, e o
+  // Orchestrator precisa do scheduler — para o handler de set_reminder chamar
+  // reschedule(), e para o AlarmRinger rearmar o timer no fim de cada ciclo.
+  // Nenhum dos dois nasce primeiro sozinho (ver o comentário em
   // Orchestrator.setReminderScheduler). `wsServer.start()` só roda depois de
   // tudo isto amarrado, de propósito: nenhuma conexão é aceita antes de o
   // scheduler existir para o handler chamar.
-  //
-  // O toque em si ainda é só isto: um `ringOnce`. Rajadas repetidas,
-  // dispensa por voz e soneca são o `AlarmRinger` do marco 7.
   const wsServer = new WsServer(config, roomManager, haClient, deviceRegistry, reminderStore);
+
+  // O ciclo de toque (rajada → janela de escuta → rajada, dispensa, soneca e o
+  // fallback de sala offline) vive no `AlarmRinger`, construído dentro do
+  // Orchestrator porque o sink de áudio dele é o próprio Orchestrator.
+  const alarmRinger = wsServer.getAlarmRinger();
 
   const reminderScheduler = new ReminderScheduler({
     store: reminderStore,
-    onFire: (reminder) => {
-      const delivered = wsServer.ringOnce(reminder.roomId);
-      if (delivered > 0) return;
-
-      // Satélite de origem offline (ou sem ninguém conectado): cai no
-      // cômodo de fallback fixo — burro de propósito, não "onde tem gente"
-      // (ver `reminderFallbackRoomId` em config/env.ts).
-      if (!config.reminderFallbackRoomId || config.reminderFallbackRoomId === reminder.roomId) {
-        getLogger().warn(
-          { event: 'reminder_room_offline', reminder_id: reminder.id, room_id: reminder.roomId },
-          `Lembrete ${reminder.shortId} venceu em ${reminder.roomId}, mas ninguém está lá para ouvir (sem fallback configurado)`,
-        );
-        return;
-      }
-
-      const fallbackDelivered = wsServer.ringOnce(config.reminderFallbackRoomId);
-      getLogger().warn(
-        {
-          event: 'reminder_fallback_room',
-          reminder_id: reminder.id,
-          room_id: reminder.roomId,
-          fallback_room_id: config.reminderFallbackRoomId,
-          delivered: fallbackDelivered > 0,
-        },
-        `Lembrete ${reminder.shortId}: ${reminder.roomId} offline, tocado em ${config.reminderFallbackRoomId}`,
-      );
-    },
+    // A promise só resolve no FIM do ciclo: é ela que segura a vaga em
+    // `firingRooms` enquanto o alarme toca, impedindo que um segundo lembrete
+    // da mesma sala seja disparado por cima.
+    onFire: (reminder) => alarmRinger.ring(reminder),
     missedGraceMs: config.missedGraceMs,
     maxRingMs: config.alarmMaxRingMs,
     maxConcurrent: config.reminderMaxConcurrent,
   });
+
   wsServer.setReminderScheduler(reminderScheduler);
   // Rehydrate: fecha `ringing` órfão de um processo anterior e arma o timer a
   // partir do banco — é o que faz um alarme sobreviver ao deploy.
@@ -164,6 +145,11 @@ async function main(): Promise<void> {
     await wsServer.stop();
     deviceRegistry.stop();
     reminderScheduler.stop();
+    // Antes do `reminderStore.close()`, e depois do scheduler: fechar um ciclo
+    // de toque ESCREVE no banco (devolve o lembrete a `armed` ou o marca
+    // `done`). Invertido, o shutdown estouraria "database is closed" dentro do
+    // teto e o processo sairia sem log.
+    alarmRinger.stop();
     await roomManager.destroy();
     ringBuffer.destroy();
     reminderStore.close();

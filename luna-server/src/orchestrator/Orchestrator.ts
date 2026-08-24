@@ -9,6 +9,7 @@ import { CHIME_PCM16 } from '../reminders/chime.js';
 import { SET_REMINDER_TOOL } from '../reminders/tools.js';
 import type { ReminderStore } from '../reminders/ReminderStore.js';
 import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
+import { AlarmRinger, type AlarmAudioSink, type BurstResult } from '../reminders/AlarmRinger.js';
 import { getLogger } from '../logging/logger.js';
 import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
@@ -64,7 +65,7 @@ type AudioQueueItem =
   | { kind: 'audio'; header: Buffer; piece: Buffer }
   | { kind: 'speaking_end' };
 
-export class Orchestrator {
+export class Orchestrator implements AlarmAudioSink {
   private readonly ttfabByRoom = new Map<string, TtfabTracker>();
   private readonly speakingByRoom = new Map<string, boolean>();
   // Debounce de "usuário parou de falar" (ver userSilenceCutoffMs): dispara
@@ -120,6 +121,16 @@ export class Orchestrator {
    */
   private reminderScheduler: ReminderScheduler | null = null;
 
+  /**
+   * Ciclo de toque por sala. Construído aqui, e não em `index.ts`, porque o
+   * sink de áudio dele é este próprio objeto — e porque o handler de
+   * `manage_reminders`, montado no construtor, precisa da referência.
+   *
+   * O estado de alarme dele **não** é limpo por `releaseRoom`: uma sala cujo
+   * provider morreu continua tendo alarmes (decisão 16 do plano).
+   */
+  private readonly alarmRinger: AlarmRinger;
+
   constructor(
     private readonly config: AppConfig,
     private readonly roomManager: RoomManager,
@@ -138,6 +149,17 @@ export class Orchestrator {
     private readonly sendToRoom: SendToRoom,
     reminderStore: ReminderStore,
   ) {
+    this.alarmRinger = new AlarmRinger({
+      store: reminderStore,
+      sink: this,
+      listenWindowMs: config.ringListenWindowMs,
+      maxRingMs: config.alarmMaxRingMs,
+      silentRetryMs: config.ringSilentRetryMs,
+      missedGraceMs: config.missedGraceMs,
+      snoozeMaxMinutes: config.reminderSnoozeMaxMinutes,
+      fallbackRoomId: config.reminderFallbackRoomId,
+    });
+
     this.toolHandlers = new Map<string, ToolHandler>([
       [
         CONTROL_DEVICE_TOOL.name,
@@ -183,6 +205,10 @@ export class Orchestrator {
    */
   setReminderScheduler(scheduler: ReminderScheduler): void {
     this.reminderScheduler = scheduler;
+    // Todo fim de ciclo mexe em `next_due_utc` e precisa rearmar o timer:
+    // sem isto uma soneca de 1 minuto esperaria a acordada seguinte, a até
+    // `MAX_TIMER_DELAY_MS` (60 s) de distância.
+    this.alarmRinger.setScheduler(scheduler);
   }
 
   async handleAudioChunk(roomId: string, deviceId: string, pcm: Buffer): Promise<void> {
@@ -539,10 +565,40 @@ export class Orchestrator {
     // seguintes — a wake word da dispensa caindo no instante do re-disparo.
     if (this.isUserLikelySpeaking(roomId)) return 0;
 
+    return this.emitChimeBurst(roomId);
+  }
+
+  /**
+   * Implementação de `AlarmAudioSink`: uma rajada do ciclo de toque.
+   *
+   * Mesma mecânica do `ringOnce`, com o retorno que o ciclo precisa — `busy` e
+   * `silent` são zero entregas por motivos opostos, e confundir os dois faria o
+   * alarme desistir justamente quando a pessoa tenta dispensá-lo.
+   *
+   * Invariante de que o `AlarmRinger` depende: a checagem e a emissão estão na
+   * mesma call stack síncrona (Node é single-threaded, nada roda entre elas),
+   * então aqui um `delivered === 0` só pode significar cômodo mudo — nunca
+   * "já estava falando".
+   */
+  ringBurst(roomId: string, force = false): BurstResult {
+    // Nem com `force`: a Luna falando é fala de verdade em andamento, e frames
+    // de chime intercalados no meio da resposta dela são pior que atraso.
+    if (this.speakingByRoom.get(roomId)) return 'busy';
+    if (!force && this.isUserLikelySpeaking(roomId)) return 'busy';
+
+    return this.emitChimeBurst(roomId) > 0 ? 'delivered' : 'silent';
+  }
+
+  private emitChimeBurst(roomId: string): number {
     const delivered = this.startSpeaking(roomId);
     this.enqueueAudioFrames(roomId, CHIME_PCM16);
     this.endSpeaking(roomId);
     return delivered;
+  }
+
+  /** O ciclo de toque por sala. Vive aqui porque o sink de áudio é este objeto. */
+  getAlarmRinger(): AlarmRinger {
+    return this.alarmRinger;
   }
 
   /**

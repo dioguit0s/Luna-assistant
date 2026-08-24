@@ -272,6 +272,12 @@ export class ReminderScheduler {
       })
       .finally(() => {
         this.firingRooms.delete(emToque.roomId);
+        // A vaga liberou: quem estava barrado pelo teto de concorrência ou por
+        // "esta sala já está tocando" tem que ser reavaliado agora, não na
+        // próxima acordada. Com o ciclo de toque durando minutos (o `onFire`
+        // do `AlarmRinger` só resolve no fim), sem isto o fallback de
+        // THROTTLE_RETRY_MS ficaria repolling de segundo em segundo até lá.
+        this.reschedule();
       });
   }
 
