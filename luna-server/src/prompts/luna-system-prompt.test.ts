@@ -142,6 +142,37 @@ describe('buildLunaSystemPrompt', () => {
     }
   });
 
+  it('tem seção de alarmes citando as duas ferramentas pelo nome', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', []);
+
+    assert.match(prompt, /# Alarmes e lembretes/);
+    assert.match(prompt, /set_reminder/);
+    assert.match(prompt, /manage_reminders/);
+  });
+
+  it('proíbe o modelo de calcular o horário sozinho', () => {
+    // O prompt congela a hora no connect: numa sessão longa o relógio do modelo
+    // envelhece, e um ISO gerado por ele daria alarme na data errada, em
+    // silêncio. Quem resolve data e hora é o servidor.
+    const prompt = buildLunaSystemPrompt('sala_de_estar', []);
+
+    assert.match(prompt, /nunca calcule data nem horário absoluto/i);
+    assert.match(prompt, /spoken_when/);
+  });
+
+  it('avisa da ambiguidade de "às sete" à noite, que o schema não resolve', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', []);
+
+    assert.match(prompt, /"às sete" à noite é 19:00/);
+  });
+
+  it('separa lembrete de automação: "às sete acende a luz" não é set_reminder', () => {
+    // O modelo VAI tentar combinar set_reminder com control_device.
+    const prompt = buildLunaSystemPrompt('sala_de_estar', []);
+
+    assert.match(prompt, /Lembrete não aciona aparelho/);
+  });
+
   it('usa a hora atual quando o parâmetro now é omitido', () => {
     const prompt = buildLunaSystemPrompt('sala_de_estar', []);
     assert.match(prompt, /Agora são \d{2}:\d{2}/);
