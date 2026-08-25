@@ -506,3 +506,49 @@ describe('AlarmRinger: fala do lembrete', () => {
     await ciclo;
   });
 });
+
+describe('AlarmRinger: falha no meio do ciclo', () => {
+  before(() => {
+    createLogger(silentConfig);
+  });
+
+  beforeEach(() => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+    while (stores.length > 0) stores.pop()!.close();
+  });
+
+  it('exceção ao ler o áudio não prende a sala: o ciclo encerra e a promise resolve', async () => {
+    // `speechForBurst` lê o banco de dentro do callback de `setTimeout`, fora de
+    // qualquer catch. Sem proteção, uma exceção ali deixaria o ciclo órfão em
+    // `activeByRoom` e a promise de `ring()` sem resolver PARA SEMPRE — o que
+    // prende a vaga daquela sala em `firingRooms` do scheduler até o restart.
+    const h = buildHarness();
+    const reminder = armarEDisparar(h, { label: 'remédio' });
+
+    h.store.getAudio = () => {
+      throw new Error('database disk image is malformed');
+    };
+
+    const ciclo = h.ringer.ring(reminder);
+    await flushMicrotasks();
+
+    // A promise resolve — é ela que libera `firingRooms`.
+    await ciclo;
+    assert.equal(h.ringer.isRinging(ROOM), false);
+
+    // E a sala volta a aceitar alarme: sem isso todo disparo seguinte cairia no
+    // ramo `alarm_room_busy`.
+    h.store.getAudio = () => null;
+    const outro = armarEDisparar(h);
+    const segundoCiclo = h.ringer.ring(outro);
+    await flushMicrotasks();
+    assert.equal(h.ringer.isRinging(ROOM), true);
+
+    h.ringer.dismiss(ROOM, 'tool');
+    await segundoCiclo;
+  });
+});

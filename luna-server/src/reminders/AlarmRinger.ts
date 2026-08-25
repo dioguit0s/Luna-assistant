@@ -289,9 +289,39 @@ export class AlarmRinger {
     }
   }
 
-  /** Uma volta da FSM: decide entre tocar, adiar, ou encerrar. */
+  /**
+   * Uma volta da FSM: decide entre tocar, adiar, ou encerrar.
+   *
+   * O corpo inteiro é protegido pelo mesmo motivo que o acesso ao banco em
+   * `finish()`: aqui se lê `reminder_audio` (`speechForBurst`) de dentro de um
+   * callback de `setTimeout`, fora de qualquer catch. Uma exceção ali deixaria
+   * `cycle.done` em `false`, o ciclo órfão em `activeByRoom` e a promise de
+   * `ring()` sem resolver **para sempre** — o que prende a vaga daquela sala em
+   * `firingRooms` até o restart, com o scheduler repolando a cada segundo.
+   */
   private step(cycle: RingCycle): void {
     if (cycle.done || this.stopped) return;
+
+    try {
+      this.stepUnsafe(cycle);
+    } catch (err: unknown) {
+      getLogger().error(
+        {
+          event: 'alarm_step_failed',
+          room_id: cycle.roomId,
+          reminder_id: cycle.reminderId,
+          short_id: cycle.shortId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        'Falha no ciclo de toque: encerrando para não prender a sala',
+      );
+      // `room_gone` e não `exhausted`: dá ao one-shot o retry com back-off que
+      // já existe, que é o certo para uma falha transitória de banco.
+      this.finish(cycle, 'room_gone');
+    }
+  }
+
+  private stepUnsafe(cycle: RingCycle): void {
 
     const now = this.now().getTime();
     if (now - cycle.startedAt >= this.maxRingMs) {

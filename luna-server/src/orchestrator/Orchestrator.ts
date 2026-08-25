@@ -145,6 +145,23 @@ export class Orchestrator implements AlarmAudioSink {
    * por turno não desliga o alarme porque a própria Luna falou.
    */
   private readonly captureByRoom = new Map<string, AudioCapture>();
+
+  /**
+   * Pré-renderização **pedida mas ainda não iniciada**, por sala.
+   *
+   * A captura não pode abrir junto com o `sendToolResult`: o modelo está
+   * gerando a confirmação falada do próprio `set_reminder` naquele instante, e
+   * a captura engoliria essa confirmação — o satélite ficaria em `RESPONDING`
+   * até o watchdog, e o PCM gravado como "fala do lembrete" seria o
+   * "Pronto, marquei para as oito". O pedido espera aqui até o `turnComplete`
+   * da confirmação.
+   *
+   * Um pedido por sala: dois `set_reminder` no mesmo turno deixam o último.
+   */
+  private readonly pendingPrerenderByRoom = new Map<
+    string,
+    { reminderId: number; label: string }
+  >();
   /**
    * Registro de dispatch: nome da tool → handler. A chave casa o nome; validar
    * os args é obrigação do handler (ver `ToolHandler`). Nome fora do mapa é
@@ -413,6 +430,10 @@ export class Orchestrator implements AlarmAudioSink {
       // próprio modelo já dispensou (o ciclo já saiu do mapa).
       this.alarmRinger.dismiss(roomId, 'turn_complete');
 
+      // Agora sim: a confirmação falada já saiu inteira, o turno fechou, e a
+      // sala pode entrar em modo captura sem engolir nada de ninguém.
+      this.startPendingPrerender(roomId);
+
       tracker.reset();
     });
 
@@ -448,10 +469,16 @@ export class Orchestrator implements AlarmAudioSink {
       void handler(call.args, ctx)
         .then((result) => {
           provider.sendToolResult(call.callId, result);
-          // DEPOIS do sendToolResult, nunca antes: no OpenAI o `speak()`
-          // compartilha o gate de `pendingToolCalls`, e chamado de dentro do
-          // handler ele encontraria a própria call de `set_reminder` ainda em
-          // voo — a pré-renderização falharia sempre, em silêncio.
+          // Só REGISTRA o pedido; quem o dispara é o `turnComplete` da
+          // confirmação falada (ver `startPendingPrerender`).
+          //
+          // Duas razões para não renderizar aqui. A primeira é o gate de
+          // `pendingToolCalls` do OpenAI, que o `speak()` compartilha: chamado
+          // de dentro do handler, encontraria a própria call de `set_reminder`
+          // ainda em voo. A segunda é pior e não tem gate nenhum — abrir a
+          // captura agora engoliria a confirmação que o modelo está gerando
+          // neste exato momento, e gravaria o áudio dela como se fosse a fala
+          // do lembrete.
           this.schedulePrerender(roomId, result);
         })
         .catch((err: unknown) => {
@@ -708,9 +735,25 @@ export class Orchestrator implements AlarmAudioSink {
     const alvo = this.reminderStore.findByShortId(roomId, criado.reminder_id);
     if (!alvo) return;
 
-    const label = criado.label;
+    // Só registra. Quem dispara é o `turnComplete` da confirmação (ver o campo
+    // `pendingPrerenderByRoom` e `startPendingPrerender`).
+    this.pendingPrerenderByRoom.set(roomId, { reminderId: alvo.id, label: criado.label });
+  }
+
+  /**
+   * Dispara a renderização enfileirada, se houver — chamado no fim de um turno
+   * normal, quando a confirmação falada já saiu inteira para o cômodo.
+   *
+   * `setImmediate` e não `await`: nada depende de a renderização ficar pronta
+   * rápido, e o callback do port é síncrono.
+   */
+  private startPendingPrerender(roomId: string): void {
+    const pedido = this.pendingPrerenderByRoom.get(roomId);
+    if (!pedido) return;
+    this.pendingPrerenderByRoom.delete(roomId);
+
     setImmediate(() => {
-      void this.prerenderReminderSpeech(roomId, alvo.id, label);
+      void this.prerenderReminderSpeech(roomId, pedido.reminderId, pedido.label);
     });
   }
 
@@ -830,6 +873,17 @@ export class Orchestrator implements AlarmAudioSink {
     this.speakingByRoom.delete(roomId);
     this.lastDeviceIdByRoom.delete(roomId);
     this.lastUserSpeechAtByRoom.delete(roomId);
+
+    // Uma captura que sobrevive à morte da sessão engole a primeira resposta da
+    // sessão SEGUINTE — e o `turnComplete` dela gravaria essa fala como se
+    // fosse a do lembrete. Resolver com `null`, não só deletar: sem isso
+    // `prerenderReminderSpeech` fica pendurado até `PRERENDER_TIMEOUT_MS`.
+    const capture = this.captureByRoom.get(roomId);
+    if (capture) {
+      this.captureByRoom.delete(roomId);
+      capture.settle(null);
+    }
+    this.pendingPrerenderByRoom.delete(roomId);
 
     const silenceTimer = this.silenceTimerByRoom.get(roomId);
     if (silenceTimer) {
