@@ -12,7 +12,7 @@
  */
 
 /** Mesma taxa do áudio de resposta (AUDIO_RESPONSE_SAMPLE_RATE_HZ em Orchestrator.ts) e do firmware (config.h SAMPLE_RATE). */
-const SAMPLE_RATE_HZ = 16_000;
+export const SAMPLE_RATE_HZ = 16_000;
 
 /**
  * 1200 Hz: o mesmo tom do chirp local de wake word do firmware
@@ -22,8 +22,8 @@ const SAMPLE_RATE_HZ = 16_000;
  */
 const CHIME_FREQ_HZ = 1_200;
 
-/** Duração de um bipe. A cadência da rajada inteira (quantos bipes, silêncio entre eles) é calibrada no hardware no marco 7 — este número é só a duração de UM tom. */
-const CHIME_DURATION_MS = 1_000;
+/** Duração de um bipe. A cadência da rajada inteira (silêncio entre rajadas) é a janela de escuta do `AlarmRinger` — este número é só a duração de UM tom. */
+export const CHIME_DURATION_MS = 1_000;
 
 /**
  * Amplitude moderada, não fundo de escala: full-scale (32767) sai duro no

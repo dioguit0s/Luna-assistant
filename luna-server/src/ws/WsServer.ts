@@ -7,6 +7,7 @@ import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import type { ReminderStore } from '../reminders/ReminderStore.js';
 import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
+import type { AlarmRinger } from '../reminders/AlarmRinger.js';
 import { validateAuthToken } from './auth.js';
 import { parseAudioMessage } from './messageParser.js';
 import {
@@ -94,12 +95,19 @@ export class WsServer {
 
   /**
    * Passthrough para `Orchestrator.ringOnce`: toca o chime uma vez no cômodo.
-   * `index.ts` chama isto do `onFire` do `ReminderScheduler`, com o fallback
-   * de sala offline por cima (ver ali) — este método não sabe nada de
-   * fallback, só endereça o cômodo pedido.
+   * Uma rajada só, sem ciclo — o toque de verdade é o `AlarmRinger`.
    */
   ringOnce(roomId: string): number {
     return this.orchestrator.ringOnce(roomId);
+  }
+
+  /**
+   * O ciclo de toque por sala, para `index.ts` ligar no `onFire` do
+   * `ReminderScheduler` e parar no shutdown. O Orchestrator continua um
+   * detalhe de implementação do `WsServer`; só o ringer sai.
+   */
+  getAlarmRinger(): AlarmRinger {
+    return this.orchestrator.getAlarmRinger();
   }
 
   /**

@@ -100,6 +100,16 @@ export class ReminderScheduler {
   start(): void {
     this.stopped = false;
     this.store.recoverStaleRinging(this.maxRingMs, this.now().getTime());
+    // Áudio de lembrete que não vai mais tocar: acumula em disco porque o
+    // CASCADE da tabela nunca dispara (lembrete não é DELETEado, só muda de
+    // status). O boot é o momento barato de limpar.
+    const podados = this.store.pruneAudio();
+    if (podados > 0) {
+      getLogger().info(
+        { event: 'reminder_audio_pruned', rows: podados },
+        `Podados ${podados} áudios de lembretes encerrados`,
+      );
+    }
     this.reschedule();
   }
 
@@ -272,6 +282,12 @@ export class ReminderScheduler {
       })
       .finally(() => {
         this.firingRooms.delete(emToque.roomId);
+        // A vaga liberou: quem estava barrado pelo teto de concorrência ou por
+        // "esta sala já está tocando" tem que ser reavaliado agora, não na
+        // próxima acordada. Com o ciclo de toque durando minutos (o `onFire`
+        // do `AlarmRinger` só resolve no fim), sem isto o fallback de
+        // THROTTLE_RETRY_MS ficaria repolling de segundo em segundo até lá.
+        this.reschedule();
       });
   }
 

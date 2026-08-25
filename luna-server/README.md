@@ -122,6 +122,18 @@ cada release no deploy.
 | `REMINDER_MAX_CONCURRENT` | `20` | Teto de disparos simultâneos — 20 alarmes não podem abrir 20 sessões de provider |
 | `REMINDER_MAX_PER_ROOM` | `20` | Teto de lembretes vivos por sala; contém um loop de tool calls |
 | `REMINDER_FALLBACK_ROOM_ID` | vazio | Cômodo de fallback quando o satélite de origem está offline. Vazio **desliga** o fallback |
+| `RING_LISTEN_WINDOW_MS` | `6000` | Janela entre rajadas em que a wake word volta a ficar ligada — a única em que "Luna, para o alarme" é ouvido |
+| `RING_BARGEIN_GUARD_MS` | `2000` | Silêncio mínimo desde a última fala do usuário para uma rajada poder sair |
+| `RING_SILENT_RETRY_MS` | `60000` | Espera antes de tentar de novo quando a sala emudeceu no meio do toque |
+| `RING_MAX_DEFER_MS` | `3000` | Teto de adiamento pelo guard de barge-in: passado ele, a rajada sai por cima da fala. Um cômodo que nunca silencia não pode significar um alarme que nunca toca |
+| `REMINDER_SNOOZE_MAX_MINUTES` | `60` | Teto da soneca pedida por voz |
+
+> **`RING_LISTEN_WINDOW_MS` e `RING_MAX_DEFER_MS` não foram medidos no hardware** (2026-08-24): são
+> derivados das constantes do firmware (`AEC_RESUME_DELAY_MS`,
+> `WAKE_SETTLE_WINDOWS`) mais o tempo de dizer "Hey Luna". Calibrar no satélite
+> real, como os `WAKE_LISTEN_*` foram. O log de `alarm_dismissed` traz
+> `listen_offset_ms` justamente para isso: é onde, dentro da janela, a dispensa
+> chegou.
 
 Precedência do caminho do banco: `LUNA_DB_PATH` → `$STATE_DIRECTORY` do systemd →
 `./.luna-state/luna.db`. É absoluto de propósito: o `activate.sh` troca o symlink de
@@ -130,6 +142,12 @@ apontaria justamente para o diretório que some.
 
 O fallback de cômodo é **burro de propósito** — config fixa, não "onde tem gente".
 Silêncio é melhor que adivinhar errado o cômodo.
+
+> **Backup do banco:** o `activate.sh` copia o `.db` antes de trocar o symlink da
+> release. Não é higiene opcional: o rollback de código **não desfaz** uma migração
+> de schema, e o `ReminderStore` recusa abrir um banco com `user_version` maior que
+> o número de migrações que ele conhece. Sem o backup, uma release que migra e
+> depois falha o health check derruba o serviço duas vezes — a segunda no rollback.
 
 ### Notas
 

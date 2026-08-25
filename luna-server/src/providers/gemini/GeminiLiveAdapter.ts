@@ -276,6 +276,28 @@ export class GeminiLiveAdapter implements IAudioProvider {
     });
   }
 
+  /**
+   * Injeta um turno de **usuário** com a instrução e fecha o turno; a resposta
+   * volta pelo caminho normal (`handleMessage` → `audioResponseCb`).
+   *
+   * Duas consequências que o chamador precisa conhecer: o modelo **parafraseia**
+   * em vez de ler literal (é um turno de usuário, não um "diga isto"), e o
+   * `turnComplete` correspondente chega com `userText` vazio — quem pediu a
+   * fala tem que filtrar, senão o ring buffer da conversa se suja.
+   *
+   * Não mexe em `lastAudioAt` de propósito: pré-renderizar não deve manter uma
+   * sessão paga viva contra o `goAway` por ociosidade.
+   */
+  async speak(instruction: string): Promise<boolean> {
+    if (!this.session) return false;
+
+    this.session.sendClientContent({
+      turns: [{ role: 'user', parts: [{ text: instruction }] }],
+      turnComplete: true,
+    });
+    return true;
+  }
+
   signalActivityEnd(): void {
     if (!this.session || !this.config.geminiManualActivity || !this.activityOpen) {
       return;

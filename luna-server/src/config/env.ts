@@ -82,6 +82,53 @@ export interface AppConfig {
    * silêncio (melhor que adivinhar errado onde tem gente).
    */
   reminderFallbackRoomId: string;
+  /**
+   * Janela em que o satélite fica ouvindo entre duas rajadas do alarme.
+   *
+   * Consequência direta de dispensar por wake word: em `RESPONDING` a wake word
+   * está desligada, então um alarme que toca continuamente é um alarme que não
+   * se desliga por voz. O orçamento vem do firmware: `speaking_end` → drain do
+   * `playbackBuffer` → `AEC_RESUME_DELAY_MS` (150 ms) → `WAKE_SETTLE_WINDOWS`
+   * (15 janelas ≈ 450 ms de supressão) — ~600 ms surdos antes de a pessoa poder
+   * começar, mais ~700-900 ms de "Hey Luna".
+   *
+   * 2026-08-24: valor derivado desses números no papel, **não medido no
+   * hardware** (esta rodada não teve satélite disponível). Calibrar no
+   * dispositivo real, como os `WAKE_LISTEN_*` do `config.h` foram.
+   */
+  ringListenWindowMs: number;
+  /**
+   * Silêncio mínimo desde a última fala do usuário para uma rajada poder sair.
+   *
+   * `speaking_start` faz o firmware dar `xQueueReset(txQueue)`: uma rajada no
+   * meio de uma frase corta o comando do usuário e o provider recebe meia
+   * pergunta. O mesmo guard resolve a corrida da borda — a wake word da
+   * dispensa caindo no instante do re-disparo.
+   */
+  ringBargeInGuardMs: number;
+  /**
+   * Espera antes de tentar de novo quando a sala emudeceu **depois** de já ter
+   * recebido rajada (satélite desconectou no meio do toque).
+   *
+   * Nunca rearmar com o vencimento original: `next_due_utc` no passado faz o
+   * scheduler acordar com `delay = 0` e re-disparar em laço quente até a
+   * carência de `missedGraceMs` expirar.
+   */
+  ringSilentRetryMs: number;
+  /**
+   * Teto de adiamento de uma rajada pelo guard de barge-in.
+   *
+   * Sem ele, um cômodo que transmite sem parar nunca ouviria o alarme — é o
+   * caso do `luna-client-test --mic` e do `luna-desktop`, que não têm wake word.
+   * Um alarme que **nunca toca** é pior que um que trunca uma frase, então
+   * passado este teto a rajada sai assim mesmo.
+   *
+   * 2026-08-24: não medido no hardware, como `ringListenWindowMs`. É env pelo
+   * mesmo motivo que aquele: calibrar não pode exigir redeploy.
+   */
+  ringMaxDeferMs: number;
+  /** Teto da soneca pedida por voz, em minutos. */
+  reminderSnoozeMaxMinutes: number;
 }
 
 export type EndSensitivityName = 'HIGH' | 'LOW';
@@ -216,6 +263,11 @@ export function loadConfig(): AppConfig {
     reminderMaxConcurrent: parseOptionalNumber('REMINDER_MAX_CONCURRENT') ?? 20,
     reminderMaxPerRoom: parseOptionalNumber('REMINDER_MAX_PER_ROOM') ?? 20,
     reminderFallbackRoomId: process.env.REMINDER_FALLBACK_ROOM_ID ?? '',
+    ringListenWindowMs: parseOptionalNumber('RING_LISTEN_WINDOW_MS') ?? 6_000,
+    ringBargeInGuardMs: parseOptionalNumber('RING_BARGEIN_GUARD_MS') ?? 2_000,
+    ringSilentRetryMs: parseOptionalNumber('RING_SILENT_RETRY_MS') ?? 60_000,
+    ringMaxDeferMs: parseOptionalNumber('RING_MAX_DEFER_MS') ?? 3_000,
+    reminderSnoozeMaxMinutes: parseOptionalNumber('REMINDER_SNOOZE_MAX_MINUTES') ?? 60,
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {

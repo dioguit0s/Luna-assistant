@@ -232,6 +232,33 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
     }
   }
 
+  /**
+   * Fala fora da conversa: `conversation: 'none'` mantém o turno out-of-band,
+   * então a instrução não entra no histórico da sessão nem influencia o próximo
+   * turno do usuário.
+   *
+   * **Compartilha o gate de `sendToolResult`**: com uma tool call em voo, um
+   * `response.create` agora geraria duas falas sobrepostas — exatamente o bug
+   * que aquele gate existe para prevenir. Recusar é honesto, e o caminho do
+   * alarme já sabe degradar para o chime.
+   */
+  async speak(instruction: string): Promise<boolean> {
+    if (!this.ws || !this.connected) return false;
+    if (this.pendingToolCalls.size > 0) {
+      getLogger().warn(
+        { event: 'openai_speak_busy', room_id: this.roomId },
+        'speak() recusado: tool call em voo geraria duas falas sobrepostas',
+      );
+      return false;
+    }
+
+    this.sendEvent({
+      type: 'response.create',
+      response: { instructions: instruction, conversation: 'none' },
+    });
+    return true;
+  }
+
   async disconnect(): Promise<void> {
     this.disposed = true;
     this.pendingToolCalls.clear();

@@ -34,5 +34,16 @@ export interface IAudioProvider {
    * verbalize a confirmação. `callId` é o mesmo recebido em `onToolCall`.
    */
   sendToolResult(callId: string, result: unknown): void;
+  /**
+   * Faz a IA produzir uma fala a partir de uma instrução textual, **sem áudio
+   * de entrada**. O áudio sai pelo caminho normal, por `onAudioResponse`.
+   *
+   * Resolve `false` quando a sessão não estava viva, ou quando o pedido não
+   * pôde ser aceito agora — o caminho do alarme PRECISA saber que falhou para
+   * degradar para o toque só-chime. `true` não promete que o áudio saiu:
+   * promete que o pedido foi aceito pela sessão, que é o máximo que os dois
+   * adapters conseguem afirmar (nenhum dos SDKs expõe liveness de verdade).
+   */
+  speak(instruction: string): Promise<boolean>;
   disconnect(): Promise<void>;
 }

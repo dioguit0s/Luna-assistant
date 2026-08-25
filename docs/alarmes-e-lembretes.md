@@ -1,7 +1,21 @@
 # Alarmes e lembretes — plano de implementação
 
-**Status:** Em desenvolvimento — marcos 0 a 6 entregues (relógio único, endereçamento por sala, registry de dispatch, `ReminderStore`, `ReminderScheduler`, `Chime`, `set_reminder`)
-**Data:** 2026-08-19
+**Status:** Implementado — marcos 0 a 11 entregues. Falta a calibração no hardware
+dos marcos 7 e 8 (`RING_LISTEN_WINDOW_MS`, `RING_MAX_DEFER_MS` — as duas são env), que não pôde ser
+feita por não haver satélite disponível; os valores em uso são derivados das
+constantes do firmware, com comentário datado no código dizendo isso.
+**Data:** 2026-08-19 (plano) · 2026-08-24 (implementação)
+
+> **Duas correções ao que este plano previa**, descobertas na implementação e
+> registradas no [ADR 007](adr/007-audio-nao-solicitado.md):
+>
+> 1. **O guard de barge-in não pode vir do áudio de entrada** (`lastAudioAtByRoom`,
+>    decisão 9). Em open-mic o satélite transmite continuamente, então esse marco
+>    seria sempre "agora" e o alarme nunca tocaria. O sinal usado é a transcrição
+>    de entrada do provider (`onUserSpeech`), com teto de adiamento.
+> 2. **O watchdog de `speaking_end` não precisou mudar** (decisão 11). Ele mede
+>    liveness do provider, não estado de fila; cada rajada tem duração conhecida e
+>    fecha o par sincronicamente. Há teste travando esse invariante.
 
 ## Objetivo
 

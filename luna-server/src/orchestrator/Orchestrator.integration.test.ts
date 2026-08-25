@@ -53,6 +53,11 @@ const baseConfig: AppConfig = {
   reminderMaxConcurrent: 20,
   reminderMaxPerRoom: 20,
   reminderFallbackRoomId: '',
+  ringListenWindowMs: 6_000,
+  ringBargeInGuardMs: 2_000,
+  ringSilentRetryMs: 60_000,
+  ringMaxDeferMs: 3_000,
+  reminderSnoozeMaxMinutes: 60,
 };
 
 const ROOM_ID = 'sala_de_estar';
@@ -151,6 +156,15 @@ class FakeAudioProvider implements IAudioProvider {
     this.nextResult = null;
   }
 
+  /** Registra as instruções de `speak` para o teste inspecionar. */
+  readonly spoken: string[] = [];
+  speakResult = true;
+
+  async speak(instruction: string): Promise<boolean> {
+    this.spoken.push(instruction);
+    return this.speakResult;
+  }
+
   async disconnect(): Promise<void> {}
 
   /**
@@ -246,6 +260,8 @@ function buildHarness(
     },
     getRingBuffer: () => ringBuffer,
     evictRoom: (roomId: string) => evictRoomCalls.push(roomId),
+    // A pré-renderização só aproveita sessão existente — nunca abre uma nova.
+    getExistingProvider: () => (bound ? provider : null),
   } as unknown as RoomManager;
 
   const { fetchImpl, calls } = mockFetch(respond);
@@ -1029,6 +1045,80 @@ describe('Orchestrator: ringOnce (chime)', () => {
     assert.equal(harness.sent.length, antes, 'ringOnce não deveria ter enfileirado nada por cima do turno');
   });
 
+  it('fallback de dispensa: qualquer conversa na sala durante o toque desliga o alarme', async () => {
+    // Ter falado com a Luna já prova que a pessoa acordou. Cobre o caso de o
+    // modelo simplesmente não chamar `manage_reminders`.
+    const store = harness.reminderStore;
+    const criado = store.insertOnce({ roomId: ROOM_ID, label: null, dueAtUtc: Date.now() });
+    store.markRinging(criado.id, criado.nextDueUtc);
+
+    const ringer = harness.orchestrator.getAlarmRinger();
+    const ciclo = ringer.ring(store.get(criado.id)!);
+    await Promise.resolve();
+    assert.equal(ringer.isRinging(ROOM_ID), true);
+
+    await feedAudio(harness);
+    harness.provider.emitTurnComplete({ userText: 'já acordei', assistantText: 'Bom dia.' });
+    await ciclo;
+
+    assert.equal(ringer.isRinging(ROOM_ID), false);
+    assert.equal(store.get(criado.id)!.status, 'done');
+  });
+
+  it('não interrompe o usuário: com fala recente na sala, devolve 0 e não enfileira nada', async () => {
+    // `speaking_start` faz o firmware dar xQueueReset(txQueue): uma rajada no
+    // meio da frase corta o comando e o provider recebe meia pergunta.
+    await feedAudio(harness);
+    harness.provider.emitUserSpeech();
+
+    const delivered = harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+
+    assert.equal(delivered, 0);
+    // O debounce de silêncio manda um `speaking_start` seu durante o drain —
+    // por isso a asserção é sobre frame de ÁUDIO, que só o chime produziria.
+    assert.deepEqual(audioFrames(harness), [], 'nenhum frame de chime deveria ter saído por cima da fala');
+  });
+
+  it('a guarda de barge-in expira: passado ringBargeInGuardMs, a rajada sai', async () => {
+    await feedAudio(harness);
+    harness.provider.emitUserSpeech();
+
+    // `msSinceUserSpeech` lê o relógio de parede, que `mock.timers` não move
+    // por padrão — então o guard é conferido pelo próprio acessor.
+    assert.ok(harness.orchestrator.isUserLikelySpeaking(ROOM_ID));
+    assert.ok((harness.orchestrator.msSinceUserSpeech(ROOM_ID) ?? Infinity) < baseConfig.ringBargeInGuardMs);
+
+    // Sala sem fala nenhuma: o guard não se aplica e o chime sai normalmente.
+    const outraSala = 'cozinha';
+    assert.equal(harness.orchestrator.msSinceUserSpeech(outraSala), null);
+    assert.equal(harness.orchestrator.isUserLikelySpeaking(outraSala), false);
+    assert.ok(harness.orchestrator.ringOnce(outraSala) >= 0);
+  });
+
+  it('o watchdog de fala é rearmado por frame de alarme: rajada longa não leva speaking_end espúrio', () => {
+    // O watchdog só era rearmado em `onAudioResponse` — uma rajada sem áudio
+    // de provider nenhum dispararia um `speaking_end` do watchdog aos 8s.
+    harness.orchestrator.ringOnce(ROOM_ID);
+    drainQueue();
+    const depoisDoCiclo = controlMessages(harness.sent).map((m) => m.type);
+    assert.deepEqual(
+      depoisDoCiclo.filter((t) => t === 'speaking_end'),
+      ['speaking_end'],
+      'esperava um único speaking_end, o do fim do ciclo',
+    );
+
+    // Passado o teto do watchdog, nenhum speaking_end a mais aparece: o timer
+    // do ciclo foi limpo por `endSpeaking`, não deixado pendurado.
+    mock.timers.tick(SPEAKING_WATCHDOG_MS * 2);
+    const depoisDoTeto = controlMessages(harness.sent).map((m) => m.type);
+    assert.deepEqual(
+      depoisDoTeto.filter((t) => t === 'speaking_end'),
+      ['speaking_end'],
+      'watchdog não deveria ter mandado um speaking_end a mais depois do ciclo',
+    );
+  });
+
   it('sala vazia (sendToRoom devolve 0): ainda assim completa o ciclo, sem travar speakingByRoom', () => {
     // Um `sendToRoom` real devolve 0 quando ninguém está conectado no cômodo
     // (ver WsServer.sendToRoom). O ciclo inteiro precisa terminar mesmo
@@ -1061,6 +1151,170 @@ describe('Orchestrator: ringOnce (chime)', () => {
       0,
       'um segundo ringOnce logo depois do primeiro não deveria ser bloqueado por speakingByRoom preso',
     );
+  });
+});
+
+describe('Orchestrator: pré-renderização da fala do lembrete', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+  });
+
+  it('captura o áudio da fala sem deixar vazar um frame sequer para o cômodo', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'tomar o remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'tomar o remédio',
+    );
+    await Promise.resolve();
+
+    harness.provider.emitAudioResponse(Buffer.from([1, 2, 3, 4]));
+    harness.provider.emitAudioResponse(Buffer.from([5, 6]));
+    harness.provider.emitTurnComplete({ assistantText: 'Está na hora: tomar o remédio.' });
+
+    assert.equal(await renderizando, true);
+    assert.deepEqual(
+      harness.reminderStore.getAudio(criado.id),
+      Buffer.from([1, 2, 3, 4, 5, 6]),
+    );
+    // Isto é o ponto: o áudio da renderização não pode sair pelo alto-falante.
+    assert.deepEqual(harness.sent, []);
+  });
+
+  it('a instrução pede a frase literal e passa o label pelo speak do provider', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'regar as plantas',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'regar as plantas',
+    );
+    await Promise.resolve();
+    harness.provider.emitAudioResponse(Buffer.from([1]));
+    harness.provider.emitTurnComplete({});
+    await renderizando;
+
+    assert.equal(harness.provider.spoken.length, 1);
+    assert.match(harness.provider.spoken[0]!, /regar as plantas/);
+    assert.match(harness.provider.spoken[0]!, /exatamente/i);
+  });
+
+  it('o turno da renderização não suja o histórico da conversa', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(ROOM_ID, criado.id, 'remédio');
+    await Promise.resolve();
+    harness.provider.emitAudioResponse(Buffer.from([1]));
+    // O turnComplete da renderização vem com userText vazio: appendTurn aqui
+    // encheria o ring buffer de falas que ninguém disse.
+    harness.provider.emitTurnComplete({ assistantText: 'Está na hora: remédio.' });
+    await renderizando;
+
+    assert.deepEqual(harness.orchestrator['roomManager'].getRingBuffer().getHistory(ROOM_ID), []);
+  });
+
+  it('speak recusado pelo provider degrada para só-chime, sem pendurar a sala', async () => {
+    await harness.startSession();
+    harness.provider.speakResult = false;
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizado = await harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'remédio',
+    );
+
+    assert.equal(renderizado, false);
+    assert.equal(harness.reminderStore.getAudio(criado.id), null);
+
+    // E a sala volta a funcionar normalmente: sem isto ela ficaria em modo
+    // captura para sempre e nenhuma resposta sairia mais pelo alto-falante.
+    harness.provider.emitAudioResponse(Buffer.from([9, 9]));
+    assert.ok(harness.sent.length > 0);
+  });
+
+  it('releaseRoom no meio da renderização fecha a captura, sem prender a sala', async () => {
+    // Sem isto a captura sobreviveria até PRERENDER_TIMEOUT_MS (15s), e a
+    // primeira resposta da sessão SEGUINTE seria engolida por ela — gravando a
+    // fala errada em reminder_audio.
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(ROOM_ID, criado.id, 'remédio');
+    await Promise.resolve();
+
+    harness.orchestrator.releaseRoom(ROOM_ID);
+
+    // `Promise.race` contra um timer curto, e não `await` puro: contra o código
+    // antigo o `await` sozinho não falharia por asserção, ele estolaria até o
+    // runner desistir — e o `PRERENDER_TIMEOUT_MS` de 15s é `unref()`ado, então
+    // nem esse limite é confiável. Racear contra `Promise.resolve` seria o
+    // extremo oposto: nenhuma função async resolve em zero microtasks. 100ms é
+    // folgado para o caminho correto e curtíssimo perto dos 15s do errado.
+    let timer: NodeJS.Timeout | undefined;
+    const naoResolveu = new Promise<'pendente'>((resolve) => {
+      timer = setTimeout(() => resolve('pendente'), 100);
+    });
+    const corrida = await Promise.race([renderizando, naoResolveu]);
+    clearTimeout(timer);
+    assert.equal(corrida, false, 'a promise tem que resolver na hora, não no timeout');
+    assert.equal(harness.reminderStore.getAudio(criado.id), null);
+
+    // E a sala volta a mandar áudio para o cômodo normalmente.
+    harness.provider.emitAudioResponse(Buffer.from([7, 7]));
+    assert.ok(harness.sent.length > 0);
+  });
+
+  it('sem sessão viva não tenta nada — pré-render não abre sessão de provider', async () => {
+    const criado = harness.reminderStore.insertOnce({
+      roomId: ROOM_ID,
+      label: 'remédio',
+      dueAtUtc: Date.now() + 60_000,
+    });
+
+    const renderizado = await harness.orchestrator.prerenderReminderSpeech(
+      ROOM_ID,
+      criado.id,
+      'remédio',
+    );
+
+    assert.equal(renderizado, false);
+    assert.equal(harness.provider.spoken.length, 0);
   });
 });
 
@@ -1118,6 +1372,120 @@ describe('Orchestrator: set_reminder ponta a ponta', () => {
     // esperar a próxima acordada, ele já enxerga o lembrete recém-criado como
     // o próximo a vencer.
     assert.equal(harness.reminderStore.nextArmed()?.shortId, result.reminder_id);
+  });
+
+  describe('pré-renderização: quando a captura abre', () => {
+    // O gate de sala quieta usa `Date.now()` e um timer de retentativa, então
+    // estes testes precisam do relógio sob controle. Época realista para o
+    // `at_time` resolver como resolveria em produção.
+    beforeEach(() => {
+      mock.timers.enable({
+        apis: ['setTimeout', 'Date'],
+        now: new Date('2026-08-20T12:00:00Z'),
+      });
+    });
+
+    afterEach(() => {
+      mock.timers.reset();
+    });
+
+    /** Deixa o gate rodar: passa da janela de silêncio e da retentativa. */
+    async function abrirGate(): Promise<void> {
+      mock.timers.tick(2_000);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    it('a confirmação falada sai INTEIRA para o cômodo, não é engolida pela pré-renderização', async () => {
+      // Regressão do marco 8: a renderização era disparada no `.then` do
+      // `sendToolResult`, num `setImmediate` — centenas de ms antes de o áudio
+      // da confirmação chegar. A captura abria primeiro, engolia a confirmação,
+      // o satélite ficava em RESPONDING até o watchdog, e o PCM gravado como
+      // "fala do lembrete" era o "Pronto, marquei para as oito".
+      await feedAudio(harness);
+
+      await harness.provider.emitToolCall(
+        toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
+      );
+
+      // Em produção o áudio da confirmação chega centenas de ms depois, com o
+      // event loop já tendo girado — é isso que este `setImmediate` reproduz.
+      // Sem ele o teste passaria mesmo com o bug, porque o `setImmediate` do
+      // código antigo ainda não teria rodado.
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // O modelo responde confirmando — ESTE áudio é para o cômodo.
+      harness.provider.emitAudioResponse(Buffer.from([0xaa, 0xbb]));
+      assert.ok(
+        harness.sent.some((item) => Buffer.isBuffer(item)),
+        'a confirmação falada tem que sair para o cômodo',
+      );
+      assert.deepEqual(harness.provider.spoken, [], 'nada de speak() com a confirmação em voo');
+
+      harness.provider.emitTurnComplete({ assistantText: 'Marcado, hoje às oito.' });
+      await abrirGate();
+
+      assert.equal(harness.provider.spoken.length, 1);
+      assert.match(harness.provider.spoken[0]!, /tomar o remédio/);
+    });
+
+    it('o PCM gravado é o da fala do lembrete, não o da confirmação', async () => {
+      await feedAudio(harness);
+      await harness.provider.emitToolCall(
+        toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
+      );
+
+      const CONFIRMACAO = Buffer.from([0x11, 0x11]);
+      const FALA_DO_LEMBRETE = Buffer.from([0x22, 0x22, 0x22, 0x22]);
+
+      await new Promise((resolve) => setImmediate(resolve));
+      harness.provider.emitAudioResponse(CONFIRMACAO);
+      harness.provider.emitTurnComplete({ assistantText: 'Marcado.' });
+      await abrirGate();
+
+      // Agora sim a sala está em modo captura: este áudio é o do `speak()`.
+      harness.provider.emitAudioResponse(FALA_DO_LEMBRETE);
+      harness.provider.emitTurnComplete({});
+      await new Promise((resolve) => setImmediate(resolve));
+
+      const criado = harness.reminderStore.listLiveByRoom(ROOM_ID)[0]!;
+      assert.deepEqual(harness.reminderStore.getAudio(criado.id), FALA_DO_LEMBRETE);
+    });
+
+    it('resposta mista (tool + fala no MESMO turno): a captura espera a confirmação da resposta seguinte', async () => {
+      // É o caminho do OpenAI em que `handleResponseDone` NÃO suprime o
+      // turnComplete: a resposta que traz o function_call também traz uma
+      // mensagem, então o turnComplete chega ANTES da confirmação, que vem na
+      // resposta seguinte. Amarrar a captura ao turnComplete cru abriria bem no
+      // meio dela.
+      await feedAudio(harness);
+      await harness.provider.emitToolCall(
+        toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // turnComplete da PRIMEIRA resposta, antes de qualquer confirmação.
+      harness.provider.emitTurnComplete({ assistantText: 'Só um instante.' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // A confirmação chega agora, na segunda resposta.
+      const framesAntes = harness.sent.filter((item) => Buffer.isBuffer(item)).length;
+      harness.provider.emitAudioResponse(Buffer.from([0xcc, 0xdd]));
+
+      // A fila de saída é paceada: um tick curto (bem abaixo da janela de
+      // silêncio do gate) drena o que está pendente sem abrir a captura.
+      mock.timers.tick(200);
+
+      assert.ok(
+        harness.sent.filter((item) => Buffer.isBuffer(item)).length > framesAntes,
+        'a confirmação da segunda resposta tem que sair para o cômodo',
+      );
+      assert.deepEqual(harness.provider.spoken, [], 'a captura não pode ter aberto no meio dela');
+
+      // Só depois de a sala silenciar de verdade é que a renderização começa.
+      harness.provider.emitTurnComplete({ assistantText: 'Marcado.' });
+      await abrirGate();
+      assert.equal(harness.provider.spoken.length, 1);
+    });
   });
 
   it('args inválidos: erro falável ao modelo, nenhuma linha no banco', async () => {

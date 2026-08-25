@@ -1,7 +1,8 @@
-import type { ReminderStore } from '../../reminders/ReminderStore.js';
+import type { Reminder, ReminderStore } from '../../reminders/ReminderStore.js';
 import type { ReminderScheduler } from '../../reminders/ReminderScheduler.js';
-import { isSetReminderArgs } from '../../reminders/tools.js';
+import { isSetReminderArgs, type SetReminderArgs } from '../../reminders/tools.js';
 import { resolveOnceDueAt } from '../../reminders/resolveOnce.js';
+import { resolveRecurring } from '../../reminders/recurrence.js';
 import { getLogger } from '../../logging/logger.js';
 import type { NowFn } from '../../time/clock.js';
 import { systemNow } from '../../time/clock.js';
@@ -61,27 +62,15 @@ export function createSetReminderHandler(deps: SetReminderDeps): ToolHandler {
       return { success: false, error: 'já tem lembretes demais marcados aqui — cancele algum antes' };
     }
 
-    const resolved = resolveOnceDueAt(
-      {
-        inSeconds: args.in_seconds,
-        atTime: args.at_time,
-        whenDay: args.when_day,
-      },
-      now(),
-    );
+    const criacao =
+      args.repeat === undefined || args.repeat === 'none'
+        ? criarOneShot(deps, ctx.roomId, label.value, args, now())
+        : criarRecorrente(deps, ctx.roomId, label.value, args, now());
 
-    if (!resolved.ok) {
-      return { success: false, error: resolved.error };
+    if (criacao.ok === false) {
+      return { success: false, error: criacao.error };
     }
-
-    const created = deps.store.insertOnce(
-      {
-        roomId: ctx.roomId,
-        label: label.value,
-        dueAtUtc: resolved.dueAtUtc,
-      },
-      now().getTime(),
-    );
+    const { created, spokenWhen } = criacao;
 
     // Sem isto, um "daqui a 10 segundos" só seria notado na próxima acordada
     // do timer — até MAX_TIMER_DELAY_MS (60s) de atraso.
@@ -94,17 +83,96 @@ export function createSetReminderHandler(deps: SetReminderDeps): ToolHandler {
         reminder_id: created.id,
         short_id: created.shortId,
         due_at_utc: created.dueAtUtc,
+        next_due_utc: created.nextDueUtc,
+        kind: created.kind,
+        repeat_rule: created.repeatRule,
         has_label: created.label !== null,
       },
-      `Lembrete ${created.shortId} marcado para ${resolved.spokenWhen} em ${ctx.roomId}`,
+      `Lembrete ${created.shortId} marcado para ${spokenWhen} em ${ctx.roomId}`,
     );
 
     return {
       success: true,
       reminder_id: created.shortId,
-      spoken_when: resolved.spokenWhen,
+      spoken_when: spokenWhen,
       label: created.label,
     };
+  };
+}
+
+type Criacao =
+  | { ok: true; created: Reminder; spokenWhen: string }
+  | { ok: false; error: string };
+
+/** "daqui a 10 minutos", "me acorda às 7", "sexta às 20h" — instante único. */
+function criarOneShot(
+  deps: SetReminderDeps,
+  roomId: string,
+  label: string | null,
+  args: SetReminderArgs,
+  agora: Date,
+): Criacao {
+  const resolved = resolveOnceDueAt(
+    { inSeconds: args.in_seconds, atTime: args.at_time, whenDay: args.when_day },
+    agora,
+  );
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+
+  return {
+    ok: true,
+    created: deps.store.insertOnce(
+      { roomId, label, dueAtUtc: resolved.dueAtUtc },
+      agora.getTime(),
+    ),
+    spokenWhen: resolved.spokenWhen,
+  };
+}
+
+/**
+ * "todo dia útil às 6:30", "toda sexta às 20h".
+ *
+ * O banco guarda a **hora local** e a regra, não um instante: é `next_due_utc`
+ * que é materializado, e ele é recomputado a partir da hora de parede a cada
+ * disparo. Um recorrente definido por delta sairia do horário a cada soneca.
+ */
+function criarRecorrente(
+  deps: SetReminderDeps,
+  roomId: string,
+  label: string | null,
+  args: SetReminderArgs,
+  agora: Date,
+): Criacao {
+  if (args.in_seconds !== undefined) {
+    return { ok: false, error: 'para repetir eu preciso de um horário, não de "daqui a tanto"' };
+  }
+  if (args.at_time === undefined) {
+    return { ok: false, error: 'faltou o horário em que isso deve tocar todo dia' };
+  }
+
+  const resolved = resolveRecurring(
+    {
+      atTime: args.at_time,
+      repeat: args.repeat as Exclude<NonNullable<SetReminderArgs['repeat']>, 'none'>,
+      whenDay: args.when_day,
+    },
+    agora,
+  );
+  if (!resolved.ok) return { ok: false, error: resolved.error };
+
+  return {
+    ok: true,
+    created: deps.store.insertRecurring(
+      {
+        roomId,
+        label,
+        localHour: resolved.localHour,
+        localMinute: resolved.localMinute,
+        repeatRule: resolved.repeatRule,
+        nextDueUtc: resolved.firstDueUtc,
+      },
+      agora.getTime(),
+    ),
+    spokenWhen: resolved.spokenWhen,
   };
 }
 

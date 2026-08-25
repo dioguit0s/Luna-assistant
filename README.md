@@ -112,7 +112,7 @@ bash wake-training/run.sh all
 | 2 — Satélite | Hardware, firmware, I2S, FSM, AEC | Entregue |
 | 3 — Automação | Home Assistant, ESPHome, function calling | Entregue |
 | 4 — Autonomia | Wake word on-device, multi-satélite, fan-out por sala | Entregue (Redis pendente) |
-| — Alarmes e lembretes | SQLite, scheduler, fala proativa | Parcial — ver [plano](docs/alarmes-e-lembretes.md) |
+| — Alarmes e lembretes | SQLite, scheduler, ciclo de toque, fala pré-renderizada | Implementado — falta calibrar os tempos de rajada no hardware ([plano](docs/alarmes-e-lembretes.md)) |
 | — luna-desktop | Satélite Windows | Entregue |
 
 ## Convenções do repositório

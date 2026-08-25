@@ -26,8 +26,20 @@ export type ResolveOnceResult =
 
 const AT_TIME_PATTERN = /^([01]\d|2[0-3]):[0-5]\d$/;
 
+/**
+ * `"HH:MM"` → hora e minuto locais, ou `null` fora do formato. Exportado para
+ * `recurrence.ts` usar o MESMO padrão: dois lugares aceitando formatos
+ * ligeiramente diferentes é como um "19:5" vira alarme às 19:05 num caminho e
+ * erro no outro.
+ */
+export function parseAtTime(atTime: string): { hour: number; minute: number } | null {
+  if (!AT_TIME_PATTERN.test(atTime)) return null;
+  const [hourStr, minuteStr] = atTime.split(':');
+  return { hour: Number(hourStr), minute: Number(minuteStr) };
+}
+
 /** `mon`..`sun` → o índice de `LocalDateTime.weekday` (0 = domingo). */
-const WEEKDAY_TO_INDEX: Record<string, number> = {
+export const WEEKDAY_TO_INDEX: Record<string, number> = {
   sun: 0,
   mon: 1,
   tue: 2,
@@ -37,7 +49,7 @@ const WEEKDAY_TO_INDEX: Record<string, number> = {
   sat: 6,
 };
 
-const WEEKDAY_LABEL_PT: Record<number, string> = {
+export const WEEKDAY_LABEL_PT: Record<number, string> = {
   0: 'domingo',
   1: 'segunda',
   2: 'terça',
@@ -85,13 +97,11 @@ function resolveRelative(inSecondsRaw: number, now: Date): ResolveOnceResult {
 }
 
 function resolveAbsolute(atTime: string, whenDay: WhenDay | undefined, now: Date): ResolveOnceResult {
-  if (!AT_TIME_PATTERN.test(atTime)) {
+  const parsed = parseAtTime(atTime);
+  if (!parsed) {
     return { ok: false, error: `horário "${atTime}" fora do formato HH:MM` };
   }
-
-  const [hourStr, minuteStr] = atTime.split(':');
-  const hour = Number(hourStr);
-  const minute = Number(minuteStr);
+  const { hour, minute } = parsed;
 
   const today = localDateTime(now);
   const todayMidnightUtc = localWallClockToUtc({ ...today, hour: 0, minute: 0, second: 0 });

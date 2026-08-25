@@ -37,6 +37,11 @@ const baseConfig: AppConfig = {
   reminderMaxConcurrent: 20,
   reminderMaxPerRoom: 20,
   reminderFallbackRoomId: '',
+  ringListenWindowMs: 6_000,
+  ringBargeInGuardMs: 2_000,
+  ringSilentRetryMs: 60_000,
+  ringMaxDeferMs: 3_000,
+  reminderSnoozeMaxMinutes: 60,
 };
 
 /**
@@ -73,6 +78,15 @@ class ControllableProvider implements IAudioProvider {
   onSessionEnded(_callback: () => void): void {}
   onToolCall(_callback: (call: ToolCall) => void): void {}
   sendToolResult(_callId: string, _result: unknown): void {}
+
+  /** Registra as instruções de `speak` para o teste inspecionar. */
+  readonly spoken: string[] = [];
+  speakResult = true;
+
+  async speak(instruction: string): Promise<boolean> {
+    this.spoken.push(instruction);
+    return this.speakResult;
+  }
 
   async disconnect(): Promise<void> {
     this.disconnectCalls += 1;

@@ -21,6 +21,9 @@ tudo em um clique. O front door do repositório é o [README da raiz](../README.
 - [ADR 002 — Function calling contract](adr/002-function-calling-contract.md)
 - [ADR 003 — Wake word engine](adr/003-wake-word-engine.md)
 - [ADR 004 — Wake word no desktop](adr/004-wake-word-no-desktop.md)
+- [ADR 005 — Persistência no luna-server](adr/005-persistencia-no-servidor.md)
+- [ADR 006 — Agendamento server-side e contrato de tempo](adr/006-agendamento-e-contrato-de-tempo.md)
+- [ADR 007 — Áudio não solicitado e endereçamento por sala](adr/007-audio-nao-solicitado.md)
 
 Previstos e ainda não escritos: **005** (persistência no `luna-server`), **006**
 (agendamento server-side e contrato de tempo), **007** (áudio não solicitado e
@@ -28,7 +31,7 @@ endereçamento por sala).
 
 ## Features / módulos
 
-- [Alarmes e lembretes](alarmes-e-lembretes.md) — plano e decisões; marcos 0 a 6 entregues
+- [Alarmes e lembretes](alarmes-e-lembretes.md) — plano e decisões; marcos 0 a 11 entregues
 - [luna-desktop](luna-desktop.md) — satélite para Windows
 
 ## READMEs por componente

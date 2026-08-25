@@ -45,6 +45,11 @@ const config: AppConfig = {
   reminderMaxConcurrent: 20,
   reminderMaxPerRoom: 20,
   reminderFallbackRoomId: '',
+  ringListenWindowMs: 6_000,
+  ringBargeInGuardMs: 2_000,
+  ringSilentRetryMs: 60_000,
+  ringMaxDeferMs: 3_000,
+  reminderSnoozeMaxMinutes: 60,
 };
 
 const ROOM = 'sala_de_estar';
@@ -87,6 +92,15 @@ class FakeProvider implements IAudioProvider {
     this.markBound();
   }
   sendToolResult(_callId: string, _result: unknown): void {}
+  /** Registra as instruções de `speak` para o teste inspecionar. */
+  readonly spoken: string[] = [];
+  speakResult = true;
+
+  async speak(instruction: string): Promise<boolean> {
+    this.spoken.push(instruction);
+    return this.speakResult;
+  }
+
   async disconnect(): Promise<void> {}
 
   emitAudioResponse(chunk: Buffer): void {

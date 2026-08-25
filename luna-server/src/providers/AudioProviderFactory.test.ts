@@ -34,6 +34,11 @@ describe('AudioProviderFactory', () => {
   reminderMaxConcurrent: 20,
   reminderMaxPerRoom: 20,
   reminderFallbackRoomId: '',
+  ringListenWindowMs: 6_000,
+  ringBargeInGuardMs: 2_000,
+  ringSilentRetryMs: 60_000,
+  ringMaxDeferMs: 3_000,
+  reminderSnoozeMaxMinutes: 60,
   };
 
   it('instancia GeminiLiveAdapter', () => {

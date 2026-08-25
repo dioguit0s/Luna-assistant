@@ -4,11 +4,13 @@ import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { createControlDeviceHandler } from './tools/controlDevice.js';
 import { createSetReminderHandler } from './tools/setReminder.js';
+import { createManageRemindersHandler } from './tools/manageReminders.js';
 import { INVALID_ARGS_RESULT, type ToolContext, type ToolHandler } from './tools/types.js';
 import { CHIME_PCM16 } from '../reminders/chime.js';
-import { SET_REMINDER_TOOL } from '../reminders/tools.js';
-import type { ReminderStore } from '../reminders/ReminderStore.js';
+import { SET_REMINDER_TOOL, MANAGE_REMINDERS_TOOL } from '../reminders/tools.js';
+import { MAX_REMINDER_AUDIO_BYTES, type ReminderStore } from '../reminders/ReminderStore.js';
 import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
+import { AlarmRinger, type AlarmAudioSink, type BurstResult } from '../reminders/AlarmRinger.js';
 import { getLogger } from '../logging/logger.js';
 import { TtfabTracker } from '../metrics/ttfab.js';
 import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
@@ -28,6 +30,37 @@ import {
 // recuperar primeiro, e a rede de segurança do firmware fica reservada para
 // quando o servidor também falha (crash, rede do satélite caindo).
 export const SPEAKING_WATCHDOG_MS = 8_000;
+
+/**
+ * Teto da pré-renderização. Generoso de propósito: nada depende dela ficar
+ * pronta rápido — é a única operação do servidor que não está no caminho de
+ * ninguém esperando.
+ */
+const PRERENDER_TIMEOUT_MS = 15_000;
+
+/**
+ * Silêncio de saída exigido antes de abrir a captura da pré-renderização.
+ *
+ * Generoso de propósito: o preço de esperar é o lembrete tocar só com bipe, e o
+ * preço de abrir cedo é gravar a fala errada e deixar o satélite mudo até o
+ * watchdog. Os dois erros não têm o mesmo custo.
+ */
+const PRERENDER_QUIET_MS = 1_500;
+const PRERENDER_GATE_RETRY_MS = 500;
+/** ~7,5s de espera no total. Passou disso, a sala não vai silenciar tão cedo. */
+const PRERENDER_GATE_MAX_ATTEMPTS = 15;
+
+/**
+ * A instrução vira um turno de usuário no Gemini, então o modelo parafraseia em
+ * vez de ler literal. Pedir o texto exato é o que mais aproxima os dois
+ * providers do mesmo resultado.
+ */
+function prerenderInstruction(label: string): string {
+  return (
+    `Diga exatamente esta frase, sem acrescentar nem comentar nada: ` +
+    `"Está na hora: ${label}."`
+  );
+}
 
 // Taxa de saída de `audio_response`: os dois adapters (Gemini, OpenAI)
 // reamostram para 16kHz PCM16 antes de chamar onAudioResponse — ver
@@ -59,12 +92,20 @@ export const AUDIO_FRAME_INTERVAL_MS = Math.round(
  */
 export type SendToRoom = (roomId: string, payload: Buffer | string) => number;
 
+/** Uma pré-renderização de fala em curso numa sala. */
+interface AudioCapture {
+  chunks: Buffer[];
+  bytes: number;
+  truncated: boolean;
+  settle: (pcm: Buffer | null) => void;
+}
+
 /** Item da fila por sala: um frame de áudio paceado, ou o speaking_end do turno. */
 type AudioQueueItem =
   | { kind: 'audio'; header: Buffer; piece: Buffer }
   | { kind: 'speaking_end' };
 
-export class Orchestrator {
+export class Orchestrator implements AlarmAudioSink {
   private readonly ttfabByRoom = new Map<string, TtfabTracker>();
   private readonly speakingByRoom = new Map<string, boolean>();
   // Debounce de "usuário parou de falar" (ver userSilenceCutoffMs): dispara
@@ -92,6 +133,63 @@ export class Orchestrator {
   // pode nascer sem ninguém ter falado.
   private readonly lastDeviceIdByRoom = new Map<string, string>();
   /**
+   * Último instante (epoch ms) em que sabemos que **o usuário ainda estava
+   * falando** neste cômodo.
+   *
+   * A âncora NÃO pode ser "último chunk de áudio recebido", pelo mesmo motivo
+   * que o `TtfabTracker` documenta: em open-mic o satélite transmite
+   * continuamente (no firmware, `ACTIVE_STREAMING` é o estado permanente
+   * quando a wake word não está disponível), então esse marco viraria sempre
+   * "agora" e o guard de barge-in ficaria travado em "tem gente falando" — o
+   * alarme nunca tocaria. O sinal certo é a transcrição de entrada do
+   * provider, o mesmo que move a âncora do TTFAB.
+   */
+  private readonly lastUserSpeechAtByRoom = new Map<string, number>();
+
+  /**
+   * Pré-renderização em curso: enquanto houver captura ativa para a sala, o
+   * áudio de resposta do provider é **acumulado** em vez de enfileirado para o
+   * satélite.
+   *
+   * Uma flag resolve três problemas de uma vez: o áudio da renderização não
+   * vaza para o alto-falante, o `turnComplete` correspondente não suja o ring
+   * buffer da conversa (viria com `userText` vazio), e o fallback de dispensa
+   * por turno não desliga o alarme porque a própria Luna falou.
+   */
+  private readonly captureByRoom = new Map<string, AudioCapture>();
+
+  /**
+   * Pré-renderização **pedida mas ainda não iniciada**, por sala.
+   *
+   * A captura não pode abrir junto com o `sendToolResult`: o modelo está
+   * gerando a confirmação falada do próprio `set_reminder` naquele instante, e
+   * a captura engoliria essa confirmação — o satélite ficaria em `RESPONDING`
+   * até o watchdog, e o PCM gravado como "fala do lembrete" seria o
+   * "Pronto, marquei para as oito". O pedido espera aqui até o `turnComplete`
+   * da confirmação.
+   *
+   * Um pedido por sala: dois `set_reminder` no mesmo turno deixam o último.
+   */
+  private readonly pendingPrerenderByRoom = new Map<
+    string,
+    {
+      reminderId: number;
+      label: string;
+      /**
+       * Já saiu áudio de resposta para o cômodo desde que este pedido foi
+       * registrado? É o que distingue "a confirmação já foi falada e acabou"
+       * de "a confirmação ainda nem começou".
+       */
+      audioSeen: boolean;
+    }
+  >();
+
+  /** Último `audio_response` que saiu para o cômodo — ver o gate de sala quieta. */
+  private readonly lastResponseAudioAtByRoom = new Map<string, number>();
+
+  /** Tentativa de abrir a captura, agendada pelo gate. Uma por sala. */
+  private readonly prerenderGateTimerByRoom = new Map<string, NodeJS.Timeout>();
+  /**
    * Registro de dispatch: nome da tool → handler. A chave casa o nome; validar
    * os args é obrigação do handler (ver `ToolHandler`). Nome fora do mapa é
    * tratado igual a args inválidos — do ponto de vista do modelo é a mesma
@@ -106,6 +204,16 @@ export class Orchestrator {
    * `setReminderScheduler`.
    */
   private reminderScheduler: ReminderScheduler | null = null;
+
+  /**
+   * Ciclo de toque por sala. Construído aqui, e não em `index.ts`, porque o
+   * sink de áudio dele é este próprio objeto — e porque o handler de
+   * `manage_reminders`, montado no construtor, precisa da referência.
+   *
+   * O estado de alarme dele **não** é limpo por `releaseRoom`: uma sala cujo
+   * provider morreu continua tendo alarmes (decisão 16 do plano).
+   */
+  private readonly alarmRinger: AlarmRinger;
 
   constructor(
     private readonly config: AppConfig,
@@ -123,8 +231,20 @@ export class Orchestrator {
      * transmitiu nada) era inalcançável.
      */
     private readonly sendToRoom: SendToRoom,
-    reminderStore: ReminderStore,
+    private readonly reminderStore: ReminderStore,
   ) {
+    this.alarmRinger = new AlarmRinger({
+      store: reminderStore,
+      sink: this,
+      listenWindowMs: config.ringListenWindowMs,
+      maxRingMs: config.alarmMaxRingMs,
+      silentRetryMs: config.ringSilentRetryMs,
+      missedGraceMs: config.missedGraceMs,
+      maxDeferMs: config.ringMaxDeferMs,
+      snoozeMaxMinutes: config.reminderSnoozeMaxMinutes,
+      fallbackRoomId: config.reminderFallbackRoomId,
+    });
+
     this.toolHandlers = new Map<string, ToolHandler>([
       [
         CONTROL_DEVICE_TOOL.name,
@@ -150,6 +270,19 @@ export class Orchestrator {
           reminderMaxPerRoom: config.reminderMaxPerRoom,
         }),
       ],
+      [
+        MANAGE_REMINDERS_TOOL.name,
+        createManageRemindersHandler({
+          ringer: this.alarmRinger,
+          store: reminderStore,
+          getScheduler: () => {
+            if (!this.reminderScheduler) {
+              throw new Error('ReminderScheduler ainda não registrado no Orchestrator');
+            }
+            return this.reminderScheduler;
+          },
+        }),
+      ],
     ]);
 
     // O bind dos callbacks passa a acontecer na criação da sessão, não no
@@ -170,6 +303,10 @@ export class Orchestrator {
    */
   setReminderScheduler(scheduler: ReminderScheduler): void {
     this.reminderScheduler = scheduler;
+    // Todo fim de ciclo mexe em `next_due_utc` e precisa rearmar o timer:
+    // sem isto uma soneca de 1 minuto esperaria a acordada seguinte, a até
+    // `MAX_TIMER_DELAY_MS` (60 s) de distância.
+    this.alarmRinger.setScheduler(scheduler);
   }
 
   async handleAudioChunk(roomId: string, deviceId: string, pcm: Buffer): Promise<void> {
@@ -219,6 +356,7 @@ export class Orchestrator {
 
     provider.onUserSpeech(() => {
       tracker.markUserSpeech();
+      this.lastUserSpeechAtByRoom.set(roomId, Date.now());
 
       // Reagenda a cada fragmento: só assume "parou de falar" depois de
       // silêncio sustentado. No Gemini isso dispara a cada pedaço de
@@ -235,6 +373,14 @@ export class Orchestrator {
     });
 
     provider.onAudioResponse((chunk) => {
+      // Pré-renderização: acumula e sai. Nada de `startSpeaking`, nada de fila
+      // — este áudio vai virar BLOB no banco, não sai para o cômodo agora.
+      const capture = this.captureByRoom.get(roomId);
+      if (capture) {
+        this.captureChunk(capture, chunk);
+        return;
+      }
+
       const latencyMs = tracker.markFirstResponseSent();
       if (latencyMs !== null) {
         getLogger().info(
@@ -260,11 +406,35 @@ export class Orchestrator {
       // longa acionaria o watchdog no meio dela mesma.
       this.armSpeakingWatchdog(roomId);
 
+      // Carimbo do último áudio de resposta que saiu para o cômodo. É o que o
+      // gate de sala quieta consulta antes de abrir a captura da
+      // pré-renderização (ver `startPendingPrerender`).
+      this.lastResponseAudioAtByRoom.set(roomId, Date.now());
+      const pendente = this.pendingPrerenderByRoom.get(roomId);
+      if (pendente) pendente.audioSeen = true;
+
       // Fragmenta e enfileira — não envia direto: ver AUDIO_FRAME_INTERVAL_MS.
       this.enqueueAudioFrames(roomId, chunk);
     });
 
     provider.onTurnComplete((turn: CompletedTurn) => {
+      // Fim da pré-renderização: resolve o PCM e sai sem tocar em nada do
+      // turno normal — nem ring buffer, nem `speaking_end`, nem dispensa de
+      // alarme.
+      const capture = this.captureByRoom.get(roomId);
+      if (capture) {
+        this.captureByRoom.delete(roomId);
+        // Fecha o par de fala antes de sair. Se o debounce de silêncio mandou
+        // um `speaking_start` durante a captura — a pessoa continuou falando
+        // depois da confirmação —, sem isto o `speaking_end` só sairia pelo
+        // `SPEAKING_WATCHDOG_MS`: 8s de satélite mudo e surdo em RESPONDING.
+        // No-op quando não havia par aberto, que é o caso comum.
+        this.clearSilenceTimer(roomId);
+        this.endSpeaking(roomId);
+        capture.settle(capture.chunks.length > 0 ? Buffer.concat(capture.chunks) : null);
+        return;
+      }
+
       // Turno fechou (ex.: tool call sem confirmação falada): sem isso, um
       // debounce ainda pendente dispararia speaking_start depois do turno já
       // ter acabado, sem speaking_end correspondente no rastro — a luz
@@ -294,6 +464,13 @@ export class Orchestrator {
       }
 
       this.endSpeaking(roomId);
+
+      // Fallback obrigatório do plano: ter conversado com a Luna já prova que a
+      // pessoa acordou. Se o modelo não chamou `manage_reminders` — ou chamou
+      // outra coisa, ou só conversou —, o fim do turno dispensa o alarme da
+      // sala assim mesmo. No-op quando nada toca, e idempotente quando o
+      // próprio modelo já dispensou (o ciclo já saiu do mapa).
+      this.alarmRinger.dismiss(roomId, 'turn_complete');
 
       tracker.reset();
     });
@@ -330,6 +507,17 @@ export class Orchestrator {
       void handler(call.args, ctx)
         .then((result) => {
           provider.sendToolResult(call.callId, result);
+          // Registra o pedido e deixa o gate decidir quando abrir a captura
+          // (ver `tryOpenPrerenderGate`).
+          //
+          // Duas razões para não renderizar aqui. A primeira é o gate de
+          // `pendingToolCalls` do OpenAI, que o `speak()` compartilha: chamado
+          // de dentro do handler, encontraria a própria call de `set_reminder`
+          // ainda em voo. A segunda é pior e não tem gate nenhum — abrir a
+          // captura agora engoliria a confirmação que o modelo está gerando
+          // neste exato momento, e gravaria o áudio dela como se fosse a fala
+          // do lembrete.
+          this.schedulePrerender(roomId, result);
         })
         .catch((err: unknown) => {
           getLogger().error(
@@ -434,6 +622,15 @@ export class Orchestrator {
    * aciona o watchdog sozinha. Um `ringOnce` também arma e imediatamente
    * limpa: como o chime tem duração conhecida e `endSpeaking` é chamado logo
    * depois de enfileirar, o watchdog nunca chega a disparar para ele.
+   *
+   * **Não** rearmar no enfileiramento (`enqueueAudioFrames`), por mais que
+   * pareça o ponto natural: o que este watchdog mede é *liveness do provider*,
+   * não estado de fila. Um provider que morresse depois de despejar 20 s de
+   * áudio na fila manteria o watchdog vivo por esses 20 s, e a única rede de
+   * segurança abaixo do `RESPONDING_TIMEOUT_MS` de 20 s do firmware sumiria
+   * justamente no caso para o qual ela existe. O ciclo de toque não precisa
+   * disso: cada rajada tem duração conhecida e fecha o par sincronicamente —
+   * há teste que trava esse invariante.
    */
   private armSpeakingWatchdog(roomId: string): void {
     this.clearSpeakingWatchdog(roomId);
@@ -510,11 +707,284 @@ export class Orchestrator {
    */
   ringOnce(roomId: string): number {
     if (this.speakingByRoom.get(roomId)) return 0;
+    // O usuário está no meio de uma frase: `speaking_start` faria o firmware
+    // dar `xQueueReset(txQueue)` e o provider receberia meio comando. Vale
+    // tanto para a primeira rajada quanto para a corrida na borda das
+    // seguintes — a wake word da dispensa caindo no instante do re-disparo.
+    if (this.isUserLikelySpeaking(roomId)) return 0;
 
+    return this.emitChimeBurst(roomId);
+  }
+
+  /**
+   * Implementação de `AlarmAudioSink`: uma rajada do ciclo de toque.
+   *
+   * Mesma mecânica do `ringOnce`, com o retorno que o ciclo precisa — `busy` e
+   * `silent` são zero entregas por motivos opostos, e confundir os dois faria o
+   * alarme desistir justamente quando a pessoa tenta dispensá-lo.
+   *
+   * Invariante de que o `AlarmRinger` depende: a checagem e a emissão estão na
+   * mesma call stack síncrona (Node é single-threaded, nada roda entre elas),
+   * então aqui um `delivered === 0` só pode significar cômodo mudo — nunca
+   * "já estava falando".
+   */
+  ringBurst(roomId: string, force = false, speech: Buffer | null = null): BurstResult {
+    // Nem com `force`: a Luna falando é fala de verdade em andamento, e frames
+    // de chime intercalados no meio da resposta dela são pior que atraso.
+    if (this.speakingByRoom.get(roomId)) return 'busy';
+    if (!force && this.isUserLikelySpeaking(roomId)) return 'busy';
+
+    return this.emitChimeBurst(roomId, speech) > 0 ? 'delivered' : 'silent';
+  }
+
+  /**
+   * Chime primeiro, fala depois, no mesmo par `speaking_start`/`speaking_end`:
+   * o bipe orienta a atenção antes de a frase começar, e um par só evita o
+   * satélite sair de RESPONDING no meio da rajada.
+   */
+  private emitChimeBurst(roomId: string, speech: Buffer | null = null): number {
     const delivered = this.startSpeaking(roomId);
     this.enqueueAudioFrames(roomId, CHIME_PCM16);
+    if (speech && speech.length > 0) {
+      this.enqueueAudioFrames(roomId, speech);
+    }
     this.endSpeaking(roomId);
     return delivered;
+  }
+
+  /** O ciclo de toque por sala. Vive aqui porque o sink de áudio é este objeto. */
+  getAlarmRinger(): AlarmRinger {
+    return this.alarmRinger;
+  }
+
+  /**
+   * Enfileira a pré-renderização da fala de um lembrete recém-criado, fora do
+   * caminho da tool.
+   *
+   * `setImmediate` e não `await`: o turno do usuário não pode esperar por um
+   * áudio que só vai ser usado horas depois. Se falhar, o toque degrada para
+   * só-chime e ninguém fica sabendo — que é o comportamento certo.
+   */
+  private schedulePrerender(roomId: string, result: unknown): void {
+    const criado = result as { success?: unknown; reminder_id?: unknown; label?: unknown };
+    if (criado?.success !== true || typeof criado.reminder_id !== 'string') return;
+    if (typeof criado.label !== 'string' || criado.label.length === 0) return;
+
+    const alvo = this.reminderStore.findByShortId(roomId, criado.reminder_id);
+    if (!alvo) return;
+
+    // Só registra. Quem dispara é o `turnComplete` da confirmação (ver o campo
+    // `pendingPrerenderByRoom` e `startPendingPrerender`).
+    this.pendingPrerenderByRoom.set(roomId, {
+      reminderId: alvo.id,
+      label: criado.label,
+      audioSeen: false,
+    });
+
+    // O gate começa a rodar agora, e não no `turnComplete` da confirmação.
+    // Amarrá-lo ao `turnComplete` deixava o pedido parado quando ele não vinha
+    // — e aí ele era consumido no fim de um turno QUALQUER depois,
+    // potencialmente horas mais tarde e com o lembrete já tendo tocado só com
+    // bipe. O gate sabe sozinho quando pode abrir; deixar que ele decida.
+    this.startPrerenderGate(roomId);
+  }
+
+  /**
+   * Dispara a renderização enfileirada, se houver — chamado no fim de um turno
+   * normal, quando a confirmação falada já saiu inteira para o cômodo.
+   *
+   * `setImmediate` e não `await`: nada depende de a renderização ficar pronta
+   * rápido, e o callback do port é síncrono.
+   */
+  private startPrerenderGate(roomId: string): void {
+    if (!this.pendingPrerenderByRoom.has(roomId)) return;
+    if (this.prerenderGateTimerByRoom.has(roomId)) return;
+    this.tryOpenPrerenderGate(roomId, 0);
+  }
+
+  /**
+   * Só abre a captura com a sala **comprovadamente quieta**.
+   *
+   * Amarrar o início ao `turnComplete` cru não basta, porque "o primeiro
+   * `turnComplete` depois do `sendToolResult` é o da confirmação" não é um
+   * invariante que os adapters garantam. No OpenAI, uma resposta que traga
+   * mensagem *junto* com o `function_call` emite `turnComplete` para a
+   * PRIMEIRA resposta (`handleResponseDone` só suprime quando é `every`
+   * function_call), e a confirmação vem na segunda — a captura abriria bem no
+   * meio dela. No Gemini o equivalente depende do enquadramento das mensagens
+   * do servidor.
+   *
+   * Este gate não depende de nenhum dos dois: olha o que o próprio Orchestrator
+   * sabe sobre a sala — não está falando, fila de saída vazia, e nenhum
+   * `audio_response` recente. Se a sala não silenciar dentro do teto, o pedido
+   * é descartado e o toque degrada para só-chime, que é a degradação já
+   * prevista e sempre preferível a gravar o áudio errado.
+   */
+  private tryOpenPrerenderGate(roomId: string, tentativas: number): void {
+    this.prerenderGateTimerByRoom.delete(roomId);
+
+    const pedido = this.pendingPrerenderByRoom.get(roomId);
+    if (!pedido) return;
+
+    const esgotou = tentativas >= PRERENDER_GATE_MAX_ATTEMPTS;
+    const quieto = this.isRoomQuietForPrerender(roomId);
+
+    // Silêncio sozinho não basta: um cômodo quieto pode ser só o intervalo
+    // ENTRE a tool call e a confirmação — abrir aí engoliria a confirmação
+    // inteira. Exigir que já tenha saído áudio desde o pedido é o que separa
+    // "a confirmação acabou" de "a confirmação nem começou".
+    //
+    // A exceção é o teto: se depois de toda a espera não veio áudio nenhum, é
+    // porque o modelo não falou nada — e aí não há confirmação para atropelar.
+    if (quieto && (pedido.audioSeen || esgotou)) {
+      this.pendingPrerenderByRoom.delete(roomId);
+      void this.prerenderReminderSpeech(roomId, pedido.reminderId, pedido.label);
+      return;
+    }
+
+    if (esgotou) {
+      this.pendingPrerenderByRoom.delete(roomId);
+      getLogger().warn(
+        {
+          event: 'reminder_prerender_gate_timeout',
+          room_id: roomId,
+          reminder_id: pedido.reminderId,
+        },
+        'Cômodo nunca silenciou para renderizar a fala: o lembrete vai tocar só o bipe',
+      );
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.tryOpenPrerenderGate(roomId, tentativas + 1);
+    }, PRERENDER_GATE_RETRY_MS);
+    timer.unref();
+    this.prerenderGateTimerByRoom.set(roomId, timer);
+  }
+
+  private isRoomQuietForPrerender(roomId: string): boolean {
+    if (this.speakingByRoom.get(roomId) === true) return false;
+    if (this.captureByRoom.has(roomId)) return false;
+
+    const fila = this.audioQueueByRoom.get(roomId);
+    if (fila && fila.length > 0) return false;
+
+    const ultimoAudio = this.lastResponseAudioAtByRoom.get(roomId);
+    if (ultimoAudio !== undefined && Date.now() - ultimoAudio < PRERENDER_QUIET_MS) {
+      return false;
+    }
+
+    return true;
+  }
+
+  private captureChunk(capture: AudioCapture, chunk: Buffer): void {
+    // Uma vez estourado o teto, para de acumular de vez. Continuar aceitando os
+    // chunks seguintes que ainda coubessem não produziria uma fala cortada no
+    // fim — produziria uma fala com um buraco no meio, que é pior.
+    if (capture.truncated) return;
+
+    if (capture.bytes + chunk.length > MAX_REMINDER_AUDIO_BYTES) {
+      capture.truncated = true;
+      return;
+    }
+    capture.chunks.push(chunk);
+    capture.bytes += chunk.length;
+  }
+
+  /**
+   * Pede à IA a fala do lembrete e guarda o PCM, para o disparo não depender de
+   * provider nenhum.
+   *
+   * Sintetizar **no instante do disparo** poria até `providerConnectTimeoutMs`
+   * mais o round-trip do modelo no caminho crítico — e o Gemini derruba sessão
+   * ociosa, então um alarme das 7h sempre pagaria um `connect`. Pior: o alarme
+   * dependeria de o provider estar no ar exatamente quando o usuário menos
+   * perdoa falha. Pré-renderizado, disparar é só enfileirar bytes.
+   *
+   * Resolve `false` sem drama em qualquer falha: o toque degrada para só-chime,
+   * que é o comportamento aceitável — um alarme que bipa sempre vale mais que
+   * um que fala às vezes.
+   */
+  async prerenderReminderSpeech(roomId: string, reminderId: number, label: string): Promise<boolean> {
+    if (this.captureByRoom.has(roomId)) return false;
+
+    const provider = this.roomManager.getExistingProvider(roomId);
+    if (!provider) return false;
+
+    const capture: AudioCapture = {
+      chunks: [],
+      bytes: 0,
+      truncated: false,
+      settle: () => {},
+    };
+
+    const pcm = await new Promise<Buffer | null>((resolve) => {
+      capture.settle = resolve;
+      this.captureByRoom.set(roomId, capture);
+
+      // A sessão pode morrer no meio, ou o `turnComplete` simplesmente não vir.
+      // Sem teto, a sala ficaria em modo captura para sempre e nenhuma resposta
+      // voltaria a sair pelo alto-falante — falha muito pior que não ter a fala.
+      const timeout = setTimeout(() => {
+        if (this.captureByRoom.get(roomId) === capture) {
+          this.captureByRoom.delete(roomId);
+          resolve(null);
+        }
+      }, PRERENDER_TIMEOUT_MS);
+      timeout.unref();
+
+      void provider.speak(prerenderInstruction(label)).then((aceito: boolean) => {
+        if (!aceito && this.captureByRoom.get(roomId) === capture) {
+          this.captureByRoom.delete(roomId);
+          clearTimeout(timeout);
+          resolve(null);
+        }
+      });
+    });
+
+    if (!pcm || pcm.length === 0) {
+      getLogger().warn(
+        { event: 'reminder_prerender_failed', room_id: roomId, reminder_id: reminderId },
+        'Não consegui pré-renderizar a fala do lembrete: o toque vai ser só o bipe',
+      );
+      return false;
+    }
+
+    const inicio = Date.now();
+    this.reminderStore.putAudio(reminderId, pcm);
+    getLogger().info(
+      {
+        event: 'reminder_prerendered',
+        room_id: roomId,
+        reminder_id: reminderId,
+        bytes: pcm.length,
+        truncated: capture.truncated,
+        // `DatabaseSync` bloqueia o mesmo event loop do tick de 32 ms de
+        // `drainAudioQueue`: um BLOB grande e lento vira buraco audível na
+        // resposta de OUTRO cômodo. Medido para a regressão ser visível em
+        // log, não audível.
+        write_ms: Date.now() - inicio,
+      },
+      `Fala do lembrete pré-renderizada (${pcm.length}B)`,
+    );
+    return true;
+  }
+
+  /**
+   * Há quanto tempo o usuário falou nesta sala, em ms — `null` quando não há
+   * fala conhecida (sala ociosa, ou sessão recém-criada pelo caminho do
+   * alarme). Quem toca alarme usa isto para distinguir "não entreguei porque
+   * a sala está vazia" de "não entreguei porque tem gente falando".
+   */
+  msSinceUserSpeech(roomId: string): number | null {
+    const at = this.lastUserSpeechAtByRoom.get(roomId);
+    return at === undefined ? null : Date.now() - at;
+  }
+
+  /** Guard de barge-in: fala do usuário recente o bastante para não ser cortada. */
+  isUserLikelySpeaking(roomId: string): boolean {
+    const since = this.msSinceUserSpeech(roomId);
+    return since !== null && since < this.config.ringBargeInGuardMs;
   }
 
   /**
@@ -527,6 +997,24 @@ export class Orchestrator {
     this.ttfabByRoom.delete(roomId);
     this.speakingByRoom.delete(roomId);
     this.lastDeviceIdByRoom.delete(roomId);
+    this.lastUserSpeechAtByRoom.delete(roomId);
+
+    // Uma captura que sobrevive à morte da sessão engole a primeira resposta da
+    // sessão SEGUINTE — e o `turnComplete` dela gravaria essa fala como se
+    // fosse a do lembrete. Resolver com `null`, não só deletar: sem isso
+    // `prerenderReminderSpeech` fica pendurado até `PRERENDER_TIMEOUT_MS`.
+    const capture = this.captureByRoom.get(roomId);
+    if (capture) {
+      this.captureByRoom.delete(roomId);
+      capture.settle(null);
+    }
+    this.pendingPrerenderByRoom.delete(roomId);
+    this.lastResponseAudioAtByRoom.delete(roomId);
+    const gateTimer = this.prerenderGateTimerByRoom.get(roomId);
+    if (gateTimer) {
+      clearTimeout(gateTimer);
+      this.prerenderGateTimerByRoom.delete(roomId);
+    }
 
     const silenceTimer = this.silenceTimerByRoom.get(roomId);
     if (silenceTimer) {
