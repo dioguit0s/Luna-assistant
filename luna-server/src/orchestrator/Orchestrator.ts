@@ -39,6 +39,18 @@ export const SPEAKING_WATCHDOG_MS = 8_000;
 const PRERENDER_TIMEOUT_MS = 15_000;
 
 /**
+ * Silêncio de saída exigido antes de abrir a captura da pré-renderização.
+ *
+ * Generoso de propósito: o preço de esperar é o lembrete tocar só com bipe, e o
+ * preço de abrir cedo é gravar a fala errada e deixar o satélite mudo até o
+ * watchdog. Os dois erros não têm o mesmo custo.
+ */
+const PRERENDER_QUIET_MS = 1_500;
+const PRERENDER_GATE_RETRY_MS = 500;
+/** ~7,5s de espera no total. Passou disso, a sala não vai silenciar tão cedo. */
+const PRERENDER_GATE_MAX_ATTEMPTS = 15;
+
+/**
  * A instrução vira um turno de usuário no Gemini, então o modelo parafraseia em
  * vez de ler literal. Pedir o texto exato é o que mais aproxima os dois
  * providers do mesmo resultado.
@@ -160,8 +172,23 @@ export class Orchestrator implements AlarmAudioSink {
    */
   private readonly pendingPrerenderByRoom = new Map<
     string,
-    { reminderId: number; label: string }
+    {
+      reminderId: number;
+      label: string;
+      /**
+       * Já saiu áudio de resposta para o cômodo desde que este pedido foi
+       * registrado? É o que distingue "a confirmação já foi falada e acabou"
+       * de "a confirmação ainda nem começou".
+       */
+      audioSeen: boolean;
+    }
   >();
+
+  /** Último `audio_response` que saiu para o cômodo — ver o gate de sala quieta. */
+  private readonly lastResponseAudioAtByRoom = new Map<string, number>();
+
+  /** Tentativa de abrir a captura, agendada pelo gate. Uma por sala. */
+  private readonly prerenderGateTimerByRoom = new Map<string, NodeJS.Timeout>();
   /**
    * Registro de dispatch: nome da tool → handler. A chave casa o nome; validar
    * os args é obrigação do handler (ver `ToolHandler`). Nome fora do mapa é
@@ -378,6 +405,13 @@ export class Orchestrator implements AlarmAudioSink {
       // longa acionaria o watchdog no meio dela mesma.
       this.armSpeakingWatchdog(roomId);
 
+      // Carimbo do último áudio de resposta que saiu para o cômodo. É o que o
+      // gate de sala quieta consulta antes de abrir a captura da
+      // pré-renderização (ver `startPendingPrerender`).
+      this.lastResponseAudioAtByRoom.set(roomId, Date.now());
+      const pendente = this.pendingPrerenderByRoom.get(roomId);
+      if (pendente) pendente.audioSeen = true;
+
       // Fragmenta e enfileira — não envia direto: ver AUDIO_FRAME_INTERVAL_MS.
       this.enqueueAudioFrames(roomId, chunk);
     });
@@ -389,6 +423,13 @@ export class Orchestrator implements AlarmAudioSink {
       const capture = this.captureByRoom.get(roomId);
       if (capture) {
         this.captureByRoom.delete(roomId);
+        // Fecha o par de fala antes de sair. Se o debounce de silêncio mandou
+        // um `speaking_start` durante a captura — a pessoa continuou falando
+        // depois da confirmação —, sem isto o `speaking_end` só sairia pelo
+        // `SPEAKING_WATCHDOG_MS`: 8s de satélite mudo e surdo em RESPONDING.
+        // No-op quando não havia par aberto, que é o caso comum.
+        this.clearSilenceTimer(roomId);
+        this.endSpeaking(roomId);
         capture.settle(capture.chunks.length > 0 ? Buffer.concat(capture.chunks) : null);
         return;
       }
@@ -737,7 +778,11 @@ export class Orchestrator implements AlarmAudioSink {
 
     // Só registra. Quem dispara é o `turnComplete` da confirmação (ver o campo
     // `pendingPrerenderByRoom` e `startPendingPrerender`).
-    this.pendingPrerenderByRoom.set(roomId, { reminderId: alvo.id, label: criado.label });
+    this.pendingPrerenderByRoom.set(roomId, {
+      reminderId: alvo.id,
+      label: criado.label,
+      audioSeen: false,
+    });
   }
 
   /**
@@ -748,13 +793,84 @@ export class Orchestrator implements AlarmAudioSink {
    * rápido, e o callback do port é síncrono.
    */
   private startPendingPrerender(roomId: string): void {
+    if (!this.pendingPrerenderByRoom.has(roomId)) return;
+    if (this.prerenderGateTimerByRoom.has(roomId)) return;
+    this.tryOpenPrerenderGate(roomId, 0);
+  }
+
+  /**
+   * Só abre a captura com a sala **comprovadamente quieta**.
+   *
+   * Amarrar o início ao `turnComplete` cru não basta, porque "o primeiro
+   * `turnComplete` depois do `sendToolResult` é o da confirmação" não é um
+   * invariante que os adapters garantam. No OpenAI, uma resposta que traga
+   * mensagem *junto* com o `function_call` emite `turnComplete` para a
+   * PRIMEIRA resposta (`handleResponseDone` só suprime quando é `every`
+   * function_call), e a confirmação vem na segunda — a captura abriria bem no
+   * meio dela. No Gemini o equivalente depende do enquadramento das mensagens
+   * do servidor.
+   *
+   * Este gate não depende de nenhum dos dois: olha o que o próprio Orchestrator
+   * sabe sobre a sala — não está falando, fila de saída vazia, e nenhum
+   * `audio_response` recente. Se a sala não silenciar dentro do teto, o pedido
+   * é descartado e o toque degrada para só-chime, que é a degradação já
+   * prevista e sempre preferível a gravar o áudio errado.
+   */
+  private tryOpenPrerenderGate(roomId: string, tentativas: number): void {
+    this.prerenderGateTimerByRoom.delete(roomId);
+
     const pedido = this.pendingPrerenderByRoom.get(roomId);
     if (!pedido) return;
-    this.pendingPrerenderByRoom.delete(roomId);
 
-    setImmediate(() => {
+    const esgotou = tentativas >= PRERENDER_GATE_MAX_ATTEMPTS;
+    const quieto = this.isRoomQuietForPrerender(roomId);
+
+    // Silêncio sozinho não basta: um cômodo quieto pode ser só o intervalo
+    // ENTRE a tool call e a confirmação — abrir aí engoliria a confirmação
+    // inteira. Exigir que já tenha saído áudio desde o pedido é o que separa
+    // "a confirmação acabou" de "a confirmação nem começou".
+    //
+    // A exceção é o teto: se depois de toda a espera não veio áudio nenhum, é
+    // porque o modelo não falou nada — e aí não há confirmação para atropelar.
+    if (quieto && (pedido.audioSeen || esgotou)) {
+      this.pendingPrerenderByRoom.delete(roomId);
       void this.prerenderReminderSpeech(roomId, pedido.reminderId, pedido.label);
-    });
+      return;
+    }
+
+    if (esgotou) {
+      this.pendingPrerenderByRoom.delete(roomId);
+      getLogger().warn(
+        {
+          event: 'reminder_prerender_gate_timeout',
+          room_id: roomId,
+          reminder_id: pedido.reminderId,
+        },
+        'Cômodo nunca silenciou para renderizar a fala: o lembrete vai tocar só o bipe',
+      );
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.tryOpenPrerenderGate(roomId, tentativas + 1);
+    }, PRERENDER_GATE_RETRY_MS);
+    timer.unref();
+    this.prerenderGateTimerByRoom.set(roomId, timer);
+  }
+
+  private isRoomQuietForPrerender(roomId: string): boolean {
+    if (this.speakingByRoom.get(roomId) === true) return false;
+    if (this.captureByRoom.has(roomId)) return false;
+
+    const fila = this.audioQueueByRoom.get(roomId);
+    if (fila && fila.length > 0) return false;
+
+    const ultimoAudio = this.lastResponseAudioAtByRoom.get(roomId);
+    if (ultimoAudio !== undefined && Date.now() - ultimoAudio < PRERENDER_QUIET_MS) {
+      return false;
+    }
+
+    return true;
   }
 
   private captureChunk(capture: AudioCapture, chunk: Buffer): void {
@@ -884,6 +1000,12 @@ export class Orchestrator implements AlarmAudioSink {
       capture.settle(null);
     }
     this.pendingPrerenderByRoom.delete(roomId);
+    this.lastResponseAudioAtByRoom.delete(roomId);
+    const gateTimer = this.prerenderGateTimerByRoom.get(roomId);
+    if (gateTimer) {
+      clearTimeout(gateTimer);
+      this.prerenderGateTimerByRoom.delete(roomId);
+    }
 
     const silenceTimer = this.silenceTimerByRoom.get(roomId);
     if (silenceTimer) {

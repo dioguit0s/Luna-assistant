@@ -1361,73 +1361,118 @@ describe('Orchestrator: set_reminder ponta a ponta', () => {
     assert.equal(harness.reminderStore.nextArmed()?.shortId, result.reminder_id);
   });
 
-  it('a confirmação falada do set_reminder sai INTEIRA para o cômodo, não é engolida pela pré-renderização', async () => {
-    // Regressão do marco 8: a renderização era disparada no `.then` do
-    // `sendToolResult`, num `setImmediate` — centenas de ms antes de o áudio da
-    // confirmação chegar. A captura abria primeiro, engolia a confirmação, o
-    // satélite ficava em RESPONDING até o watchdog, e o PCM gravado como "fala
-    // do lembrete" era o "Pronto, marquei para as oito".
-    await feedAudio(harness);
+  describe('pré-renderização: quando a captura abre', () => {
+    // O gate de sala quieta usa `Date.now()` e um timer de retentativa, então
+    // estes testes precisam do relógio sob controle. Época realista para o
+    // `at_time` resolver como resolveria em produção.
+    beforeEach(() => {
+      mock.timers.enable({
+        apis: ['setTimeout', 'Date'],
+        now: new Date('2026-08-20T12:00:00Z'),
+      });
+    });
 
-    await harness.provider.emitToolCall(
-      toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
-    );
+    afterEach(() => {
+      mock.timers.reset();
+    });
 
-    // Em produção o áudio da confirmação chega centenas de ms depois, com o
-    // event loop já tendo girado — é isso que este `setImmediate` reproduz. Sem
-    // ele o teste passaria mesmo com o bug, porque o `setImmediate` do código
-    // antigo ainda não teria rodado.
-    await new Promise((resolve) => setImmediate(resolve));
+    /** Deixa o gate rodar: passa da janela de silêncio e da retentativa. */
+    async function abrirGate(): Promise<void> {
+      mock.timers.tick(2_000);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
 
-    // O modelo responde confirmando — ESTE áudio é para o cômodo.
-    harness.provider.emitAudioResponse(Buffer.from([0xaa, 0xbb]));
-    assert.ok(
-      harness.sent.some((item) => Buffer.isBuffer(item)),
-      'a confirmação falada tem que sair para o cômodo',
-    );
-    // Enquanto a confirmação corre, nada de `speak()`.
-    assert.deepEqual(harness.provider.spoken, []);
+    it('a confirmação falada sai INTEIRA para o cômodo, não é engolida pela pré-renderização', async () => {
+      // Regressão do marco 8: a renderização era disparada no `.then` do
+      // `sendToolResult`, num `setImmediate` — centenas de ms antes de o áudio
+      // da confirmação chegar. A captura abria primeiro, engolia a confirmação,
+      // o satélite ficava em RESPONDING até o watchdog, e o PCM gravado como
+      // "fala do lembrete" era o "Pronto, marquei para as oito".
+      await feedAudio(harness);
 
-    harness.provider.emitTurnComplete({ assistantText: 'Marcado, hoje às oito.' });
+      await harness.provider.emitToolCall(
+        toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
+      );
 
-    // Só depois do turno fechar é que a renderização começa.
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(harness.provider.spoken.length, 1);
-    assert.match(harness.provider.spoken[0]!, /tomar o remédio/);
-  });
+      // Em produção o áudio da confirmação chega centenas de ms depois, com o
+      // event loop já tendo girado — é isso que este `setImmediate` reproduz.
+      // Sem ele o teste passaria mesmo com o bug, porque o `setImmediate` do
+      // código antigo ainda não teria rodado.
+      await new Promise((resolve) => setImmediate(resolve));
 
-  it('o PCM gravado é o da fala do lembrete, não o da confirmação', async () => {
-    await feedAudio(harness);
-    await harness.provider.emitToolCall(
-      toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
-    );
+      // O modelo responde confirmando — ESTE áudio é para o cômodo.
+      harness.provider.emitAudioResponse(Buffer.from([0xaa, 0xbb]));
+      assert.ok(
+        harness.sent.some((item) => Buffer.isBuffer(item)),
+        'a confirmação falada tem que sair para o cômodo',
+      );
+      assert.deepEqual(harness.provider.spoken, [], 'nada de speak() com a confirmação em voo');
 
-    const CONFIRMACAO = Buffer.from([0x11, 0x11]);
-    const FALA_DO_LEMBRETE = Buffer.from([0x22, 0x22, 0x22, 0x22]);
+      harness.provider.emitTurnComplete({ assistantText: 'Marcado, hoje às oito.' });
+      await abrirGate();
 
-    // Mesma razão do teste acima: deixa o event loop girar antes da confirmação.
-    await new Promise((resolve) => setImmediate(resolve));
-    harness.provider.emitAudioResponse(CONFIRMACAO);
-    harness.provider.emitTurnComplete({ assistantText: 'Marcado.' });
-    await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(harness.provider.spoken.length, 1);
+      assert.match(harness.provider.spoken[0]!, /tomar o remédio/);
+    });
 
-    // Agora sim a sala está em modo captura: este áudio é o do `speak()`.
-    harness.provider.emitAudioResponse(FALA_DO_LEMBRETE);
-    harness.provider.emitTurnComplete({});
-    await new Promise((resolve) => setImmediate(resolve));
+    it('o PCM gravado é o da fala do lembrete, não o da confirmação', async () => {
+      await feedAudio(harness);
+      await harness.provider.emitToolCall(
+        toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
+      );
 
-    const criado = harness.reminderStore.listLiveByRoom(ROOM_ID)[0]!;
-    assert.deepEqual(harness.reminderStore.getAudio(criado.id), FALA_DO_LEMBRETE);
-  });
+      const CONFIRMACAO = Buffer.from([0x11, 0x11]);
+      const FALA_DO_LEMBRETE = Buffer.from([0x22, 0x22, 0x22, 0x22]);
 
-  it('lembrete sem label não dispara renderização nenhuma', async () => {
-    await feedAudio(harness);
-    await harness.provider.emitToolCall(toolCall({ in_seconds: 600 }, 'set_reminder'));
+      await new Promise((resolve) => setImmediate(resolve));
+      harness.provider.emitAudioResponse(CONFIRMACAO);
+      harness.provider.emitTurnComplete({ assistantText: 'Marcado.' });
+      await abrirGate();
 
-    harness.provider.emitTurnComplete({ assistantText: 'Marcado.' });
-    await new Promise((resolve) => setImmediate(resolve));
+      // Agora sim a sala está em modo captura: este áudio é o do `speak()`.
+      harness.provider.emitAudioResponse(FALA_DO_LEMBRETE);
+      harness.provider.emitTurnComplete({});
+      await new Promise((resolve) => setImmediate(resolve));
 
-    assert.deepEqual(harness.provider.spoken, []);
+      const criado = harness.reminderStore.listLiveByRoom(ROOM_ID)[0]!;
+      assert.deepEqual(harness.reminderStore.getAudio(criado.id), FALA_DO_LEMBRETE);
+    });
+
+    it('resposta mista (tool + fala no MESMO turno): a captura espera a confirmação da resposta seguinte', async () => {
+      // É o caminho do OpenAI em que `handleResponseDone` NÃO suprime o
+      // turnComplete: a resposta que traz o function_call também traz uma
+      // mensagem, então o turnComplete chega ANTES da confirmação, que vem na
+      // resposta seguinte. Amarrar a captura ao turnComplete cru abriria bem no
+      // meio dela.
+      await feedAudio(harness);
+      await harness.provider.emitToolCall(
+        toolCall({ at_time: '20:00', label: 'tomar o remédio' }, 'set_reminder'),
+      );
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // turnComplete da PRIMEIRA resposta, antes de qualquer confirmação.
+      harness.provider.emitTurnComplete({ assistantText: 'Só um instante.' });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // A confirmação chega agora, na segunda resposta.
+      const framesAntes = harness.sent.filter((item) => Buffer.isBuffer(item)).length;
+      harness.provider.emitAudioResponse(Buffer.from([0xcc, 0xdd]));
+
+      // A fila de saída é paceada: um tick curto (bem abaixo da janela de
+      // silêncio do gate) drena o que está pendente sem abrir a captura.
+      mock.timers.tick(200);
+
+      assert.ok(
+        harness.sent.filter((item) => Buffer.isBuffer(item)).length > framesAntes,
+        'a confirmação da segunda resposta tem que sair para o cômodo',
+      );
+      assert.deepEqual(harness.provider.spoken, [], 'a captura não pode ter aberto no meio dela');
+
+      // Só depois de a sala silenciar de verdade é que a renderização começa.
+      harness.provider.emitTurnComplete({ assistantText: 'Marcado.' });
+      await abrirGate();
+      assert.equal(harness.provider.spoken.length, 1);
+    });
   });
 
   it('args inválidos: erro falável ao modelo, nenhuma linha no banco', async () => {
