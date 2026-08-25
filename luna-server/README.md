@@ -143,11 +143,18 @@ apontaria justamente para o diretório que some.
 O fallback de cômodo é **burro de propósito** — config fixa, não "onde tem gente".
 Silêncio é melhor que adivinhar errado o cômodo.
 
-> **Backup do banco:** o `activate.sh` copia o `.db` antes de trocar o symlink da
-> release. Não é higiene opcional: o rollback de código **não desfaz** uma migração
-> de schema, e o `ReminderStore` recusa abrir um banco com `user_version` maior que
-> o número de migrações que ele conhece. Sem o backup, uma release que migra e
-> depois falha o health check derruba o serviço duas vezes — a segunda no rollback.
+> **Backup do banco:** o próprio servidor copia o `.db` (via `VACUUM INTO`) logo
+> antes de aplicar uma migração, deixando `luna.db.pre-v<N>-<carimbo>` ao lado, e
+> mantém as 5 cópias mais recentes. Não é higiene opcional: o rollback de código
+> **não desfaz** uma migração de schema, e o `ReminderStore` recusa abrir um banco
+> com `user_version` maior que o número de migrações que ele conhece. Sem a cópia,
+> uma release que migra e depois falha o health check derruba o serviço duas vezes
+> — a segunda no rollback.
+>
+> A cópia é feita no servidor, e não no `activate.sh`, por dois motivos: o runner
+> do CI **não tem permissão de escrita** em `/var/lib/luna-server` (é o
+> `StateDirectory` do serviço, dono `luna:luna`), e só o processo que vai migrar
+> sabe que existe migração pendente — nas outras vezes a cópia seria desperdício.
 
 ### Notas
 

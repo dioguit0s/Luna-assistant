@@ -70,9 +70,16 @@ Isso cobre o código velho lendo **dados** novos. Não cobre o código velho abr
 um banco com `user_version` maior que o número de migrações que ele conhece —
 `migrate()` recusa, de propósito, para não operar sobre schema que não entende. A
 segunda migração (`reminder_audio`, marco 8) foi a primeira a esbarrar nisso, e a
-resposta foi operacional: o `activate.sh` faz **backup do `.db` antes de trocar o
-symlink**, preferindo `sqlite3 .backup` a `cp` (um banco em WAL copiado com `cp`
-pode sair inconsistente com o `-wal` ao lado).
+resposta é o próprio servidor fazer **`VACUUM INTO` antes de aplicar a migração**,
+deixando `luna.db.pre-v<N>-<carimbo>` ao lado do banco.
+
+A primeira tentativa pôs essa cópia no `activate.sh` e **quebrou o deploy**: o
+runner do CI não tem permissão de escrita em `/var/lib/luna-server`, que é o
+`StateDirectory` do serviço (dono `luna:luna`). Foi erro de modelo de permissão, e
+o lugar certo é onde a permissão já existe — no processo que vai migrar. De
+quebra, é o único ponto que sabe que há migração pendente: nas outras vezes a
+cópia seria desperdício. `VACUUM INTO` e não cópia de arquivo porque o banco está
+em WAL, e copiar só o `.db` deixaria de fora o que ainda estiver no `-wal`.
 
 ### Fail-fast na abertura
 
@@ -107,8 +114,10 @@ mesmo event loop que roda o tick de 32 ms de `drainAudioQueue`. Um fsync lento n
 - O piso de Node subiu para 22.5: quem rodar o servidor precisa disso.
 - `node:sqlite` é experimental — daí `--disable-warning=ExperimentalWarning` no
   `ExecStart`, e o wrapper como único ponto a trocar se a API mudar.
-- Rollback deixou de ser gratuito: depende de um backup que o `activate.sh` faz,
-  mas que ninguém testa a não ser quando precisa.
+- Rollback deixou de ser gratuito: depende de uma cópia que o servidor faz sozinho
+  no boot que migra, e que ninguém testa a não ser quando precisa.
+- Cada migração passa a custar uma cópia integral do banco no boot, e o diretório
+  de estado guarda as 5 mais recentes.
 
 ## Alternativas consideradas
 

@@ -71,4 +71,9 @@ jobs:
 
       - name: Diagnostico em caso de falha
         if: failure()
-        run: sudo systemctl status luna-server --no-pager --lines=50 || true
+        # Sem `--no-pager --lines=50`: a regra do sudoers casa o comando COM os
+        # argumentos, entao qualquer flag a mais cai fora dela e o sudo pede
+        # senha -- que num runner nao interativo significa diagnostico nenhum,
+        # exatamente quando ele mais importa. O `activate.sh` ja tinha aprendido
+        # isso; este passo tinha ficado para tras.
+        run: sudo systemctl status luna-server || true

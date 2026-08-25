@@ -1,7 +1,7 @@
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AppConfig } from '../config/env.js';
@@ -200,6 +200,72 @@ describe('ReminderStore: arquivo, migrações e falha na abertura', () => {
 
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('copia o banco antes de migrar, e a cópia guarda o estado ANTERIOR à migração', () => {
+    // O rollback de código não desfaz migração: `migrate` recusa abrir um banco
+    // mais novo que o código, de propósito. Sem esta cópia, uma release que
+    // migra e falha o health check derruba o serviço duas vezes.
+    const dbPath = join(dir, 'luna.db');
+
+    // Simula um banco na v1: cria pelo caminho normal e volta o user_version.
+    const primeira = ReminderStore.open(dbPath);
+    const criado = primeira.insertOnce({ roomId: ROOM, label: 'acordar', dueAtUtc: T0 + HORA }, T0);
+    primeira.close();
+
+    const db = new DatabaseSync(dbPath);
+    db.exec('DROP TABLE IF EXISTS reminder_audio');
+    db.exec('PRAGMA user_version = 1');
+    db.close();
+
+    // Reabrir aplica a migração pendente — e antes dela, a cópia.
+    const segunda = ReminderStore.open(dbPath);
+    segunda.close();
+
+    const copias = readdirSync(dir).filter((nome) => nome.startsWith('luna.db.pre-v'));
+    assert.equal(copias.length, 1, `esperava uma cópia, achei: ${copias.join(', ')}`);
+    assert.match(copias[0]!, /\.pre-v1-/, 'a cópia diz de qual versão veio');
+
+    // A cópia é do estado anterior: tem os lembretes, não tem a tabela nova.
+    const backup = new DatabaseSync(join(dir, copias[0]!), { readOnly: true });
+    const versao = (backup.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version;
+    const linhas = backup.prepare('SELECT short_id FROM reminders').all() as Array<{
+      short_id: string;
+    }>;
+    const temAudio = backup
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='reminder_audio'")
+      .get();
+    backup.close();
+
+    assert.equal(versao, 1);
+    assert.deepEqual(
+      linhas.map((l) => l.short_id),
+      [criado.shortId],
+    );
+    assert.equal(temAudio, undefined, 'a cópia é de ANTES da migração');
+  });
+
+  it('banco novo não gera cópia — não há estado anterior para preservar', () => {
+    const dbPath = join(dir, 'luna.db');
+
+    ReminderStore.open(dbPath).close();
+
+    assert.deepEqual(
+      readdirSync(dir).filter((nome) => nome.includes('.pre-v')),
+      [],
+    );
+  });
+
+  it('reabrir sem migração pendente não copia nada', () => {
+    const dbPath = join(dir, 'luna.db');
+    ReminderStore.open(dbPath).close();
+    ReminderStore.open(dbPath).close();
+
+    assert.deepEqual(
+      readdirSync(dir).filter((nome) => nome.includes('.pre-v')),
+      [],
+    );
   });
 
   it('cria o diretório do banco e sobrevive à reabertura (é o alarme sobrevivendo ao deploy)', () => {

@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from 'node:sqlite';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { getLogger } from '../logging/logger.js';
 
 export type ReminderKind = 'once' | 'recurring';
@@ -196,6 +196,58 @@ export class ReminderStore {
     return store;
   }
 
+  /**
+   * Cópia do banco imediatamente antes de aplicar migração.
+   *
+   * O rollback de código **não desfaz** migração de schema: `migrate` acima
+   * recusa abrir um banco mais novo que o código, de propósito. Sem uma cópia
+   * do estado anterior, uma release que migra e depois falha o health check
+   * derruba o serviço duas vezes — a segunda no próprio rollback.
+   *
+   * Feito **aqui**, e não no `activate.sh`, por duas razões que só apareceram
+   * quando o deploy quebrou: o runner do CI não tem permissão de escrita em
+   * `/var/lib/luna-server` (é `StateDirectory` do serviço, dono `luna:luna`),
+   * e só este ponto sabe que existe migração pendente — nas outras vezes a
+   * cópia seria puro desperdício. Aqui a permissão é a do próprio processo que
+   * vai migrar, e o momento é exatamente o certo.
+   *
+   * `VACUUM INTO` e não cópia de arquivo: o banco está em WAL, e copiar só o
+   * `.db` deixaria de fora o que ainda estiver no `-wal`.
+   */
+  private backupBeforeMigrating(fromVersion: number): void {
+    // Banco novo (nunca migrado) não tem o que preservar, e `:memory:` não tem
+    // arquivo nenhum.
+    if (fromVersion === 0) return;
+
+    const dbPath = String(
+      (this.db.prepare('PRAGMA database_list').get() as { file?: string }).file ?? '',
+    );
+    if (!dbPath) return;
+
+    const carimbo = new Date().toISOString().replace(/[:.]/g, '-');
+    const destino = `${dbPath}.pre-v${fromVersion}-${carimbo}`;
+
+    try {
+      // O caminho vai literal no SQL (não aceita bind); as aspas simples são
+      // escapadas para um diretório com apóstrofo no nome não quebrar a query.
+      this.db.exec(`VACUUM INTO '${destino.replace(/'/g, "''")}'`);
+      getLogger().info(
+        { event: 'reminder_store_backup', path: destino, from_version: fromVersion },
+        `Banco copiado para ${destino} antes de migrar`,
+      );
+    } catch (err) {
+      // Falhar aqui é o certo: migrar sem cópia é exatamente o cenário que
+      // torna o rollback letal. O health check pega e a release anterior volta
+      // — com o banco ainda na versão que ela entende.
+      throw new Error(
+        `Não consegui copiar o banco antes de migrar (${destino}): ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+
+    pruneBackups(dbPath);
+  }
+
   private migrate(): void {
     const current = Number(
       (this.db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version,
@@ -208,6 +260,10 @@ export class ReminderStore {
         `Banco de lembretes na versão ${current}, mais nova que este código (${MIGRATIONS.length}). ` +
           'Rollback com migração aplicada — restaure o backup do banco.',
       );
+    }
+
+    if (current < MIGRATIONS.length) {
+      this.backupBeforeMigrating(current);
     }
 
     for (let version = current; version < MIGRATIONS.length; version++) {
@@ -519,6 +575,30 @@ export class ReminderStore {
  * `INSERT` de um lembrete viraria buraco audível na resposta de **outro**
  * cômodo.
  */
+/** Cópias pré-migração a manter. O diretório de estado não pode crescer sem fim. */
+const MAX_DB_BACKUPS = 5;
+
+/** Mantém as `MAX_DB_BACKUPS` cópias mais recentes e apaga o resto. */
+function pruneBackups(dbPath: string): void {
+  try {
+    const dir = dirname(dbPath);
+    const prefixo = `${basename(dbPath)}.pre-v`;
+    const antigas = readdirSync(dir)
+      .filter((nome) => nome.startsWith(prefixo))
+      .sort()
+      .reverse()
+      .slice(MAX_DB_BACKUPS);
+
+    for (const nome of antigas) rmSync(join(dir, nome), { force: true });
+  } catch (err) {
+    // Poda é higiene: falhar aqui não pode impedir o boot.
+    getLogger().warn(
+      { event: 'reminder_store_backup_prune_failed', err: err instanceof Error ? err.message : String(err) },
+      'Não consegui podar cópias antigas do banco',
+    );
+  }
+}
+
 function applyPragmas(db: DatabaseSync): void {
   db.exec(`
     PRAGMA journal_mode = WAL;
