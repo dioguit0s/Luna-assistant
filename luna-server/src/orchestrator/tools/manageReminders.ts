@@ -126,10 +126,11 @@ function cancel(
 
   // Cancelar o que está tocando também para o toque: senão o alarme continuaria
   // em rajadas até o teto, com o registro já cancelado no banco.
-  const tocando = deps.ringer.ringingIn(roomId);
-  if (tocando && tocando.shortId === alvo.shortId) {
-    deps.ringer.dismiss(roomId, 'tool');
-  }
+  //
+  // Por short_id, e não pelo cômodo da sessão: o ciclo pode ter migrado para o
+  // cômodo de fallback quando a origem estava muda, e é lá que ele está
+  // tocando.
+  deps.ringer.dismissByShortId(alvo.shortId);
 
   deps.getScheduler().reschedule();
 

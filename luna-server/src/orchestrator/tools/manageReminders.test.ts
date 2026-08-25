@@ -13,6 +13,7 @@ const silentConfig = { logLevel: 'silent' } as AppConfig;
 const ROOM = 'sala_de_estar';
 const T0 = Date.UTC(2026, 7, 20, 12, 0, 0);
 const MINUTO = 60_000;
+const RING_MAX_DEFER_MS = 3_000;
 
 function ctx(overrides: Partial<ToolContext> = {}): ToolContext {
   return {
@@ -52,7 +53,8 @@ describe('createManageRemindersHandler', () => {
       maxRingMs: 5 * MINUTO,
       silentRetryMs: MINUTO,
       missedGraceMs: 15 * MINUTO,
-      snoozeMaxMinutes: 60,
+      maxDeferMs: RING_MAX_DEFER_MS,
+    snoozeMaxMinutes: 60,
       fallbackRoomId: '',
       now: () => new Date(T0),
     });
@@ -188,7 +190,8 @@ describe('createManageRemindersHandler: list e cancel', () => {
       maxRingMs: 5 * MINUTO,
       silentRetryMs: MINUTO,
       missedGraceMs: 15 * MINUTO,
-      snoozeMaxMinutes: 60,
+      maxDeferMs: RING_MAX_DEFER_MS,
+    snoozeMaxMinutes: 60,
       fallbackRoomId: '',
       now: () => new Date(T0),
     });
@@ -395,5 +398,52 @@ describe('createManageRemindersHandler: list e cancel', () => {
     assert.equal(listado.count, 0);
     assert.equal(cancelado.success, false);
     assert.equal(store.countLiveByRoom('cozinha'), 1);
+  });
+});
+
+describe('createManageRemindersHandler: cancel de alarme no cômodo de fallback', () => {
+  before(() => {
+    createLogger(silentConfig);
+  });
+
+  it('para o toque mesmo quando o ciclo migrou para outro cômodo', async () => {
+    // Sem isto o registro sairia `cancelled` no banco enquanto as rajadas
+    // continuariam no cômodo de fallback até `alarmMaxRingMs` — 5 min de alarme
+    // tocando um lembrete que o usuário acabou de cancelar.
+    const store = ReminderStore.open(':memory:');
+    const ringer = new AlarmRinger({
+      store,
+      sink: { ringBurst: (roomId): BurstResult => (roomId === ROOM ? 'silent' : 'delivered') },
+      listenWindowMs: 6_000,
+      maxRingMs: 5 * MINUTO,
+      silentRetryMs: MINUTO,
+      missedGraceMs: 15 * MINUTO,
+      maxDeferMs: RING_MAX_DEFER_MS,
+      snoozeMaxMinutes: 60,
+      fallbackRoomId: 'cozinha',
+      now: () => new Date(T0),
+    });
+    const handler = createManageRemindersHandler({
+      ringer,
+      store,
+      getScheduler: () => ({ reschedule: () => {} }) as unknown as ReminderScheduler,
+      now: () => new Date(T0),
+    });
+
+    const criado = store.insertOnce({ roomId: ROOM, label: 'acordar', dueAtUtc: T0 }, T0);
+    store.markRinging(criado.id, criado.nextDueUtc, T0);
+    const ciclo = ringer.ring(store.get(criado.id)!);
+    await Promise.resolve();
+    assert.equal(ringer.isRinging('cozinha'), true, 'o alarme migrou para o fallback');
+
+    const resultado = (await handler({ action: 'cancel', label: 'acordar' }, ctx())) as {
+      success: boolean;
+    };
+    await ciclo;
+
+    assert.equal(resultado.success, true);
+    assert.equal(ringer.isRinging('cozinha'), false, 'o toque tem que parar onde estiver');
+    assert.equal(store.get(criado.id)!.status, 'cancelled');
+    store.close();
   });
 });

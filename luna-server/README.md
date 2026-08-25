@@ -125,9 +125,10 @@ cada release no deploy.
 | `RING_LISTEN_WINDOW_MS` | `6000` | Janela entre rajadas em que a wake word volta a ficar ligada — a única em que "Luna, para o alarme" é ouvido |
 | `RING_BARGEIN_GUARD_MS` | `2000` | Silêncio mínimo desde a última fala do usuário para uma rajada poder sair |
 | `RING_SILENT_RETRY_MS` | `60000` | Espera antes de tentar de novo quando a sala emudeceu no meio do toque |
+| `RING_MAX_DEFER_MS` | `3000` | Teto de adiamento pelo guard de barge-in: passado ele, a rajada sai por cima da fala. Um cômodo que nunca silencia não pode significar um alarme que nunca toca |
 | `REMINDER_SNOOZE_MAX_MINUTES` | `60` | Teto da soneca pedida por voz |
 
-> **Os dois primeiros `RING_*` não foram medidos no hardware** (2026-08-24): são
+> **`RING_LISTEN_WINDOW_MS` e `RING_MAX_DEFER_MS` não foram medidos no hardware** (2026-08-24): são
 > derivados das constantes do firmware (`AEC_RESUME_DELAY_MS`,
 > `WAKE_SETTLE_WINDOWS`) mais o tempo de dizer "Hey Luna". Calibrar no satélite
 > real, como os `WAKE_LISTEN_*` foram. O log de `alarm_dismissed` traz

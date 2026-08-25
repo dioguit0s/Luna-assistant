@@ -1,7 +1,7 @@
 # Alarmes e lembretes — plano de implementação
 
 **Status:** Implementado — marcos 0 a 11 entregues. Falta a calibração no hardware
-dos marcos 7 e 8 (`RING_LISTEN_WINDOW_MS`, `RING_MAX_DEFER_MS`), que não pôde ser
+dos marcos 7 e 8 (`RING_LISTEN_WINDOW_MS`, `RING_MAX_DEFER_MS` — as duas são env), que não pôde ser
 feita por não haver satélite disponível; os valores em uso são derivados das
 constantes do firmware, com comentário datado no código dizendo isso.
 **Data:** 2026-08-19 (plano) · 2026-08-24 (implementação)

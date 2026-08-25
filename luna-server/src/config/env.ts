@@ -115,6 +115,18 @@ export interface AppConfig {
    * carência de `missedGraceMs` expirar.
    */
   ringSilentRetryMs: number;
+  /**
+   * Teto de adiamento de uma rajada pelo guard de barge-in.
+   *
+   * Sem ele, um cômodo que transmite sem parar nunca ouviria o alarme — é o
+   * caso do `luna-client-test --mic` e do `luna-desktop`, que não têm wake word.
+   * Um alarme que **nunca toca** é pior que um que trunca uma frase, então
+   * passado este teto a rajada sai assim mesmo.
+   *
+   * 2026-08-24: não medido no hardware, como `ringListenWindowMs`. É env pelo
+   * mesmo motivo que aquele: calibrar não pode exigir redeploy.
+   */
+  ringMaxDeferMs: number;
   /** Teto da soneca pedida por voz, em minutos. */
   reminderSnoozeMaxMinutes: number;
 }
@@ -254,6 +266,7 @@ export function loadConfig(): AppConfig {
     ringListenWindowMs: parseOptionalNumber('RING_LISTEN_WINDOW_MS') ?? 6_000,
     ringBargeInGuardMs: parseOptionalNumber('RING_BARGEIN_GUARD_MS') ?? 2_000,
     ringSilentRetryMs: parseOptionalNumber('RING_SILENT_RETRY_MS') ?? 60_000,
+    ringMaxDeferMs: parseOptionalNumber('RING_MAX_DEFER_MS') ?? 3_000,
     reminderSnoozeMaxMinutes: parseOptionalNumber('REMINDER_SNOOZE_MAX_MINUTES') ?? 60,
   };
 

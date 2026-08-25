@@ -240,6 +240,7 @@ export class Orchestrator implements AlarmAudioSink {
       maxRingMs: config.alarmMaxRingMs,
       silentRetryMs: config.ringSilentRetryMs,
       missedGraceMs: config.missedGraceMs,
+      maxDeferMs: config.ringMaxDeferMs,
       snoozeMaxMinutes: config.reminderSnoozeMaxMinutes,
       fallbackRoomId: config.reminderFallbackRoomId,
     });
@@ -471,10 +472,6 @@ export class Orchestrator implements AlarmAudioSink {
       // próprio modelo já dispensou (o ciclo já saiu do mapa).
       this.alarmRinger.dismiss(roomId, 'turn_complete');
 
-      // Agora sim: a confirmação falada já saiu inteira, o turno fechou, e a
-      // sala pode entrar em modo captura sem engolir nada de ninguém.
-      this.startPendingPrerender(roomId);
-
       tracker.reset();
     });
 
@@ -510,8 +507,8 @@ export class Orchestrator implements AlarmAudioSink {
       void handler(call.args, ctx)
         .then((result) => {
           provider.sendToolResult(call.callId, result);
-          // Só REGISTRA o pedido; quem o dispara é o `turnComplete` da
-          // confirmação falada (ver `startPendingPrerender`).
+          // Registra o pedido e deixa o gate decidir quando abrir a captura
+          // (ver `tryOpenPrerenderGate`).
           //
           // Duas razões para não renderizar aqui. A primeira é o gate de
           // `pendingToolCalls` do OpenAI, que o `speak()` compartilha: chamado
@@ -783,6 +780,13 @@ export class Orchestrator implements AlarmAudioSink {
       label: criado.label,
       audioSeen: false,
     });
+
+    // O gate começa a rodar agora, e não no `turnComplete` da confirmação.
+    // Amarrá-lo ao `turnComplete` deixava o pedido parado quando ele não vinha
+    // — e aí ele era consumido no fim de um turno QUALQUER depois,
+    // potencialmente horas mais tarde e com o lembrete já tendo tocado só com
+    // bipe. O gate sabe sozinho quando pode abrir; deixar que ele decida.
+    this.startPrerenderGate(roomId);
   }
 
   /**
@@ -792,7 +796,7 @@ export class Orchestrator implements AlarmAudioSink {
    * `setImmediate` e não `await`: nada depende de a renderização ficar pronta
    * rápido, e o callback do port é síncrono.
    */
-  private startPendingPrerender(roomId: string): void {
+  private startPrerenderGate(roomId: string): void {
     if (!this.pendingPrerenderByRoom.has(roomId)) return;
     if (this.prerenderGateTimerByRoom.has(roomId)) return;
     this.tryOpenPrerenderGate(roomId, 0);
@@ -874,6 +878,11 @@ export class Orchestrator implements AlarmAudioSink {
   }
 
   private captureChunk(capture: AudioCapture, chunk: Buffer): void {
+    // Uma vez estourado o teto, para de acumular de vez. Continuar aceitando os
+    // chunks seguintes que ainda coubessem não produziria uma fala cortada no
+    // fim — produziria uma fala com um buraco no meio, que é pior.
+    if (capture.truncated) return;
+
     if (capture.bytes + chunk.length > MAX_REMINDER_AUDIO_BYTES) {
       capture.truncated = true;
       return;

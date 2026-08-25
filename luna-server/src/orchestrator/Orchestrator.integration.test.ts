@@ -56,6 +56,7 @@ const baseConfig: AppConfig = {
   ringListenWindowMs: 6_000,
   ringBargeInGuardMs: 2_000,
   ringSilentRetryMs: 60_000,
+  ringMaxDeferMs: 3_000,
   reminderSnoozeMaxMinutes: 60,
 };
 
@@ -1279,7 +1280,19 @@ describe('Orchestrator: pré-renderização da fala do lembrete', () => {
 
     harness.orchestrator.releaseRoom(ROOM_ID);
 
-    assert.equal(await renderizando, false, 'a promise resolve na hora, não no timeout');
+    // `Promise.race` contra um timer curto, e não `await` puro: contra o código
+    // antigo o `await` sozinho não falharia por asserção, ele estolaria até o
+    // runner desistir — e o `PRERENDER_TIMEOUT_MS` de 15s é `unref()`ado, então
+    // nem esse limite é confiável. Racear contra `Promise.resolve` seria o
+    // extremo oposto: nenhuma função async resolve em zero microtasks. 100ms é
+    // folgado para o caminho correto e curtíssimo perto dos 15s do errado.
+    let timer: NodeJS.Timeout | undefined;
+    const naoResolveu = new Promise<'pendente'>((resolve) => {
+      timer = setTimeout(() => resolve('pendente'), 100);
+    });
+    const corrida = await Promise.race([renderizando, naoResolveu]);
+    clearTimeout(timer);
+    assert.equal(corrida, false, 'a promise tem que resolver na hora, não no timeout');
     assert.equal(harness.reminderStore.getAudio(criado.id), null);
 
     // E a sala volta a mandar áudio para o cômodo normalmente.

@@ -48,24 +48,12 @@ export type RingOutcome =
   | 'snoozed'
   | 'exhausted'
   | 'room_gone'
+  /** Exceção no meio do ciclo — separado de `room_gone` para o log não mentir. */
+  | 'failed'
   | 'shutdown';
 
 /** De onde veio a dispensa — só para log, mas é o que diagnostica o hardware. */
 export type DismissReason = 'tool' | 'turn_complete';
-
-/**
- * Teto de adiamento por barge-in.
- *
- * Sem ele, um cômodo que transmite sem parar nunca ouviria o alarme: é
- * exatamente o caso do `luna-client-test --mic` e do `luna-desktop`, que não
- * têm wake word e mandam áudio continuamente. Um alarme que **nunca toca** é
- * pior que um que trunca uma frase, então passado este teto a rajada sai assim
- * mesmo, com log alto.
- *
- * 2026-08-24: não medido no hardware — não havia satélite disponível nesta
- * rodada. Calibrar junto com `ringListenWindowMs`.
- */
-export const RING_MAX_DEFER_MS = 3_000;
 
 /** Espera entre duas tentativas quando a rajada está adiada pelo barge-in. */
 const RING_DEFER_RETRY_MS = 1_000;
@@ -90,6 +78,11 @@ export interface AlarmRingerOptions {
   silentRetryMs: number;
   /** Carência do catch-up; limita por quanto tempo faz sentido reinsistir. */
   missedGraceMs: number;
+  /**
+   * Teto de adiamento por barge-in: passado ele, a rajada sai por cima da fala
+   * do usuário. Ver `ringMaxDeferMs` em `config/env.ts` para o porquê.
+   */
+  maxDeferMs: number;
   /** Teto da soneca pedida por voz, em minutos. */
   snoozeMaxMinutes: number;
   /** Cômodo de fallback quando a origem está muda. Vazio desliga o fallback. */
@@ -127,6 +120,7 @@ export class AlarmRinger {
   private readonly maxRingMs: number;
   private readonly silentRetryMs: number;
   private readonly missedGraceMs: number;
+  private readonly maxDeferMs: number;
   private readonly snoozeMaxMinutes: number;
   private readonly fallbackRoomId: string;
   private readonly now: NowFn;
@@ -159,6 +153,7 @@ export class AlarmRinger {
     this.maxRingMs = options.maxRingMs;
     this.silentRetryMs = options.silentRetryMs;
     this.missedGraceMs = options.missedGraceMs;
+    this.maxDeferMs = options.maxDeferMs;
     this.snoozeMaxMinutes = options.snoozeMaxMinutes;
     this.fallbackRoomId = options.fallbackRoomId;
     this.now = options.now ?? systemNow;
@@ -279,6 +274,26 @@ export class AlarmRinger {
   }
 
   /**
+   * Para o toque de um lembrete específico, esteja ele tocando onde estiver.
+   *
+   * `dismiss` é por cômodo de propósito — quem dispensa por voz está onde o
+   * alarme toca. `cancel`, não: ele age à distância, sobre um lembrete
+   * identificado por horário ou texto, e o ciclo pode ter migrado para o cômodo
+   * de fallback. Sem isto o registro sairia `cancelled` no banco enquanto as
+   * rajadas continuariam no outro cômodo até o teto.
+   *
+   * @returns `true` se havia um ciclo em voo para esse lembrete.
+   */
+  dismissByShortId(shortId: string): boolean {
+    for (const cycle of this.activeByRoom.values()) {
+      if (cycle.shortId !== shortId) continue;
+      this.finish(cycle, 'dismissed');
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Shutdown. Fecha todo ciclo em voo **antes** de o store fechar — daí a ordem
    * em `index.ts`: scheduler, ringer, e só então `store.close()`.
    */
@@ -315,9 +330,10 @@ export class AlarmRinger {
         },
         'Falha no ciclo de toque: encerrando para não prender a sala',
       );
-      // `room_gone` e não `exhausted`: dá ao one-shot o retry com back-off que
-      // já existe, que é o certo para uma falha transitória de banco.
-      this.finish(cycle, 'room_gone');
+      // Retenta como `room_gone` faria — é o certo para uma falha transitória
+      // de banco —, mas com outcome próprio, para o log não dizer "ninguém
+      // para ouvir" numa falha que não teve nada a ver com sala vazia.
+      this.finish(cycle, 'failed');
     }
   }
 
@@ -343,7 +359,7 @@ export class AlarmRinger {
     // Passado o teto de adiamento, a rajada sai por cima da fala do usuário: um
     // cômodo que nunca silencia (o `--mic` do cliente de teste, o desktop) não
     // pode significar um alarme que nunca toca.
-    const force = cycle.deferredMs >= RING_MAX_DEFER_MS;
+    const force = cycle.deferredMs >= this.maxDeferMs;
     const result = this.sink.ringBurst(cycle.roomId, force, this.speechForBurst(cycle));
 
     if (result === 'busy') {
@@ -521,16 +537,42 @@ export class AlarmRinger {
       return;
     }
 
+    const naoTocou = outcome === 'room_gone' || outcome === 'shutdown' || outcome === 'failed';
+
     if (atual.kind === 'recurring') {
       // `markRinging` JÁ avançou `next_due_utc` para a próxima ocorrência.
       // Rearmar é só devolver o status, com o MESMO instante — recalcular aqui
       // duplicaria a aritmética de recorrência e daria drift.
-      this.store.rearm(cycle.reminderId, atual.nextDueUtc, now);
+      //
+      // Mas quando o toque NÃO aconteceu, devolver a próxima ocorrência
+      // significa perder a de hoje sem uma tentativa sequer: com uma falha
+      // determinística (um BLOB corrompido, por exemplo) o alarme diário
+      // simplesmente nunca tocaria, deixando uma linha de log por dia. Aí a
+      // retentativa vale — desde que não atropele a ocorrência seguinte.
+      const proxima = atual.nextDueUtc;
+      if (naoTocou) {
+        const retryAt = now + this.silentRetryMs;
+        this.store.rearm(cycle.reminderId, Math.min(retryAt, proxima), now);
+        getLogger().warn(
+          {
+            event: outcome === 'failed' ? 'alarm_recurring_retry' : 'alarm_room_offline',
+            room_id: cycle.roomId,
+            reminder_id: cycle.reminderId,
+            short_id: cycle.shortId,
+            outcome,
+            retry_at: Math.min(retryAt, proxima),
+          },
+          `Recorrente ${cycle.shortId} não tocou (${outcome}): nova tentativa antes da próxima ocorrência`,
+        );
+        return;
+      }
+
+      this.store.rearm(cycle.reminderId, proxima, now);
       return;
     }
 
-    if (outcome === 'room_gone' || outcome === 'shutdown') {
-      this.retryOrGiveUp(cycle, atual, now);
+    if (naoTocou) {
+      this.retryOrGiveUp(cycle, atual, outcome, now);
       return;
     }
 
@@ -549,21 +591,33 @@ export class AlarmRinger {
    * **original** (`due_at_utc`, que `markRinging` não toca) — senão cada
    * tentativa zeraria o atraso e o lembrete insistiria para sempre.
    */
-  private retryOrGiveUp(cycle: RingCycle, atual: Reminder, now: number): void {
+  private retryOrGiveUp(
+    cycle: RingCycle,
+    atual: Reminder,
+    outcome: RingOutcome,
+    now: number,
+  ): void {
     const original = atual.dueAtUtc ?? atual.nextDueUtc;
     const retryAt = now + this.silentRetryMs;
+    const falhou = outcome === 'failed';
 
     if (retryAt - original <= this.missedGraceMs) {
       this.store.rearm(cycle.reminderId, retryAt, now);
       getLogger().warn(
         {
-          event: 'alarm_room_offline',
+          // O motivo importa para quem lê o log: "ninguém para ouvir" manda a
+          // investigação para o lado do satélite, que não tem nada a ver com
+          // uma exceção no ciclo.
+          event: falhou ? 'alarm_retry_after_failure' : 'alarm_room_offline',
           room_id: cycle.roomId,
           reminder_id: cycle.reminderId,
           short_id: cycle.shortId,
+          outcome,
           retry_at: retryAt,
         },
-        `Ninguém em ${cycle.roomId} para ouvir ${cycle.shortId}: nova tentativa em breve`,
+        falhou
+          ? `Ciclo de ${cycle.shortId} falhou: nova tentativa em breve`
+          : `Ninguém em ${cycle.roomId} para ouvir ${cycle.shortId}: nova tentativa em breve`,
       );
       return;
     }
@@ -576,7 +630,9 @@ export class AlarmRinger {
         reminder_id: cycle.reminderId,
         short_id: cycle.shortId,
       },
-      `Lembrete ${cycle.shortId} venceu sem ninguém para ouvir`,
+      falhou
+        ? `Lembrete ${cycle.shortId} não pôde tocar dentro da carência`
+        : `Lembrete ${cycle.shortId} venceu sem ninguém para ouvir`,
     );
   }
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { AppConfig } from '../config/env.js';
 import { createLogger } from '../logging/logger.js';
 import { ReminderStore, type Reminder } from './ReminderStore.js';
-import { AlarmRinger, RING_MAX_DEFER_MS, type BurstResult } from './AlarmRinger.js';
+import { AlarmRinger, type BurstResult } from './AlarmRinger.js';
 import { CHIME_DURATION_MS } from './chime.js';
 
 const silentConfig = { logLevel: 'silent' } as AppConfig;
@@ -16,6 +16,8 @@ const LISTEN_WINDOW_MS = 6_000;
 const MAX_RING_MS = 5 * MINUTO;
 const SILENT_RETRY_MS = 60_000;
 const MISSED_GRACE_MS = 15 * MINUTO;
+/** Mesmo default do `ringMaxDeferMs` em `config/env.ts`. */
+const RING_MAX_DEFER_MS = 3_000;
 /** Uma volta completa do ciclo: bipe inteiro + janela de escuta. */
 const CICLO_MS = CHIME_DURATION_MS + LISTEN_WINDOW_MS;
 
@@ -86,6 +88,7 @@ function buildHarness(overrides: Record<string, unknown> = {}): Harness {
     maxRingMs: MAX_RING_MS,
     silentRetryMs: SILENT_RETRY_MS,
     missedGraceMs: MISSED_GRACE_MS,
+    maxDeferMs: RING_MAX_DEFER_MS,
     snoozeMaxMinutes: 60,
     fallbackRoomId: '',
     now: clock.now,
@@ -333,7 +336,8 @@ describe('AlarmRinger', () => {
       maxRingMs: MAX_RING_MS,
       silentRetryMs: SILENT_RETRY_MS,
       missedGraceMs: MISSED_GRACE_MS,
-      snoozeMaxMinutes: 60,
+      maxDeferMs: RING_MAX_DEFER_MS,
+    snoozeMaxMinutes: 60,
       fallbackRoomId: '',
       now: clockTardio.now,
     });
@@ -550,5 +554,113 @@ describe('AlarmRinger: falha no meio do ciclo', () => {
 
     h.ringer.dismiss(ROOM, 'tool');
     await segundoCiclo;
+  });
+
+  it('exceção DENTRO do timer da rajada seguinte também encerra o ciclo', async () => {
+    // O caminho que de fato prendia a sala para sempre: a exceção acontece no
+    // callback do `setTimeout`, fora da call stack de `ring()`. Ali não há
+    // promise para rejeitar — sem o try/catch vira `uncaughtException`, o ciclo
+    // fica órfão em `activeByRoom` e a promise nunca resolve, segurando a vaga
+    // em `firingRooms` até o restart.
+    const h = buildHarness();
+    const reminder = armarEDisparar(h);
+
+    const ciclo = h.ringer.ring(reminder);
+    await flushMicrotasks();
+    assert.equal(h.sink.burstsIn(ROOM), 1, 'a primeira rajada sai normalmente');
+
+    // A segunda rajada, agendada por timer, é a que estoura.
+    h.sink.ringBurst = () => {
+      throw new Error('socket hang up');
+    };
+
+    await advance(h, CICLO_MS);
+    await ciclo;
+
+    assert.equal(h.ringer.isRinging(ROOM), false, 'o ciclo não pode ficar órfão');
+    assert.equal(h.store.get(reminder.id)!.status, 'armed', 'one-shot que não tocou volta para retry');
+  });
+});
+
+describe('AlarmRinger: recorrente que não tocou', () => {
+  before(() => {
+    createLogger(silentConfig);
+  });
+
+  beforeEach(() => {
+    mock.timers.enable({ apis: ['setTimeout'] });
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+    while (stores.length > 0) stores.pop()!.close();
+  });
+
+  it('sala muda não faz o recorrente pular a ocorrência de hoje sem tentar', async () => {
+    // `markRinging` já avançou `next_due_utc` para amanhã. Devolver esse
+    // instante significa perder a ocorrência de hoje sem uma tentativa sequer —
+    // com uma falha determinística, o alarme diário simplesmente nunca tocaria.
+    const h = buildHarness();
+    h.sink.resultByRoom.set(ROOM, 'silent');
+    const reminder = armarEDisparar(h, { recurring: true });
+    const proximaOcorrencia = reminder.nextDueUtc;
+
+    await h.ringer.ring(reminder);
+
+    const depois = h.store.get(reminder.id)!;
+    assert.equal(depois.status, 'armed');
+    assert.equal(depois.nextDueUtc, T0 + SILENT_RETRY_MS, 'deveria retentar antes de amanhã');
+    assert.ok(depois.nextDueUtc < proximaOcorrencia);
+  });
+
+  it('a retentativa nunca atropela a próxima ocorrência', async () => {
+    // Recorrente de alta frequência: se o retry cair depois da próxima
+    // ocorrência, ele a atrasaria em vez de antecipá-la.
+    const h = buildHarness({ silentRetryMs: 10 * MINUTO });
+    h.sink.resultByRoom.set(ROOM, 'silent');
+
+    const criado = h.store.insertRecurring(
+      {
+        roomId: ROOM,
+        label: null,
+        localHour: 6,
+        localMinute: 30,
+        repeatRule: 'daily',
+        nextDueUtc: T0,
+      },
+      T0,
+    );
+    const proxima = T0 + 2 * MINUTO; // próxima ocorrência bem antes do retry
+    h.store.markRinging(criado.id, proxima, T0);
+
+    await h.ringer.ring(h.store.get(criado.id)!);
+
+    assert.equal(h.store.get(criado.id)!.nextDueUtc, proxima);
+  });
+
+  it('dispensa por short_id alcança o ciclo que migrou para o cômodo de fallback', async () => {
+    // `dismiss` é por cômodo de propósito; `cancel` age à distância e precisa
+    // achar o ciclo onde quer que ele esteja tocando.
+    const h = buildHarness({ fallbackRoomId: FALLBACK });
+    h.sink.resultByRoom.set(ROOM, 'silent');
+    h.sink.resultByRoom.set(FALLBACK, 'delivered');
+    const reminder = armarEDisparar(h);
+
+    const ciclo = h.ringer.ring(reminder);
+    await flushMicrotasks();
+    assert.equal(h.ringer.isRinging(FALLBACK), true);
+
+    // O cômodo da sessão é o de origem, onde nada está tocando.
+    assert.equal(h.ringer.dismiss(ROOM, 'tool'), false);
+    assert.equal(h.ringer.dismissByShortId(reminder.shortId), true);
+    await ciclo;
+
+    assert.equal(h.ringer.isRinging(FALLBACK), false);
+    assert.equal(h.store.get(reminder.id)!.status, 'done');
+  });
+
+  it('dispensa por short_id de lembrete que não está tocando é no-op', () => {
+    const h = buildHarness();
+    assert.equal(h.ringer.dismissByShortId('A7K3'), false);
   });
 });
