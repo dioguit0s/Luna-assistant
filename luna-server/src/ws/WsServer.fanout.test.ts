@@ -50,6 +50,10 @@ const config: AppConfig = {
   ringSilentRetryMs: 60_000,
   ringMaxDeferMs: 3_000,
   reminderSnoozeMaxMinutes: 60,
+  weatherLatitude: null,
+  weatherLongitude: null,
+  weatherTtlMs: 600_000,
+  weatherMaxStaleMs: 10_800_000,
 };
 
 const ROOM = 'sala_de_estar';
@@ -166,7 +170,7 @@ describe('WsServer: endereçamento por sala', () => {
     roomManager = new RoomManager(config, ringBuffer, () => provider);
     const haClient = new HomeAssistantClient(config);
     reminderStore = ReminderStore.open(':memory:');
-    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient), reminderStore);
+    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient), reminderStore, null);
     server.start();
 
     while (server.port === null) {

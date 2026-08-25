@@ -164,6 +164,7 @@ Contrato agnóstico ao provider — ver [ADR 002](adr/002-function-calling-contr
 | `control_device` | `orchestrator/tools/controlDevice.ts` | Liga/desliga um dispositivo no HA e emite `command_result` |
 | `set_reminder` | `orchestrator/tools/setReminder.ts` | Cria alarme/lembrete/timer, único ou recorrente |
 | `manage_reminders` | `orchestrator/tools/manageReminders.ts` | `dismiss`/`snooze` do que toca agora, `list`/`cancel` do que está marcado |
+| `get_weather` | `orchestrator/tools/getWeather.ts` | Tempo agora, hoje ou amanhã, pela previsão do Open-Meteo. Só declarada ao modelo se `WEATHER_LATITUDE`/`WEATHER_LONGITUDE` estiverem configuradas |
 
 **O vocabulário é deliberadamente enxuto por causa do TTFAB:** cada schema a mais infla
 o `model_decision_ms`, sobretudo com `thinkingBudget: 0`. Adicionar tool é decisão de
@@ -186,6 +187,19 @@ a falar, exclusões e entradas manuais.
 o mesmo "luz" existe em vários cômodos apontando para entidades diferentes. Falhas de
 resolução (`unknown_device`, `device_not_in_room`) trazem mensagem em português
 **escrita para a IA falar em voz alta**.
+
+### Previsão do tempo
+
+`weather/WeatherSource.ts` busca no Open-Meteo (`weather/OpenMeteoClient.ts`) e revalida
+a cada `WEATHER_TTL_MS` (10 min), com o mesmo desenho do `DeviceRegistrySource`: snapshot
+em memória, `refresh()` que preserva o anterior em falha, `current()` chamado a cada uso.
+
+A diferença deliberada é que **`getWeather.ts` nunca faz round-trip nenhum** — o handler
+só lê `current()`, síncrono. Um `fetch` a `api.open-meteo.com` custa 150-400 ms; o
+`await` que `controlDevice.ts` faz ao HA só se justifica por ser LAN (~20-40 ms). Um
+teto de idade (`WEATHER_MAX_STALE_MS`, 3h) faz `current()` devolver `null` para um
+snapshot velho demais — diferente do registro de dispositivos, aqui o dado tem prazo de
+validade: "vinte e três graus" de três horas atrás não é mais verdade.
 
 ***
 

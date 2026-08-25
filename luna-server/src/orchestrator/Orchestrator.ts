@@ -17,6 +17,9 @@ import { getActiveProviderName } from '../providers/AudioProviderFactory.js';
 import type { AppConfig } from '../config/env.js';
 import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
+import { createGetWeatherHandler } from './tools/getWeather.js';
+import { GET_WEATHER_TOOL } from '../weather/tools.js';
+import type { WeatherSource } from '../weather/WeatherSource.js';
 import {
   createEnvelope,
   serializeControlMessage,
@@ -232,6 +235,12 @@ export class Orchestrator implements AlarmAudioSink {
      */
     private readonly sendToRoom: SendToRoom,
     private readonly reminderStore: ReminderStore,
+    /**
+     * `null` quando `WEATHER_LATITUDE`/`WEATHER_LONGITUDE` não estão
+     * configuradas: a tool nem é declarada ao modelo (`RoomManager`), então o
+     * handler nem precisa existir.
+     */
+    weatherSource: WeatherSource | null,
   ) {
     this.alarmRinger = new AlarmRinger({
       store: reminderStore,
@@ -283,6 +292,9 @@ export class Orchestrator implements AlarmAudioSink {
           },
         }),
       ],
+      ...(weatherSource
+        ? ([[GET_WEATHER_TOOL.name, createGetWeatherHandler({ source: weatherSource })]] as const)
+        : []),
     ]);
 
     // O bind dos callbacks passa a acontecer na criação da sessão, não no

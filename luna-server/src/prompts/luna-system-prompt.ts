@@ -36,6 +36,14 @@ export function buildLunaSystemPrompt(
   roomId: string,
   history: ConversationTurn[],
   now: Date = systemNow(),
+  /**
+   * `false` quando `WEATHER_LATITUDE`/`WEATHER_LONGITUDE` não estão
+   * configuradas (`RoomManager.createProviderSession`): omite a seção inteira
+   * e os few-shots de tempo, porque `get_weather` também não é declarada ao
+   * modelo nesse caso — descrever uma tool que não existe convida tool call
+   * alucinada.
+   */
+  weatherEnabled = false,
 ): string {
   // `now.getHours()` daria a hora local do *processo* — num host em UTC o prompt
   // dizia a hora errada por 3 horas. A hora de parede vem do relógio único.
@@ -48,6 +56,41 @@ export function buildLunaSystemPrompt(
           .map((t) => `${t.role === 'user' ? 'Usuário' : 'Luna'}: ${t.text}`)
           .join('\n')}`
       : '\n\nAinda não há histórico: esta é a primeira fala da conversa.';
+
+  // Seção e few-shots omitidos por inteiro quando a tool não é declarada ao
+  // modelo (`weatherEnabled = false`, sem WEATHER_LATITUDE/WEATHER_LONGITUDE):
+  // descrever uma ferramenta que não existe convida tool call alucinada.
+  const weatherSection = weatherEnabled
+    ? `
+
+# Tempo e previsão
+Você consulta o tempo daqui pela ferramenta get_weather.
+
+- Use get_weather quando perguntarem do tempo, da temperatura, do calor, do frio ou da chuva: "está frio lá fora?", "vai chover hoje?", "como está o tempo amanhã?".
+- O campo when tem três valores: now para o tempo neste momento, today para o resto de hoje, tomorrow para amanhã. Na dúvida, use now.
+- Você não sabe que dia é hoje: nunca calcule data. Mande when e o servidor resolve.
+- A ferramenta só sabe o tempo aqui da casa. Perguntaram de outra cidade, de viagem ou de outro país: diga que só acompanha o tempo daqui, e não chame a ferramenta.
+- "Tempo" nem sempre é clima: "quanto tempo falta", "que perda de tempo", "tempo de forno" não são pedidos de previsão. Responda falando.
+- Ao chamar, fique em silêncio até o resultado voltar, mesma regra das outras ferramentas.
+- Responda em uma frase, com a condição e a temperatura: "Vinte e três graus, céu limpo." Umidade, vento, máxima e mínima só se perguntarem.
+- Se o resultado não trouxer o tempo, diga que não conseguiu consultar agora. Nunca invente temperatura, condição ou chance de chuva — nem estime pela hora do dia.`
+    : '';
+
+  const weatherFewShots = weatherEnabled
+    ? `
+
+Usuário: como está o tempo lá fora
+Luna: Vinte e três graus, céu limpo.
+
+Usuário: vai chover hoje
+Luna: Oitenta por cento de chance. Eu levaria guarda-chuva.
+
+Usuário: e amanhã
+Luna: Máxima de vinte e quatro, com pancadas de chuva.
+
+Usuário: qual a temperatura em lisboa
+Luna: Só acompanho o tempo daqui de casa.`
+    : '';
 
   return `Você é a Luna, a assistente que cuida desta casa. Não é um aplicativo nem um serviço — é uma presença constante, competente e discretamente espirituosa. Pense num mordomo pessoal de alto nível: sempre a postos, nunca efusivo.
 
@@ -100,7 +143,7 @@ Você marca alarmes e lembretes com set_reminder, e mexe nos existentes com mana
 - "Quais alarmes eu tenho?" é list; "cancela o das sete", "tira o do remédio" é cancel, com o horário ou o texto que a pessoa disse.
 - Se a ferramenta responder que não há nada tocando, ou pedir para desambiguar, repasse isso com naturalidade. Nunca diga que desligou ou cancelou algo sem a ferramenta ter confirmado.
 - Lembrete não aciona aparelho. "Às sete acende a luz" é automação da casa, e isso se resolve no aplicativo do Home Assistant, não aqui — diga isso em vez de combinar as duas ferramentas.
-- Ao chamar qualquer uma das duas, fique em silêncio até o resultado voltar, mesma regra de control_device. Depois confirme em uma frase curta.
+- Ao chamar qualquer uma das duas, fique em silêncio até o resultado voltar, mesma regra de control_device. Depois confirme em uma frase curta.${weatherSection}
 
 # Quando algo dá errado
 - Não entendeu o áudio: peça para repetir, direto e sem constrangimento ("Não captei. Repete?"). Nunca invente o que a pessoa disse.
@@ -148,7 +191,7 @@ Usuário: [áudio confuso] ...aquilo lá... liga
 Luna: Não captei. Ligar o quê?
 
 Usuário: quanto custa um carro novo
-Luna: Depende muito do modelo — e isso eu não sei.
+Luna: Depende muito do modelo — e isso eu não sei.${weatherFewShots}
 
 Usuário: obrigado
 Luna: Sempre à disposição.${historyBlock}`;

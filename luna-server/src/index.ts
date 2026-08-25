@@ -5,6 +5,8 @@ import {
   DeviceRegistrySource,
   loadDeviceOverrides,
 } from './ha/deviceRegistrySource.js';
+import { OpenMeteoClient } from './weather/OpenMeteoClient.js';
+import { WeatherSource } from './weather/WeatherSource.js';
 import { ConversationRingBuffer } from './rooms/ConversationRingBuffer.js';
 import { RoomManager } from './rooms/RoomManager.js';
 import { WsServer } from './ws/WsServer.js';
@@ -72,6 +74,18 @@ async function main(): Promise<void> {
   // sobe com os overrides e o refresh por TTL recupera depois.
   await deviceRegistry.start();
 
+  // `null` nos dois — a validação cruzada em `loadConfig` garante que não vêm
+  // meio configurados — desliga a tool inteira: nem client nem cache nascem, e
+  // `RoomManager`/`Orchestrator` tratam `weatherSource: null` como "sem tempo".
+  let weatherSource: WeatherSource | null = null;
+  if (config.weatherLatitude !== null && config.weatherLongitude !== null) {
+    const openMeteoClient = new OpenMeteoClient(config.weatherLatitude, config.weatherLongitude);
+    weatherSource = new WeatherSource(openMeteoClient, config.weatherTtlMs, config.weatherMaxStaleMs);
+    // Mesma ordem do registro de dispositivos: busca antes de aceitar conexões,
+    // para que a primeira pergunta sobre o tempo não caia em cache frio.
+    await weatherSource.start();
+  }
+
   // O ReminderScheduler só pode nascer depois do WsServer estar construído: o
   // onFire precisa do ciclo de toque que vive no Orchestrator lá dentro, e o
   // Orchestrator precisa do scheduler — para o handler de set_reminder chamar
@@ -80,7 +94,14 @@ async function main(): Promise<void> {
   // Orchestrator.setReminderScheduler). `wsServer.start()` só roda depois de
   // tudo isto amarrado, de propósito: nenhuma conexão é aceita antes de o
   // scheduler existir para o handler chamar.
-  const wsServer = new WsServer(config, roomManager, haClient, deviceRegistry, reminderStore);
+  const wsServer = new WsServer(
+    config,
+    roomManager,
+    haClient,
+    deviceRegistry,
+    reminderStore,
+    weatherSource,
+  );
 
   // O ciclo de toque (rajada → janela de escuta → rajada, dispensa, soneca e o
   // fallback de sala offline) vive no `AlarmRinger`, construído dentro do
@@ -149,6 +170,7 @@ async function main(): Promise<void> {
 
     await wsServer.stop();
     deviceRegistry.stop();
+    weatherSource?.stop();
     reminderScheduler.stop();
     // Antes do `reminderStore.close()`, e depois do scheduler: fechar um ciclo
     // de toque ESCREVE no banco (devolve o lembrete a `armed` ou o marca

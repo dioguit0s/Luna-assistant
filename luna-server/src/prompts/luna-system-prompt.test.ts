@@ -187,4 +187,18 @@ describe('buildLunaSystemPrompt', () => {
     assert.match(prompt, /Agora são 23:00/);
     assert.match(prompt, /período da noite/);
   });
+
+  it('omite a seção e os exemplos de tempo por padrão (weatherEnabled ausente)', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
+    assert.doesNotMatch(prompt, /# Tempo e previsão/);
+    assert.doesNotMatch(prompt, /get_weather/);
+  });
+
+  it('inclui a seção de tempo, citando get_weather, quando weatherEnabled é true', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10), true);
+    assert.match(prompt, /# Tempo e previsão/);
+    assert.match(prompt, /get_weather/);
+    assert.match(prompt, /Nunca invente temperatura/);
+    assert.match(prompt, /Só acompanho o tempo daqui de casa/);
+  });
 });

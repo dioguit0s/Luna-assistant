@@ -58,6 +58,10 @@ const baseConfig: AppConfig = {
   ringSilentRetryMs: 60_000,
   ringMaxDeferMs: 3_000,
   reminderSnoozeMaxMinutes: 60,
+  weatherLatitude: null,
+  weatherLongitude: null,
+  weatherTtlMs: 600_000,
+  weatherMaxStaleMs: 10_800_000,
 };
 
 const ROOM_ID = 'sala_de_estar';
@@ -290,6 +294,7 @@ function buildHarness(
         return 1;
       },
       reminderStore,
+      null,
     ),
     provider,
     reminderStore,
@@ -1140,6 +1145,7 @@ describe('Orchestrator: ringOnce (chime)', () => {
       registrySource,
       () => 0, // sala vazia: sempre 0 entregues.
       reminderStore,
+      null,
     );
 
     const primeiroDisparo = orchestrator.ringOnce(ROOM_ID);

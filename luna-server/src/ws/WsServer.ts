@@ -6,6 +6,7 @@ import { Orchestrator } from '../orchestrator/Orchestrator.js';
 import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import type { ReminderStore } from '../reminders/ReminderStore.js';
+import type { WeatherSource } from '../weather/WeatherSource.js';
 import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import type { AlarmRinger } from '../reminders/AlarmRinger.js';
 import { validateAuthToken } from './auth.js';
@@ -69,6 +70,7 @@ export class WsServer {
     haClient: HomeAssistantClient,
     deviceRegistry: DeviceRegistrySource,
     reminderStore: ReminderStore,
+    weatherSource: WeatherSource | null,
   ) {
     // O client do HA e o registro são construídos em `index.ts`: o registro tem
     // ciclo de vida próprio (start/stop) e ambos compartilham o mesmo client.
@@ -79,6 +81,7 @@ export class WsServer {
       deviceRegistry,
       (roomId, payload) => this.sendToRoom(roomId, payload),
       reminderStore,
+      weatherSource,
     );
   }
 

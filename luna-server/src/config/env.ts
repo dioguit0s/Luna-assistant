@@ -129,6 +129,22 @@ export interface AppConfig {
   ringMaxDeferMs: number;
   /** Teto da soneca pedida por voz, em minutos. */
   reminderSnoozeMaxMinutes: number;
+  /**
+   * Localização fixa da casa, para a tool `get_weather` (Open-Meteo). `null`
+   * nos dois — o par tem que vir junto, ver `loadConfig` — desliga a tool: ela
+   * nem é declarada ao modelo, um schema que só sabe dizer "não configurado"
+   * não deve pagar orçamento de instrução da sessão Live.
+   */
+  weatherLatitude: number | null;
+  weatherLongitude: number | null;
+  /** Intervalo de revalidação da previsão: dado novo sem reiniciar o processo. */
+  weatherTtlMs: number;
+  /**
+   * Teto de idade do snapshot de previsão. Acima disso a tool recusa em vez de
+   * dizer um dado velho com confiança — diferente do registro de dispositivos,
+   * aqui o valor tem prazo de validade.
+   */
+  weatherMaxStaleMs: number;
 }
 
 export type EndSensitivityName = 'HIGH' | 'LOW';
@@ -156,6 +172,23 @@ function parseOptionalNumber(name: string): number | null {
   const parsed = Number(raw);
   if (!Number.isFinite(parsed) || parsed < 0) {
     throw new Error(`${name} inválido: "${raw}". Use um número de milissegundos.`);
+  }
+  return parsed;
+}
+
+/**
+ * `parseOptionalNumber` não serve para coordenada: ele rejeita negativo, e o
+ * hemisfério sul inteiro (São Paulo incluída) é negativo. A faixa não é
+ * preciosismo — latitude e longitude trocadas de lugar são dois números
+ * válidos que apontam para o meio do oceano, e a Luna daria a previsão de lá
+ * sem erro nenhum.
+ */
+export function parseCoordinate(name: string, limit: number): number | null {
+  const raw = process.env[name]?.trim();
+  if (raw === undefined || raw === '') return null;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || Math.abs(parsed) > limit) {
+    throw new Error(`${name} inválido: "${raw}". Use um número entre ${-limit} e ${limit}.`);
   }
   return parsed;
 }
@@ -268,6 +301,10 @@ export function loadConfig(): AppConfig {
     ringSilentRetryMs: parseOptionalNumber('RING_SILENT_RETRY_MS') ?? 60_000,
     ringMaxDeferMs: parseOptionalNumber('RING_MAX_DEFER_MS') ?? 3_000,
     reminderSnoozeMaxMinutes: parseOptionalNumber('REMINDER_SNOOZE_MAX_MINUTES') ?? 60,
+    weatherLatitude: parseCoordinate('WEATHER_LATITUDE', 90),
+    weatherLongitude: parseCoordinate('WEATHER_LONGITUDE', 180),
+    weatherTtlMs: parseOptionalNumber('WEATHER_TTL_MS') ?? 10 * 60_000,
+    weatherMaxStaleMs: parseOptionalNumber('WEATHER_MAX_STALE_MS') ?? 3 * 60 * 60_000,
   };
 
   if (audioProvider === 'gemini' && !config.geminiApiKey) {
@@ -275,6 +312,12 @@ export function loadConfig(): AppConfig {
   }
   if (audioProvider === 'openai' && !config.openaiApiKey) {
     throw new Error('OPENAI_API_KEY é obrigatória quando AUDIO_PROVIDER=openai');
+  }
+  // Meia coordenada é erro de digitação, não configuração parcial legítima:
+  // subir com a tool "meio ligada" esconderia o problema até alguém perguntar
+  // do tempo e ouvir "não configurado" sem explicação nenhuma no log de boot.
+  if ((config.weatherLatitude === null) !== (config.weatherLongitude === null)) {
+    throw new Error('WEATHER_LATITUDE e WEATHER_LONGITUDE devem ser configuradas juntas.');
   }
 
   return config;
