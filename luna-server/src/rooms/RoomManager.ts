@@ -3,6 +3,7 @@ import { createAudioProvider } from '../providers/AudioProviderFactory.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import { SET_REMINDER_TOOL, MANAGE_REMINDERS_TOOL } from '../reminders/tools.js';
+import { GET_WEATHER_TOOL } from '../weather/tools.js';
 import { buildLunaSystemPrompt } from '../prompts/luna-system-prompt.js';
 import { ConversationRingBuffer } from './ConversationRingBuffer.js';
 import { getLogger } from '../logging/logger.js';
@@ -76,17 +77,27 @@ export class RoomManager {
   private async createProviderSession(roomId: string): Promise<IAudioProvider> {
     const provider = this.providerFactory(this.config);
     const history = this.ringBuffer.getHistory(roomId);
-    const systemPrompt = buildLunaSystemPrompt(roomId, history);
+    // `null` nas duas coordenadas desliga a tool inteira: um schema que só
+    // sabe responder "não configurado" não deve pagar orçamento de instrução
+    // da sessão Live nem inflar o `model_decision_ms`.
+    const weatherEnabled = this.config.weatherLatitude !== null;
+    const systemPrompt = buildLunaSystemPrompt(roomId, history, undefined, weatherEnabled);
 
     const connectPromise = provider.connect({
       roomId,
       systemPrompt,
       history,
-      tools: [CONTROL_DEVICE_TOOL, SET_REMINDER_TOOL, MANAGE_REMINDERS_TOOL],
+      tools: [
+        CONTROL_DEVICE_TOOL,
+        SET_REMINDER_TOOL,
+        MANAGE_REMINDERS_TOOL,
+        ...(weatherEnabled ? [GET_WEATHER_TOOL] : []),
+      ],
       // Chamado por providers que renovam a sessão sem passar por
       // `createProviderSession` de novo (ver `GeminiLiveAdapter.renewSession`):
       // precisa da hora de agora, não da hora em que a sala foi criada.
-      refreshSystemPrompt: () => buildLunaSystemPrompt(roomId, this.ringBuffer.getHistory(roomId)),
+      refreshSystemPrompt: () =>
+        buildLunaSystemPrompt(roomId, this.ringBuffer.getHistory(roomId), undefined, weatherEnabled),
     });
 
     await this.awaitConnectWithTimeout(roomId, provider, connectPromise);

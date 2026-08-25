@@ -44,6 +44,10 @@ const config: AppConfig = {
   ringSilentRetryMs: 60_000,
   ringMaxDeferMs: 3_000,
   reminderSnoozeMaxMinutes: 60,
+  weatherLatitude: null,
+  weatherLongitude: null,
+  weatherTtlMs: 600_000,
+  weatherMaxStaleMs: 10_800_000,
 };
 
 describe('GET /health', () => {
@@ -59,7 +63,7 @@ describe('GET /health', () => {
     roomManager = new RoomManager(config, ringBuffer);
     const haClient = new HomeAssistantClient(config);
     reminderStore = ReminderStore.open(':memory:');
-    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient), reminderStore);
+    server = new WsServer(config, roomManager, haClient, new DeviceRegistrySource(haClient), reminderStore, null);
     server.start();
 
     while (server.port === null) {

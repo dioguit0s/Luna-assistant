@@ -156,6 +156,20 @@ Silêncio é melhor que adivinhar errado o cômodo.
 > `StateDirectory` do serviço, dono `luna:luna`), e só o processo que vai migrar
 > sabe que existe migração pendente — nas outras vezes a cópia seria desperdício.
 
+### Tempo e previsão
+
+| Variável | Default | Descrição |
+|----------|---------|-----------|
+| `WEATHER_LATITUDE` | vazio | Latitude fixa da casa, graus decimais (ex: `-23.5505`) |
+| `WEATHER_LONGITUDE` | vazio | Longitude fixa da casa (ex: `-46.6333`) |
+| `WEATHER_TTL_MS` | `600000` | Revalidação da previsão em background — o handler nunca faz o round-trip |
+| `WEATHER_MAX_STALE_MS` | `10800000` | Teto de idade do snapshot; passado isso a tool recusa em vez de dizer um dado velho com confiança |
+
+Fonte: [Open-Meteo](https://open-meteo.com/), sem API key e sem cadastro. `WEATHER_LATITUDE`
+e `WEATHER_LONGITUDE` vazias **desligam** a tool `get_weather` inteira — ela nem é
+declarada ao modelo, para não pagar orçamento de instrução da sessão Live à toa. As duas
+têm que vir juntas: metade configurada faz o boot falhar (`loadConfig`).
+
 ### Notas
 
 O adapter da OpenAI fala a API Realtime **GA** (`session.type: 'realtime'`), não a

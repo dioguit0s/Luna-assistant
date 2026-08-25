@@ -39,6 +39,10 @@ const baseConfig: AppConfig = {
   ringSilentRetryMs: 60_000,
   ringMaxDeferMs: 3_000,
   reminderSnoozeMaxMinutes: 60,
+  weatherLatitude: null,
+  weatherLongitude: null,
+  weatherTtlMs: 600_000,
+  weatherMaxStaleMs: 10_800_000,
 };
 
 interface FetchCall {
