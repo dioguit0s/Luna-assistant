@@ -3,6 +3,8 @@ import type { CompletedTurn } from '../providers/types.js';
 import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { createControlDeviceHandler } from './tools/controlDevice.js';
+import { createListDevicesHandler } from './tools/listDevices.js';
+import { LIST_DEVICES_TOOL } from '../ha/tools.js';
 import { createSetReminderHandler } from './tools/setReminder.js';
 import { createManageRemindersHandler } from './tools/manageReminders.js';
 import { INVALID_ARGS_RESULT, type ToolContext, type ToolHandler } from './tools/types.js';
@@ -263,6 +265,7 @@ export class Orchestrator implements AlarmAudioSink {
           sendToRoom: (targetRoom, payload) => this.sendToRoom(targetRoom, payload),
         }),
       ],
+      [LIST_DEVICES_TOOL.name, createListDevicesHandler({ deviceRegistry })],
       [
         SET_REMINDER_TOOL.name,
         createSetReminderHandler({

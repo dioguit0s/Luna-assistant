@@ -2,6 +2,7 @@ import type { AppConfig } from '../config/env.js';
 import { createAudioProvider } from '../providers/AudioProviderFactory.js';
 import type { IAudioProvider } from '../providers/IAudioProvider.js';
 import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
+import { LIST_DEVICES_TOOL } from '../ha/tools.js';
 import { SET_REMINDER_TOOL, MANAGE_REMINDERS_TOOL } from '../reminders/tools.js';
 import { GET_WEATHER_TOOL } from '../weather/tools.js';
 import { buildLunaSystemPrompt } from '../prompts/luna-system-prompt.js';
@@ -89,6 +90,7 @@ export class RoomManager {
       history,
       tools: [
         CONTROL_DEVICE_TOOL,
+        LIST_DEVICES_TOOL,
         SET_REMINDER_TOOL,
         MANAGE_REMINDERS_TOOL,
         ...(weatherEnabled ? [GET_WEATHER_TOOL] : []),

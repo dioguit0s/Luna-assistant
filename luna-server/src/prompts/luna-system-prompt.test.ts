@@ -92,6 +92,12 @@ describe('buildLunaSystemPrompt', () => {
     assert.match(prompt, /não é comando/);
   });
 
+  it('descreve a tool list_devices e que ela não informa estado ligado/desligado', () => {
+    const prompt = buildLunaSystemPrompt('sala_de_estar', [], at(10));
+    assert.match(prompt, /list_devices/);
+    assert.match(prompt, /nunca se estão ligados ou desligados/);
+  });
+
   it('manda ficar em silêncio até o resultado da tool voltar (evita fala duplicada do Gemini)', () => {
     // A Live API do Gemini tem o hábito documentado de gerar uma fala
     // concorrente à chamada da tool e depois repetir a confirmação quando o

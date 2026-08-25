@@ -121,6 +121,18 @@ export class DeviceRegistry {
     return this.distinctEntries().filter((entry) => normalize(entry.roomId) === room);
   }
 
+  /**
+   * Casa um cômodo falado (pelo modelo, em `list_devices`) contra os cômodos
+   * que o registro conhece de fato. Devolve o `area_id` canônico, ou `null`
+   * quando não existe — quem chama decide o fallback. Método da classe porque
+   * `normalize` é privada do módulo. Só caixa e espaço, como `resolve`: nada
+   * de casamento aproximado.
+   */
+  resolveRoom(roomId: string): string | null {
+    const wanted = normalize(roomId);
+    return this.rooms.find((room) => normalize(room) === wanted) ?? null;
+  }
+
   /** Quantidade de entidades distintas — cada uma pode ter mais de uma chave. */
   get size(): number {
     return this.distinctEntries().length;
@@ -164,7 +176,7 @@ export function toDeviceEntry(raw: {
  * `roomLabel` devolve o rótulo com artigo ("a cozinha"); a mensagem é falada,
  * então "em a cozinha" não serve. Contrai para "na cozinha" / "no quarto".
  */
-function inRoom(roomId: string): string {
+export function inRoom(roomId: string): string {
   const label = roomLabel(roomId);
   if (label.startsWith('a ')) return `na ${label.slice(2)}`;
   if (label.startsWith('o ')) return `no ${label.slice(2)}`;
