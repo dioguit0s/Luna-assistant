@@ -139,6 +139,15 @@ describe('DeviceRegistry — inspeção', () => {
       ['light.luz_cozinha'],
     );
   });
+
+  it('resolveRoom casa um cômodo falado com caixa e espaço diferentes', () => {
+    assert.equal(registry.resolveRoom('Oficina'), 'oficina');
+    assert.equal(registry.resolveRoom('  cozinha  '), 'cozinha');
+  });
+
+  it('resolveRoom devolve null para cômodo que o registro não conhece', () => {
+    assert.equal(registry.resolveRoom('garagem'), null);
+  });
 });
 
 describe('toDeviceEntry', () => {

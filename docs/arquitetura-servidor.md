@@ -162,6 +162,7 @@ Contrato agnóstico ao provider — ver [ADR 002](adr/002-function-calling-contr
 | Tool | Handler | O que faz |
 |---|---|---|
 | `control_device` | `orchestrator/tools/controlDevice.ts` | Liga/desliga um dispositivo no HA e emite `command_result` |
+| `list_devices` | `orchestrator/tools/listDevices.ts` | Lista os aparelhos de um cômodo e os cômodos conhecidos, pelo snapshot do registro. Só nomes, sem estado e sem I/O |
 | `set_reminder` | `orchestrator/tools/setReminder.ts` | Cria alarme/lembrete/timer, único ou recorrente |
 | `manage_reminders` | `orchestrator/tools/manageReminders.ts` | `dismiss`/`snooze` do que toca agora, `list`/`cancel` do que está marcado |
 | `get_weather` | `orchestrator/tools/getWeather.ts` | Tempo agora, hoje ou amanhã, pela previsão do Open-Meteo. Só declarada ao modelo se `WEATHER_LATITUDE`/`WEATHER_LONGITUDE` estiverem configuradas |
@@ -170,9 +171,13 @@ Contrato agnóstico ao provider — ver [ADR 002](adr/002-function-calling-contr
 o `model_decision_ms`, sobretudo com `thinkingBudget: 0`. Adicionar tool é decisão de
 latência, não só de feature.
 
-**O `room_id` gerado pelo modelo é descartado.** O Orchestrator resolve o cômodo pela
-conexão de onde o áudio veio. O prompt pede o campo só para reduzir alucinação — não
-afrouxe o descarte com base no texto do prompt.
+**O `room_id` gerado pelo modelo é descartado — exceto em `list_devices`.** Em
+`control_device` e nas demais tools que acionam algo, o Orchestrator resolve o cômodo
+pela conexão de onde o áudio veio, e o prompt pede o campo só para reduzir alucinação; não
+afrouxe esse descarte com base no texto do prompt. `list_devices` é a única exceção
+consciente: por ser somente leitura, o `room_id` do modelo é validado contra
+`DeviceRegistry.resolveRoom` e usado quando existe, com fallback para o cômodo da sessão
+quando ausente ou desconhecido — ver [ADR 009](adr/009-inventario-por-comodo.md).
 
 ### Resolução de dispositivos
 
@@ -187,6 +192,10 @@ a falar, exclusões e entradas manuais.
 o mesmo "luz" existe em vários cômodos apontando para entidades diferentes. Falhas de
 resolução (`unknown_device`, `device_not_in_room`) trazem mensagem em português
 **escrita para a IA falar em voz alta**.
+
+`resolveRoom(roomId)` casa um cômodo *falado* (não um `device`) contra os `area_id` que o
+registro conhece de fato — só caixa e espaço, mesma regra de `resolve()`. É o único ponto
+onde um `room_id` gerado pelo modelo é validado e aceito, usado por `list_devices`.
 
 ### Previsão do tempo
 
