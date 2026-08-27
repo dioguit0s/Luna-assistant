@@ -104,6 +104,12 @@
 // rápido que o tempo real (16 KB/s). Buffer grande na PSRAM absorve a rajada.
 #define PLAYBACK_BUFFER_BYTES (512 * 1024) // ~16 s @ 16k, alocado na PSRAM
 
+// Bloco que o playbackTask entrega ao I2S por iteracao, e sua duracao. Um
+// bloco de silencio injetado por falta de audio custa exatamente isto de
+// buraco audivel - e a unidade em que playbackSilenceMs conta.
+#define PLAYBACK_BLOCK_BYTES 512 // 256 amostras
+#define PLAYBACK_BLOCK_MS (PLAYBACK_BLOCK_BYTES / 2 * 1000 / SAMPLE_RATE)
+
 // --- Wake word local ("Hey Luna") ---
 // Detecção roda no ESP32-S3 via microWakeWord (TFLite-micro). Enquanto não houver
 // wake word, o microfone continua aberto LOCALMENTE mas nada sai pela rede.

@@ -80,6 +80,11 @@ async function main(): Promise<void> {
 
   let playCursor = 0;
   const activeSources: AudioBufferSourceNode[] = [];
+  // Instrumentacao de underrun (permanente). O salto de cursor abaixo era
+  // silencioso: o buraco aparecia no alto-falante sem deixar rastro nenhum,
+  // impossivel de separar de "o modelo falou assim mesmo".
+  let underrunCount = 0;
+  let underrunGapMs = 0;
 
   window.luna.onPlayPcm((buf) => {
     const pcm = new Int16Array(buf);
@@ -98,7 +103,19 @@ async function main(): Promise<void> {
     // Agenda em fila contra audioCtx.currentTime, não contra Date.now() —
     // absorve o jitter entre chunks que chegam por WS→IPC sem estalos.
     const now = audioCtx.currentTime;
-    if (playCursor < now + 0.01) playCursor = now + PLAYBACK_LEAD_S;
+    if (playCursor < now + 0.01) {
+      // O cursor ficou para tras do relogio: o chunk chegou tarde demais para
+      // emendar no anterior. Saltar para frente insere um buraco de silencio
+      // - e o "cortando" que se ouve. Nao da para recuperar, mas da para
+      // medir.
+      const gapMs = (now + PLAYBACK_LEAD_S - Math.max(playCursor, now)) * 1000;
+      underrunCount += 1;
+      underrunGapMs += gapMs;
+      console.warn(
+        `[luna-desktop] playback underrun #${underrunCount}: buraco de ${gapMs.toFixed(0)}ms`,
+      );
+      playCursor = now + PLAYBACK_LEAD_S;
+    }
 
     node.start(playCursor);
     playCursor += audioBuffer.duration;
@@ -111,6 +128,14 @@ async function main(): Promise<void> {
   });
 
   window.luna.onFlushPlayback(() => {
+    if (underrunCount > 0) {
+      console.warn(
+        `[luna-desktop] resumo de playback: ${underrunCount} underruns, ` +
+          `${underrunGapMs.toFixed(0)}ms de buraco`,
+      );
+      underrunCount = 0;
+      underrunGapMs = 0;
+    }
     for (const node of activeSources.splice(0)) {
       try {
         node.stop();

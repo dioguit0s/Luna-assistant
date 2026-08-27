@@ -71,11 +71,21 @@ static void onAuthOk() {
 static uint32_t responseBytes = 0;
 static volatile bool waitingForPlaybackDrain = false;
 
+// Instrumentacao do playback (permanente). Sem isto nao ha como distinguir,
+// pelo log, "servidor entregando abaixo de tempo real" de "Wi-Fi ruim" de
+// "resampler ruim": o sintoma audivel dos tres e o mesmo buraco no meio da
+// fala. Contados so em RESPONDING - silencio fora dele e o comportamento
+// correto do playbackTask ocioso, nao um defeito.
+static volatile uint32_t playbackUnderruns = 0;
+static volatile uint32_t playbackSilenceMs = 0;
+
 static void onSpeakingStart() {
   // AEC: para de transmitir e descarta o backlog de captura (evita eco).
   StateMachine::onSpeakingStart();
   if (txQueue) xQueueReset(txQueue);
   responseBytes = 0;
+  playbackUnderruns = 0;
+  playbackSilenceMs = 0;
   waitingForPlaybackDrain = false; // nova resposta supera a espera da anterior
   Serial.println("[luna] respondendo (captura suspensa)");
 }
@@ -90,8 +100,9 @@ static void onSpeakingEnd() {
   // modelo, virando um loop. loop() só libera a retomada quando o buffer de
   // playback (PSRAM) realmente esvaziar.
   waitingForPlaybackDrain = true;
-  Serial.printf("[luna] fim da resposta (%u bytes) — aguardando playback esvaziar\n",
-                (unsigned)responseBytes);
+  Serial.printf(
+      "[luna] fim da resposta (%u bytes, underruns=%u, silencio=%ums) — aguardando playback esvaziar\n",
+      (unsigned)responseBytes, (unsigned)playbackUnderruns, (unsigned)playbackSilenceMs);
 }
 
 static void onAudioResponse(const uint8_t *pcm, size_t len) {
@@ -214,10 +225,17 @@ static void wakeTask(void *) {
 }
 
 static void playbackTask(void *) {
-  uint8_t buf[512];
+  uint8_t buf[PLAYBACK_BLOCK_BYTES];
   for (;;) {
     size_t n = xStreamBufferReceive(playbackBuffer, buf, sizeof(buf), pdMS_TO_TICKS(20));
     if (n == 0) {
+      // Em RESPONDING isto e o buffer ter secado no meio de uma resposta: o
+      // buraco que o usuario ouve. Contar aqui e o que torna o defeito
+      // mensuravel em vez de subjetivo. Fora de RESPONDING e so ociosidade.
+      if (StateMachine::current() == StateMachine::State::RESPONDING) {
+        playbackUnderruns = playbackUnderruns + 1;
+        playbackSilenceMs = playbackSilenceMs + PLAYBACK_BLOCK_MS;
+      }
       // Sem áudio de resposta: envia SILÊNCIO ao amplificador para o DMA
       // não repetir lixo (ruído branco) enquanto ocioso.
       memset(buf, 0, sizeof(buf));

@@ -4,6 +4,7 @@ import type { AppConfig } from '../../config/env.js';
 import type { IAudioProvider } from '../IAudioProvider.js';
 import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../types.js';
 import { resample24kTo16k } from '../utils/resampler.js';
+import { AudioDump } from '../utils/audioDump.js';
 import { getLogger } from '../../logging/logger.js';
 import {
   normalizeToolCalls,
@@ -27,6 +28,8 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private ai: GoogleGenAI | null = null;
   private session: LiveSession | null = null;
   private sessionConfig: ProviderSessionConfig | null = null;
+  // Diagnostico: so grava com AUDIO_DUMP_DIR setado (ver AudioDump).
+  private readonly dump = new AudioDump('gemini');
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
@@ -448,11 +451,14 @@ export class GeminiLiveAdapter implements IAudioProvider {
       if (data && this.audioResponseCb) {
         const pcm24k = Buffer.from(data, 'base64');
         const pcm16k = resample24kTo16k(pcm24k);
+        this.dump.write('24k-in', pcm24k);
+        this.dump.write('16k-out', pcm16k);
         this.audioResponseCb(pcm16k);
       }
     }
 
     if (serverContent.turnComplete) {
+      this.dump.endTurn();
       this.turnCompleteCb?.({
         userText: this.userTranscript.trim() || undefined,
         assistantText: this.assistantTranscript.trim() || undefined,

@@ -3,6 +3,7 @@ import type { AppConfig } from '../../config/env.js';
 import type { IAudioProvider } from '../IAudioProvider.js';
 import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../types.js';
 import { resample16kTo24k, resample24kTo16k } from '../utils/resampler.js';
+import { AudioDump } from '../utils/audioDump.js';
 import { getLogger } from '../../logging/logger.js';
 import {
   normalizeFunctionCallItem,
@@ -28,6 +29,8 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
+  // Diagnostico: so grava com AUDIO_DUMP_DIR setado (ver AudioDump).
+  private readonly dump = new AudioDump('openai');
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
@@ -290,6 +293,8 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
         if (event.delta) {
           const pcm24k = Buffer.from(event.delta, 'base64');
           const pcm16k = resample24kTo16k(pcm24k);
+          this.dump.write('24k-in', pcm24k);
+          this.dump.write('16k-out', pcm16k);
           this.audioResponseCb?.(pcm16k);
         }
         break;
@@ -321,6 +326,7 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
         break;
 
       case 'response.done':
+        this.dump.endTurn();
         this.handleResponseDone(event.response?.output ?? []);
         break;
 

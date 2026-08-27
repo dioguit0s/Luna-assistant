@@ -139,11 +139,39 @@ function scheduleResponseSave(): void {
   saveTimer = setTimeout(() => flushResponseWav('timeout'), 800);
 }
 
+let firstFrameAt: number | null = null;
+let lastFrameAt: number | null = null;
+let receivedAudioMs = 0;
+let frameCount = 0;
+
+/**
+ * `ratio < 1` = o servidor entregou mais devagar que o alto-falante consome:
+ * starvation garantida no satelite, que a reproduz como buraco no meio da
+ * fala. Desconta a duracao do ultimo frame do numerador porque ele ainda nao
+ * foi consumido quando chega.
+ */
+function logDeliveryRate(): void {
+  if (firstFrameAt === null || lastFrameAt === null || frameCount < 2) return;
+  const wallMs = lastFrameAt - firstFrameAt;
+  const pacedMs = receivedAudioMs - receivedAudioMs / frameCount;
+  const ratio = wallMs > 0 ? pacedMs / wallMs : 0;
+  console.log(
+    `[entrega] ${frameCount} frames, ${Math.round(receivedAudioMs)}ms de audio ` +
+      `em ${Math.round(wallMs)}ms de parede (ratio ${ratio.toFixed(2)})`,
+  );
+  firstFrameAt = null;
+  lastFrameAt = null;
+}
+
 function handleServerEnvelope(envelope: MessageEnvelope, pcm: Buffer): void {
   const { type } = envelope;
 
   if (type === 'speaking_start') {
     ttfabLogged = false;
+    firstFrameAt = null;
+    lastFrameAt = null;
+    receivedAudioMs = 0;
+    frameCount = 0;
     return;
   }
 
@@ -156,6 +184,15 @@ function handleServerEnvelope(envelope: MessageEnvelope, pcm: Buffer): void {
       }
       ttfabLogged = true;
     }
+    // Instrumentacao da taxa de entrega, medida do lado do CLIENTE: e a
+    // verificacao independente do log `audio_delivery` do servidor, e a unica
+    // que nao precisa de hardware. bytes/32 = ms de audio (PCM16 @16kHz).
+    const frameAt = performance.now();
+    if (firstFrameAt === null) firstFrameAt = frameAt;
+    lastFrameAt = frameAt;
+    receivedAudioMs += pcm.length / 32;
+    frameCount += 1;
+
     responsePcm = Buffer.concat([responsePcm, pcm]);
     playback?.write(pcm);
     scheduleResponseSave();
@@ -172,6 +209,7 @@ function handleServerEnvelope(envelope: MessageEnvelope, pcm: Buffer): void {
   }
 
   if (type === 'speaking_end') {
+    logDeliveryRate();
     lastAudioSentAt = null;
     flushResponseWav('speaking_end');
   }
