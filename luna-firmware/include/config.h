@@ -110,6 +110,25 @@
 #define PLAYBACK_BLOCK_BYTES 512 // 256 amostras
 #define PLAYBACK_BLOCK_MS (PLAYBACK_BLOCK_BYTES / 2 * 1000 / SAMPLE_RATE)
 
+// Prebuffer: quanto audio precisa estar acumulado na PSRAM antes de o
+// playbackTask comecar a entregar uma resposta ao I2S. Sem cushion nenhum, o
+// buffer vive perto de zero e qualquer jitter de rede seca o alto-falante no
+// meio da fala. Fica ABAIXO do AUDIO_PACING_LEAD_MS do servidor (250ms) para
+// que a rajada inicial do pacing ja o satisfaca: o custo em latencia
+// percebida e ~0, nao 128ms.
+#define PLAYBACK_PREBUFFER_BYTES 4096 // 2048 amostras = 128 ms @16k
+
+// Escape do gate: uma resposta mais curta que o prebuffer, ou uma rede muito
+// ruim, nao pode ficar presa esperando bytes que nunca virao.
+#define PLAYBACK_PREBUFFER_MAX_WAIT_MS 400
+
+// Trigger level do StreamBuffer de playback. Com 1 (o valor antigo) o Receive
+// voltava com qualquer byte disponivel, drenando o buffer continuamente e
+// impedindo qualquer acumulo. Um bloco inteiro por leitura reduz wakeups e
+// leituras parciais; o timeout do Receive continua garantindo que a cauda da
+// resposta saia mesmo sem completar um bloco.
+#define PLAYBACK_READ_TRIGGER_BYTES PLAYBACK_BLOCK_BYTES
+
 // --- Wake word local ("Hey Luna") ---
 // Detecção roda no ESP32-S3 via microWakeWord (TFLite-micro). Enquanto não houver
 // wake word, o microfone continua aberto LOCALMENTE mas nada sai pela rede.

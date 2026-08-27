@@ -79,6 +79,13 @@ static volatile bool waitingForPlaybackDrain = false;
 static volatile uint32_t playbackUnderruns = 0;
 static volatile uint32_t playbackSilenceMs = 0;
 
+// Gate do prebuffer. Comeca aberto: fora de uma resposta (bipe de wake, tom de
+// boot) nao ha o que acumular, e um gate fechado por default engoliria esses
+// sons. So onSpeakingStart o fecha.
+static volatile bool playbackArmed = true;
+static volatile bool playbackFlushRequest = false;
+static volatile uint32_t prebufferDeadlineMs = 0;
+
 static void onSpeakingStart() {
   // AEC: para de transmitir e descarta o backlog de captura (evita eco).
   StateMachine::onSpeakingStart();
@@ -87,6 +94,19 @@ static void onSpeakingStart() {
   playbackUnderruns = 0;
   playbackSilenceMs = 0;
   waitingForPlaybackDrain = false; // nova resposta supera a espera da anterior
+
+  // Descarta a cauda da resposta ANTERIOR. Sem isto, uma resposta abortada
+  // (watchdog do servidor, erro do provider) deixava audio velho no buffer e
+  // ele tocava colado no inicio da resposta nova.
+  //
+  // Pedido, e nao xStreamBufferReset() direto: o reset falha (pdFAIL) se
+  // houver task bloqueada no buffer, e o playbackTask fica bloqueado no
+  // Receive quase o tempo todo. Chamado daqui (contexto do loop()) falharia
+  // silenciosamente na maior parte das vezes; quem executa e o proprio
+  // playbackTask, onde por definicao nao esta bloqueado.
+  playbackFlushRequest = true;
+  playbackArmed = false;
+  prebufferDeadlineMs = millis() + PLAYBACK_PREBUFFER_MAX_WAIT_MS;
   Serial.println("[luna] respondendo (captura suspensa)");
 }
 
@@ -100,6 +120,9 @@ static void onSpeakingEnd() {
   // modelo, virando um loop. loop() só libera a retomada quando o buffer de
   // playback (PSRAM) realmente esvaziar.
   waitingForPlaybackDrain = true;
+  // A resposta acabou: o que estiver no buffer e tudo o que havera. Se for
+  // menor que o prebuffer, o gate nunca abriria sozinho pelo nivel.
+  playbackArmed = true;
   Serial.printf(
       "[luna] fim da resposta (%u bytes, underruns=%u, silencio=%ums) — aguardando playback esvaziar\n",
       (unsigned)responseBytes, (unsigned)playbackUnderruns, (unsigned)playbackSilenceMs);
@@ -227,6 +250,27 @@ static void wakeTask(void *) {
 static void playbackTask(void *) {
   uint8_t buf[PLAYBACK_BLOCK_BYTES];
   for (;;) {
+    if (playbackFlushRequest) {
+      // Contexto seguro para o reset: esta task nao esta bloqueada no buffer.
+      playbackFlushRequest = false;
+      xStreamBufferReset(playbackBuffer);
+    }
+
+    // Gate do prebuffer: alimenta o I2S com silencio SEM consumir o buffer ate
+    // haver cushion. Tres escapes, todos necessarios: nivel atingido (caso
+    // normal), deadline (rede ruim) e fim da resposta (cauda mais curta que o
+    // prebuffer).
+    if (!playbackArmed) {
+      if (xStreamBufferBytesAvailable(playbackBuffer) >= PLAYBACK_PREBUFFER_BYTES ||
+          (int32_t)(millis() - prebufferDeadlineMs) >= 0 || waitingForPlaybackDrain) {
+        playbackArmed = true;
+      } else {
+        memset(buf, 0, sizeof(buf));
+        AudioPlayback::write(buf, sizeof(buf));
+        continue;
+      }
+    }
+
     size_t n = xStreamBufferReceive(playbackBuffer, buf, sizeof(buf), pdMS_TO_TICKS(20));
     if (n == 0) {
       // Em RESPONDING isto e o buffer ter secado no meio de uma resposta: o
@@ -317,11 +361,12 @@ void setup() {
   uint8_t *playbackStorage =
       (uint8_t *)heap_caps_malloc(PLAYBACK_BUFFER_BYTES + 1, MALLOC_CAP_SPIRAM);
   if (playbackStorage) {
-    playbackBuffer = xStreamBufferCreateStatic(PLAYBACK_BUFFER_BYTES, 1, playbackStorage,
+    playbackBuffer = xStreamBufferCreateStatic(PLAYBACK_BUFFER_BYTES,
+                                               PLAYBACK_READ_TRIGGER_BYTES, playbackStorage,
                                                &playbackBufferStruct);
   } else {
     Serial.println("[erro] PSRAM indisponível — buffer de playback reduzido");
-    playbackBuffer = xStreamBufferCreate(24576, 1);
+    playbackBuffer = xStreamBufferCreate(24576, PLAYBACK_READ_TRIGGER_BYTES);
   }
 
   // Pré-buffer de captura na PSRAM: a RAM interna fica reservada para as arenas
@@ -386,6 +431,9 @@ void loop() {
   // está na fila DMA do I2S mais um acomodo do ambiente.
   if (waitingForPlaybackDrain && playbackBuffer && xStreamBufferIsEmpty(playbackBuffer)) {
     waitingForPlaybackDrain = false;
+    // Obrigatorio: sem isto o gate ficaria fechado depois de uma resposta e o
+    // bipe de wake (queueWakeChirp) escreveria num buffer que ninguem le.
+    playbackArmed = true;
     StateMachine::onSpeakingEnd();
   }
 
