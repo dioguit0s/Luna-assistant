@@ -26,7 +26,11 @@ declare global {
 }
 
 const SAMPLE_RATE = 16000; // deve bater com shared/pcm.ts:SAMPLE_RATE
-const PLAYBACK_LEAD_S = 0.12; // absorve jitter de rede/IPC entre chunks consecutivos
+// Cushion contra jitter de rede/IPC entre chunks consecutivos. Fica abaixo do
+// AUDIO_PACING_LEAD_MS do servidor (250ms) para que a rajada inicial do pacing
+// ja o preencha. Nao subir mais: aqui o lead e latencia percebida direta, sem
+// rajada propria que o absorva.
+const PLAYBACK_LEAD_S = 0.2;
 
 function setStatus(text: string): void {
   const el = document.getElementById('status');

@@ -217,6 +217,17 @@ static void queueWakeChirp() {
   xStreamBufferSend(playbackBuffer, chirp, n * sizeof(int16_t), 0);
 }
 
+// Mesmo caminho seguro do bipe de wake: playTone escreveria direto no I2S1 a
+// partir do loop() (core 1), disputando o barramento com o playbackTask (core
+// 0) - o contrato documentado em AudioPlayback.h proibe exatamente isso.
+static void queueOfflineTone() {
+  if (!playbackBuffer) return;
+  static int16_t tone[SAMPLE_RATE * 150 / 1000];
+  const size_t n =
+      AudioPlayback::renderTone(tone, sizeof(tone) / sizeof(tone[0]), 880, 150);
+  xStreamBufferSend(playbackBuffer, tone, n * sizeof(int16_t), 0);
+}
+
 static void wakeTask(void *) {
   static int16_t buf[CHUNK_SAMPLES];
   bool wasDetecting = false;
@@ -471,7 +482,7 @@ void loop() {
     lastAuthedMs = now;
   } else if (now - lastAuthedMs > OFFLINE_WARN_MS && now - lastWarnMs > 10000) {
     Serial.println("[luna] servidor offline > 30s — tom de aviso");
-    AudioPlayback::playTone(880, 150);
+    queueOfflineTone();
     lastWarnMs = now;
   }
 
