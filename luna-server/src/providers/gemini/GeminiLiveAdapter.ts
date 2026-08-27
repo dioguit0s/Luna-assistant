@@ -3,7 +3,7 @@ import type { AutomaticActivityDetection } from '@google/genai';
 import type { AppConfig } from '../../config/env.js';
 import type { IAudioProvider } from '../IAudioProvider.js';
 import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../types.js';
-import { resample24kTo16k } from '../utils/resampler.js';
+import { createDownsampler24kTo16k, type RationalResampler } from '../utils/resampler.js';
 import { AudioDump } from '../utils/audioDump.js';
 import { getLogger } from '../../logging/logger.js';
 import {
@@ -30,6 +30,12 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private sessionConfig: ProviderSessionConfig | null = null;
   // Diagnostico: so grava com AUDIO_DUMP_DIR setado (ver AudioDump).
   private readonly dump = new AudioDump('gemini');
+  // Reamostrador do downlink (24kHz -> 16kHz), com estado por SESSAO (nao por
+  // turno nem por chunk): o audio dentro de uma sessao e um unico stream
+  // continuo mesmo aparecendo em turnos separados no protocolo. reset() so
+  // roda em openLiveSession, entao cobre o connect() inicial e a renovacao
+  // por goAway (renewSession) - os dois unicos pontos onde uma sessao nasce.
+  private readonly downlink: RationalResampler = createDownsampler24kTo16k();
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
@@ -123,6 +129,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
   }
 
   private async openLiveSession(sessionConfig: ProviderSessionConfig): Promise<LiveSession> {
+    this.downlink.reset();
     const automaticActivityDetection = this.buildActivityDetection();
     const generation = ++this.sessionGeneration;
 
@@ -450,7 +457,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
       const data = part.inlineData?.data;
       if (data && this.audioResponseCb) {
         const pcm24k = Buffer.from(data, 'base64');
-        const pcm16k = resample24kTo16k(pcm24k);
+        const pcm16k = this.downlink.process(pcm24k);
         this.dump.write('24k-in', pcm24k);
         this.dump.write('16k-out', pcm16k);
         this.audioResponseCb(pcm16k);
