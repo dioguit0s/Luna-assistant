@@ -31,6 +31,7 @@ const baseConfig: AppConfig = {
   geminiThinkingBudget: 0,
   geminiDebugMessages: false,
   userSilenceCutoffMs: 500,
+  audioPacingLeadMs: 250,
   openaiVadType: 'server_vad',
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,

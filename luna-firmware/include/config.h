@@ -225,7 +225,7 @@
 // main.cpp:onAudioResponse). Antes disso o teto contava só a partir do início
 // da resposta e ignorava áudio ainda chegando — uma resposta falada mais
 // longa que 20s (o servidor agora despacha o áudio no ritmo real do
-// playback, ver Orchestrator.ts:AUDIO_FRAME_INTERVAL_MS, então isso é comum)
+// playback, ver o relógio de mídia em Orchestrator.ts, então isso é comum)
 // era cortada no meio mesmo com o provider ainda enviando. Agora o teto
 // significa "20s SEM áudio novo", preservando a rede de segurança original
 // (turno de fato travado no provider continua recuperando) sem impor limite

@@ -198,7 +198,7 @@ O bloqueio não é o `if (!isControlDeviceCall)` de `Orchestrator.ts:284`. É qu
 
 A forma certa é um `ToolContext { roomId, deviceId, provider, callId }` explícito, com o handler devolvendo um resultado que o closure despacha — senão o andaime de log e o `.catch` de `Orchestrator.ts:396-426` são duplicados em cada tool.
 
-O handler de `set_reminder` faz `INSERT` síncrono, e `DatabaseSync` bloqueia o event loop que também roda o tick de 32 ms de `drainAudioQueue`. Um fsync lento vira buraco audível na resposta de **outro** cômodo — daí WAL + `synchronous=NORMAL` e escritas minúsculas.
+O handler de `set_reminder` faz `INSERT` síncrono, e `DatabaseSync` bloqueia o event loop que também roda o drain paceado de `drainAudioQueue`. Um fsync lento vira buraco audível na resposta de **outro** cômodo — daí WAL + `synchronous=NORMAL` e escritas minúsculas.
 
 ### 15. Vocabulário de tools enxuto, por causa do TTFAB
 
@@ -429,7 +429,7 @@ Outros pontos:
 - **Oito** arquivos de teste constroem literais de `AppConfig` (`deviceRegistrySource`, `HomeAssistantClient`, `Orchestrator.integration`, `GeminiLiveAdapter`, `AudioProviderFactory`, `RoomManager`, `WsServer.hardening`, `health`). Cada campo novo obrigatório quebra os oito.
 - `WsServer.integration.test.ts` e `hardening.test.ts` assumem um cliente por sala e `sendToClient` por conexão — o fan-out do marco 1 mexe nos dois.
 - `luna-system-prompt.test.ts` tem 17 blocos `it(`, mas só três tocam a linha de hora. Acrescentar uma seção não quebra quase nada; adicionar um teste da seção nova no mesmo estilo.
-- **TTFAB** tem dois vetores de regressão: schemas de tool a mais inflando o `model_decision_ms` com `thinkingBudget: 0`, e stall do event loop por escrita SQLite síncrona durante o tick de 32 ms de `drainAudioQueue`, que vira buraco audível. Medir a série `ttfab` no mesmo modelo antes e depois.
+- **TTFAB** tem dois vetores de regressão: schemas de tool a mais inflando o `model_decision_ms` com `thinkingBudget: 0`, e stall do event loop por escrita SQLite síncrona durante o drain paceado de `drainAudioQueue`, que vira buraco audível. Medir a série `ttfab` no mesmo modelo antes e depois.
 - Ponta a ponta sem hardware: `luna-client-test` fala o mesmo protocolo e aceita frames de qualquer tamanho.
 - **Manual no hardware é obrigatório nos marcos 6, 7 e 8.** A interação entre `speaking_end`, o drain do `playbackBuffer`, o `WAKE_SETTLE_WINDOWS` e a janela de escuta não é reproduzível em teste unitário.
 - **Revisão:** o `CLAUDE.md` manda despachar o agente `luna-code-reviewer` em toda mudança de código.
