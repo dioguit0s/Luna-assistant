@@ -34,10 +34,13 @@ aberta no roteador.
 
 Executado via SSH no servidor. `<runner-user>` é o usuário que roda o runner.
 
-### 1. Node 20+ e git
+### 1. Node 22.5+ e git
+
+O `node:sqlite` (banco de lembretes) exige Node >= 22.5 — instalar uma versão
+abaixo disso aqui derruba o serviço no boot (ver seção "Node" mais abaixo).
 
 ```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt-get install -y nodejs git curl
 ```
 

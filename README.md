@@ -129,3 +129,7 @@ bash wake-training/run.sh all
 
 Armadilhas conhecidas do repositório estão listadas em [`CLAUDE.md`](CLAUDE.md) —
 leia antes do primeiro commit.
+
+## Licença
+
+MIT — ver [`LICENSE`](LICENSE).

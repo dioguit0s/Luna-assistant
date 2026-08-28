@@ -49,6 +49,11 @@ src/
 │   ├── spoken.ts         #   como um lembrete é dito em voz alta
 │   ├── tools.ts          #   schema das duas tools de lembrete
 │   └── chime.ts          #   PCM do toque, pré-renderizado
+├── weather/              # previsão do tempo
+│   ├── OpenMeteoClient.ts #  fetch na API Open-Meteo, sem API key
+│   ├── WeatherSource.ts  #   snapshot em memória, refresh com TTL
+│   ├── wmo.ts            #   código WMO -> descrição em português
+│   └── tools.ts          #   schema da tool get_weather
 ├── prompts/luna-system-prompt.ts  # personalidade + contexto de cômodo e hora
 └── metrics/ttfab.ts      # medição da métrica de performance do projeto
 ```

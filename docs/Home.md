@@ -24,10 +24,8 @@ tudo em um clique. O front door do repositório é o [README da raiz](../README.
 - [ADR 005 — Persistência no luna-server](adr/005-persistencia-no-servidor.md)
 - [ADR 006 — Agendamento server-side e contrato de tempo](adr/006-agendamento-e-contrato-de-tempo.md)
 - [ADR 007 — Áudio não solicitado e endereçamento por sala](adr/007-audio-nao-solicitado.md)
-
-Previstos e ainda não escritos: **005** (persistência no `luna-server`), **006**
-(agendamento server-side e contrato de tempo), **007** (áudio não solicitado e
-endereçamento por sala).
+- [ADR 008 — Tempo e previsão via Open-Meteo](adr/008-tempo-e-previsao.md)
+- [ADR 009 — Inventário por cômodo](adr/009-inventario-por-comodo.md)
 
 ## Features / módulos
 

@@ -168,6 +168,7 @@ luna/
 │   │   ├── providers/    # IAudioProvider, GeminiLiveAdapter, OpenAIRealtimeAdapter
 │   │   ├── ha/           # Home Assistant: client e registro de dispositivos
 │   │   ├── reminders/    # Alarmes e lembretes (node:sqlite, scheduler, chime)
+│   │   ├── weather/      # Previsão via Open-Meteo, cache com TTL
 │   │   ├── prompts/      # System prompt da Luna
 │   │   ├── time/         # Relógio único do processo (America/Sao_Paulo)
 │   │   ├── metrics/      # Medição de TTFAB
@@ -287,10 +288,11 @@ servidor, aquisição de hardware), todo concluído.
 
 **Em andamento**
 
-* **Alarmes e lembretes** — marcos 0 a 6 entregues (relógio único, endereçamento por
-  sala, fan-out, `ReminderStore`, `ReminderScheduler`, `Chime`, `set_reminder`).
-  Faltam o ciclo de toque com janela de escuta e a tool `manage_reminders`. Plano
-  completo em [`alarmes-e-lembretes.md`](alarmes-e-lembretes.md).
+* **Alarmes e lembretes** — marcos 0 a 11 entregues (relógio único, endereçamento por
+  sala, fan-out, `ReminderStore`, `ReminderScheduler`, `Chime`, `set_reminder`, ciclo
+  de toque com janela de escuta, `manage_reminders`). Falta só a calibração dos
+  timings de rajada (`RING_LISTEN_WINDOW_MS`, `RING_MAX_DEFER_MS`) no hardware real.
+  Plano completo em [`alarmes-e-lembretes.md`](alarmes-e-lembretes.md).
 
 **Pendências herdadas dos épicos**
 
@@ -300,13 +302,18 @@ servidor, aquisição de hardware), todo concluído.
   bloqueante com a wake word, mas continua sendo o escape hatch natural para
   dispensar um alarme sem falar.
 
-**ADRs previstos**
+**ADRs escritos além dos épicos originais** — todos com Status: Aceito
 
-* **005 — Persistência no `luna-server`.** Reverte uma propriedade declarada do
-  sistema ("o processo não escreve em disco") e cria invariante nova de deploy.
-* **006 — Agendamento server-side e contrato de tempo.**
-* **007 — Áudio não solicitado e endereçamento por sala.** Emenda os ADRs 001/002 em
-  vez de substituí-los.
+* **[005 — Persistência no `luna-server`](adr/005-persistencia-no-servidor.md).**
+  Reverte uma propriedade declarada do sistema ("o processo não escreve em disco")
+  e cria invariante nova de deploy.
+* **[006 — Agendamento server-side e contrato de tempo](adr/006-agendamento-e-contrato-de-tempo.md).**
+* **[007 — Áudio não solicitado e endereçamento por sala](adr/007-audio-nao-solicitado.md).**
+  Emenda os ADRs 001/002 em vez de substituí-los.
+* **[008 — Tempo e previsão via Open-Meteo](adr/008-tempo-e-previsao.md).** Cache em
+  vez de fetch síncrono na tool `get_weather`.
+* **[009 — Inventário por cômodo](adr/009-inventario-por-comodo.md).** Por que
+  `list_devices` é a única tool que aceita o `room_id` do modelo.
 
 **Dívida de documentação conhecida**
 

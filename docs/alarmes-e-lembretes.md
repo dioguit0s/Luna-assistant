@@ -434,11 +434,11 @@ Outros pontos:
 - **Manual no hardware é obrigatório nos marcos 6, 7 e 8.** A interação entre `speaking_end`, o drain do `playbackBuffer`, o `WAKE_SETTLE_WINDOWS` e a janela de escuta não é reproduzível em teste unitário.
 - **Revisão:** o `CLAUDE.md` manda despachar o agente `luna-code-reviewer` em toda mudança de código.
 
-## ADRs previstos
+## ADRs desta feature
 
-- **005 — Persistência no `luna-server`** (marco 3). Reverte uma propriedade declarada do sistema e cria invariante nova de deploy (StateDirectory, migração vs. rollback). `node:sqlite` vs `better-sqlite3` é seção de alternativas dentro dele, não ADR própria.
-- **006 — Agendamento server-side e contrato de tempo** (marco 4). Por que sem NTP/RTC no satélite, timer único auto-corretivo, política de catch-up, relógio São Paulo único.
-- **007 — Áudio não solicitado e endereçamento por sala** (marco 7). Reuso de `speaking_start`, o trade-off rajada/janela com os números de `WAKE_SETTLE_WINDOWS` e `AEC_RESUME_DELAY_MS`, e por que o fan-out substituiu o "último que falou". Emenda os ADRs 001/002 em vez de substituí-los.
+- **[005 — Persistência no `luna-server`](adr/005-persistencia-no-servidor.md)** (marco 3). Reverte uma propriedade declarada do sistema e cria invariante nova de deploy (StateDirectory, migração vs. rollback). `node:sqlite` vs `better-sqlite3` é seção de alternativas dentro dele, não ADR própria.
+- **[006 — Agendamento server-side e contrato de tempo](adr/006-agendamento-e-contrato-de-tempo.md)** (marco 4). Por que sem NTP/RTC no satélite, timer único auto-corretivo, política de catch-up, relógio São Paulo único.
+- **[007 — Áudio não solicitado e endereçamento por sala](adr/007-audio-nao-solicitado.md)** (marco 7). Reuso de `speaking_start`, o trade-off rajada/janela com os números de `WAKE_SETTLE_WINDOWS` e `AEC_RESUME_DELAY_MS`, e por que o fan-out substituiu o "último que falou". Emenda os ADRs 001/002 em vez de substituí-los.
 
 Não viram ADR: o formato do schema das tools (é consequência da limitação já documentada em `tool-mapping.ts:27-46` — vale uma nota em "Consequências" do ADR 002), a frequência e a rampa do chime (comentário de código), e os timings de rajada (serão calibrados no hardware como os `WAKE_LISTEN_*`, com a mesma disciplina de comentário datado do `config.h`).
 
