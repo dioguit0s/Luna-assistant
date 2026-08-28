@@ -20,7 +20,6 @@ import {
   Orchestrator,
   SPEAKING_WATCHDOG_MS,
   MAX_AUDIO_FRAME_BYTES,
-  AUDIO_FRAME_INTERVAL_MS,
 } from './Orchestrator.js';
 
 const baseConfig: AppConfig = {
@@ -43,6 +42,7 @@ const baseConfig: AppConfig = {
   geminiThinkingBudget: 0,
   geminiDebugMessages: false,
   userSilenceCutoffMs: 500,
+  audioPacingLeadMs: 250,
   openaiVadType: 'server_vad',
   openaiVadSilenceMs: null,
   openaiDebugMessages: false,
@@ -556,7 +556,12 @@ describe('Orchestrator: corte de silêncio antecipa speaking_start', () => {
 
   beforeEach(() => {
     harness = buildHarness(() => new Response('[]', { status: 200 }));
-    mock.timers.enable({ apis: ['setTimeout'] });
+    mock.timers.enable({
+      // 'Date' e obrigatorio: o pacing agenda contra Date.now(), entao um
+      // tick() que nao avanca o relogio de parede trava o drain.
+      apis: ['setTimeout', 'Date'],
+      now: new Date('2026-08-20T12:00:00Z'),
+    });
   });
 
   afterEach(() => {
@@ -720,7 +725,12 @@ describe('Orchestrator: watchdog de speaking_end sem áudio novo', () => {
 
   beforeEach(() => {
     harness = buildHarness(() => new Response('[]', { status: 200 }));
-    mock.timers.enable({ apis: ['setTimeout'] });
+    mock.timers.enable({
+      // 'Date' e obrigatorio: o pacing agenda contra Date.now(), entao um
+      // tick() que nao avanca o relogio de parede trava o drain.
+      apis: ['setTimeout', 'Date'],
+      now: new Date('2026-08-20T12:00:00Z'),
+    });
   });
 
   afterEach(() => {
@@ -779,7 +789,12 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
 
   beforeEach(() => {
     harness = buildHarness(() => new Response('[]', { status: 200 }));
-    mock.timers.enable({ apis: ['setTimeout'] });
+    mock.timers.enable({
+      // 'Date' e obrigatorio: o pacing agenda contra Date.now(), entao um
+      // tick() que nao avanca o relogio de parede trava o drain.
+      apis: ['setTimeout', 'Date'],
+      now: new Date('2026-08-20T12:00:00Z'),
+    });
   });
 
   afterEach(() => {
@@ -813,91 +828,157 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
     return h.sent.filter((item): item is Buffer => Buffer.isBuffer(item));
   }
 
-  it('resposta longa: primeiro frame sai imediato, o resto paceado, tudo chega em ordem e completo', async () => {
+  /** Duracao real de um frame cheio: 1024 B de PCM16 @16kHz = 32 ms. */
+  const FULL_FRAME_MS = MAX_AUDIO_FRAME_BYTES / 32;
+  const LEAD_MS = baseConfig.audioPacingLeadMs;
+
+  /**
+   * Avanca o relogio de 1 em 1 ms ate a fila parar de produzir frames, e
+   * devolve quantos ms de parede isso levou. Tick fino de proposito: com
+   * ticks grandes o teste mediria o proprio tick, nao o pacing.
+   */
+  function drainMs(h: Harness, limitMs = 60_000): number {
+    let elapsed = 0;
+    let stagnant = 0;
+    let last = audioFrames(h).length;
+    while (elapsed < limitMs) {
+      mock.timers.tick(1);
+      elapsed += 1;
+      const now = audioFrames(h).length;
+      stagnant = now === last ? stagnant + 1 : 0;
+      last = now;
+      // Um gap maior que dois frames cheios so acontece quando nao ha mais
+      // nada na fila: o pacing nunca espera tanto entre frames consecutivos.
+      if (stagnant > FULL_FRAME_MS * 2) return elapsed - stagnant;
+    }
+    return elapsed;
+  }
+
+  it('resposta longa: primeiro frame imediato, rajada limitada ao lead, resto em tempo real', async () => {
     await feedAudio(harness);
 
-    // ~10 frames (pouco mais de 10KB) — uma resposta de alguns segundos.
-    const FRAME_COUNT = 10;
+    // ~2s de resposta: precisa ser bem maior que o lead, senao a resposta
+    // inteira cabe na rajada inicial e nao sobra pacing para observar.
+    const FRAME_COUNT = 60;
     const chunk = Buffer.alloc(MAX_AUDIO_FRAME_BYTES * FRAME_COUNT + 37);
     for (let i = 0; i < chunk.length; i++) chunk[i] = i % 256;
 
     harness.provider.emitAudioResponse(chunk);
 
-    // O primeiro frame não espera o intervalo de pacing — preserva o TTFAB.
+    // O primeiro frame nao espera nada - preserva o TTFAB.
     assert.equal(audioFrames(harness).length, 1, 'primeiro frame deveria sair na mesma call stack');
 
-    // Avança um frame por vez e confirma que cada um só sai depois do
-    // intervalo — nunca todos de uma vez, que é o que estourava o buffer de
-    // playback de 512KB do firmware.
-    for (let i = 1; i <= FRAME_COUNT; i++) {
-      assert.equal(audioFrames(harness).length, i, `frame ${i} deveria já ter saído`);
-      mock.timers.tick(AUDIO_FRAME_INTERVAL_MS - 1);
-      assert.equal(audioFrames(harness).length, i, 'não deveria adiantar o próximo frame');
-      mock.timers.tick(1);
-    }
+    // Rajada inicial: sai o suficiente para encher o lead, e para. E o
+    // prebuffer do cliente; sem ele o playback roda na beira do underrun.
+    mock.timers.tick(1);
+    const burst = audioFrames(harness).length;
+    const maxBurst = Math.ceil(LEAD_MS / FULL_FRAME_MS) + 1;
+    assert.ok(
+      burst <= maxBurst,
+      `rajada inicial de ${burst} frames excede o lead (teto ${maxBurst})`,
+    );
+    assert.ok(
+      burst * FULL_FRAME_MS >= LEAD_MS,
+      `rajada de ${burst} frames (${burst * FULL_FRAME_MS}ms) nao enche o lead de ${LEAD_MS}ms`,
+    );
+    assert.ok(burst < FRAME_COUNT, 'a resposta inteira nao pode sair na rajada');
 
+    // O resto sai em tempo real: a resposta inteira leva de parede o que ela
+    // dura de audio, menos o lead que fica permanentemente adiantado.
+    const wallMs = 1 + drainMs(harness);
     const frames = audioFrames(harness);
     assert.equal(frames.length, FRAME_COUNT + 1);
 
-    // Reconstrói o payload na ordem de chegada e confere contra o original —
+    const audioMs = chunk.length / 32;
+    assert.ok(
+      wallMs <= audioMs + FULL_FRAME_MS * 2,
+      `entrega mais lenta que tempo real: ${wallMs}ms de parede para ${audioMs}ms de audio`,
+    );
+    assert.ok(
+      wallMs >= audioMs - LEAD_MS - FULL_FRAME_MS * 2,
+      `entrega adiantada alem do lead: ${wallMs}ms de parede para ${audioMs}ms de audio`,
+    );
+
+    // Reconstroi o payload na ordem de chegada e confere contra o original -
     // prova que nada foi perdido, duplicado ou reordenado.
     const parsed = frames.map(parseAudioResponseFrame);
-    const reassembled = Buffer.concat(parsed.map((p) => p.payload));
-    assert.deepEqual(reassembled, chunk);
+    assert.deepEqual(Buffer.concat(parsed.map((p) => p.payload)), chunk);
 
-    // seq monotônico: sem isto, frames emitidos no mesmo milissegundo saíam
+    // seq monotonico: sem isto, frames emitidos no mesmo milissegundo saiam
     // todos com o mesmo Date.now(), inutilizando o campo.
     const seqs = parsed.map((p) => p.seq);
     assert.deepEqual(seqs, [...seqs].sort((a, b) => a - b));
-    assert.equal(new Set(seqs).size, seqs.length, 'seq não pode repetir dentro da mesma sala');
+    assert.equal(new Set(seqs).size, seqs.length, 'seq nao pode repetir dentro da mesma sala');
   });
 
-  it('speaking_end nunca chega antes do último frame de áudio do mesmo turno', async () => {
+  it('a taxa de entrega converge para tempo real mesmo com chunks de tamanho arbitrario', async () => {
     await feedAudio(harness);
 
-    const FRAME_COUNT = 5;
-    const chunk = Buffer.alloc(MAX_AUDIO_FRAME_BYTES * FRAME_COUNT);
-    harness.provider.emitAudioResponse(chunk);
-    assert.equal(audioFrames(harness).length, 1, 'primeiro frame já saiu, os outros 4 ainda estão na fila');
-
-    // Turno fecha (onTurnComplete) com a fila de pacing ainda não vazia — o
-    // caso que fazia endSpeaking() mandar speaking_end direto, ultrapassando
-    // os frames de áudio ainda presos no pacing e chegando ANTES deles no
-    // satélite. Isso arriscava a FSM do firmware sair de RESPONDING (e reabrir
-    // o mic) com áudio do próprio turno ainda a caminho.
-    harness.provider.emitTurnComplete({ assistantText: 'resposta longa' });
-
-    assert.equal(
-      controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length,
-      0,
-      'speaking_end não pode sair enquanto ainda há frame de áudio deste turno na fila',
-    );
-
-    // Drena os frames restantes; enquanto ainda há MAIS áudio na frente do
-    // speaking_end na fila, ele não pode ter saído.
-    for (let i = 2; i < FRAME_COUNT; i++) {
-      mock.timers.tick(AUDIO_FRAME_INTERVAL_MS);
-      assert.equal(audioFrames(harness).length, i);
-      assert.equal(
-        controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length,
-        0,
-        `speaking_end não pode sair antes do frame ${i}`,
-      );
+    // Tamanhos primos, nenhum multiplo de MAX_AUDIO_FRAME_BYTES: cada chunk
+    // termina num frame parcial. Cobrar 32ms por um frame de 128 bytes (4ms
+    // de audio) punha a entrega 15-30% abaixo de tempo real, e o alto-falante
+    // do satelite - que consome a 16000 amostras/s fixos - reproduzia o
+    // deficit como buraco no meio da fala. Este teste trava isso.
+    const sizes = [997, 1451, 313, 2803, 1024, 677, 4099, 199, 3121, 1487];
+    let totalBytes = 0;
+    for (let round = 0; round < 3; round++) {
+      for (const size of sizes) {
+        harness.provider.emitAudioResponse(Buffer.alloc(size));
+        totalBytes += size;
+      }
     }
 
-    // Último frame: o speaking_end enfileirado logo atrás sai no mesmo tick,
-    // sem esperar mais um intervalo de pacing — ele não carrega áudio, então
-    // não compete pelo buffer de playback do firmware. O que importa é a
-    // ORDEM (verificada abaixo), não uma pausa extra antes dele.
-    mock.timers.tick(AUDIO_FRAME_INTERVAL_MS);
-    assert.equal(audioFrames(harness).length, FRAME_COUNT);
-    assert.equal(
-      controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length,
-      1,
-    );
+    const wallMs = drainMs(harness);
+    const audioMs = totalBytes / 32;
 
-    // E, na ordem real de chegada ao satélite (harness.sent preserva a ordem
-    // de envio), o speaking_end aparece depois de todo frame de áudio.
+    // A entrega nao pode ficar ATRAS do tempo real (starvation), nem despejar
+    // muito alem do lead (estouro do buffer do satelite).
+    assert.ok(
+      wallMs <= audioMs + FULL_FRAME_MS * 2,
+      `entrega mais lenta que tempo real: ${wallMs}ms de parede para ${audioMs}ms de audio`,
+    );
+    assert.ok(
+      wallMs >= audioMs - LEAD_MS - FULL_FRAME_MS * 2,
+      `entrega adiantada demais: ${wallMs}ms de parede para ${audioMs}ms de audio`,
+    );
+  });
+
+  it('speaking_end nunca chega antes do ultimo frame de audio do mesmo turno', async () => {
+    await feedAudio(harness);
+
+    // Bem maior que o lead: garante que sobra fila quando o turno fecha, que
+    // e a condicao que este teste existe para cobrir.
+    const FRAME_COUNT = 40;
+    const chunk = Buffer.alloc(MAX_AUDIO_FRAME_BYTES * FRAME_COUNT);
+    harness.provider.emitAudioResponse(chunk);
+
+    const speakingEnds = (): number =>
+      controlMessages(harness.sent).filter((msg) => msg.type === 'speaking_end').length;
+
+    // Turno fecha (onTurnComplete) com a fila de pacing ainda cheia - o caso
+    // que fazia endSpeaking() mandar speaking_end direto, ultrapassando os
+    // frames ainda presos no pacing e chegando ANTES deles no satelite. Isso
+    // arriscava a FSM do firmware sair de RESPONDING (e reabrir o mic) com
+    // audio do proprio turno ainda a caminho.
+    harness.provider.emitTurnComplete({ assistantText: 'resposta longa' });
+    assert.equal(speakingEnds(), 0, 'speaking_end nao pode sair com a fila cheia');
+
+    // Enquanto ainda falta audio para sair, o speaking_end continua preso.
+    while (audioFrames(harness).length < FRAME_COUNT) {
+      assert.equal(
+        speakingEnds(),
+        0,
+        `speaking_end saiu com ${audioFrames(harness).length}/${FRAME_COUNT} frames entregues`,
+      );
+      mock.timers.tick(1);
+    }
+
+    // Ele nao carrega audio, entao nao compete pelo buffer de playback do
+    // firmware: sai no mesmo tick do ultimo frame, sem intervalo extra.
+    assert.equal(speakingEnds(), 1);
+
+    // E, na ordem real de chegada ao satelite (harness.sent preserva a ordem
+    // de envio), o speaking_end aparece depois de todo frame de audio.
     let lastAudioIndex = -1;
     for (let i = 0; i < harness.sent.length; i++) {
       if (Buffer.isBuffer(harness.sent[i])) lastAudioIndex = i;
@@ -905,7 +986,10 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
     const speakingEndIndex = harness.sent.findIndex(
       (item) => typeof item === 'string' && parseControlMessage(item)?.type === 'speaking_end',
     );
-    assert.ok(speakingEndIndex > lastAudioIndex, 'speaking_end deve vir depois de todo frame de áudio do turno');
+    assert.ok(
+      speakingEndIndex > lastAudioIndex,
+      'speaking_end deve vir depois de todo frame de audio do turno',
+    );
   });
 
   it('releaseRoom descarta a fila pendente: turno morto não vaza para a sessão seguinte', async () => {
@@ -919,7 +1003,7 @@ describe('Orchestrator: pacing de audio_response (resposta longa não estoura o 
 
     // Mesmo avançando bem além do que faltava da resposta antiga, nada mais
     // deveria sair: a fila e o timer de drain foram descartados.
-    mock.timers.tick(AUDIO_FRAME_INTERVAL_MS * 10);
+    mock.timers.tick(FULL_FRAME_MS * 10);
     assert.equal(audioFrames(harness).length, 1, 'fila da sessão morta vazou para depois do releaseRoom');
   });
 });
@@ -942,7 +1026,12 @@ describe('Orchestrator: ringOnce (chime)', () => {
 
   beforeEach(() => {
     harness = buildHarness(() => new Response('[]', { status: 200 }));
-    mock.timers.enable({ apis: ['setTimeout'] });
+    mock.timers.enable({
+      // 'Date' e obrigatorio: o pacing agenda contra Date.now(), entao um
+      // tick() que nao avanca o relogio de parede trava o drain.
+      apis: ['setTimeout', 'Date'],
+      now: new Date('2026-08-20T12:00:00Z'),
+    });
   });
 
   afterEach(() => {
@@ -955,7 +1044,7 @@ describe('Orchestrator: ringOnce (chime)', () => {
 
   /** Drena a fila paceada até esvaziar — mesmo padrão do describe de pacing. */
   function drainQueue(rounds = 200): void {
-    for (let i = 0; i < rounds; i++) mock.timers.tick(AUDIO_FRAME_INTERVAL_MS);
+    for (let i = 0; i < rounds; i++) mock.timers.tick(32);
   }
 
   it('não abre sessão de provider nenhuma — é PCM puro pela fila existente', () => {

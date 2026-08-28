@@ -399,7 +399,7 @@ export class AlarmRinger {
     cycle.lastBurstAt = this.now().getTime();
 
     // Próxima rajada depois da rajada inteira mais a janela de escuta. A fila de
-    // áudio é paceada em `AUDIO_FRAME_INTERVAL_MS` por frame, então drenar leva
+    // áudio é paceada em tempo real pelo relógio de mídia, então drenar leva
     // a própria duração do áudio — nada de esperar confirmação, que o protocolo
     // não tem (nenhum MessageType novo na v1).
     this.schedule(cycle, this.lastBurstDurationMs(cycle) + this.listenWindowMs);

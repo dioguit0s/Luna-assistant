@@ -50,6 +50,17 @@ export interface AppConfig {
    */
   userSilenceCutoffMs: number;
   /**
+   * Quanto audio (ms) o servidor mantem adiantado em relacao ao relogio de
+   * reproducao ao pacear `audio_response`. E o cushion que os clientes usam
+   * para absorver jitter de rede: os primeiros frames de cada resposta saem em
+   * rajada ate encher este lead, e so depois a entrega assenta em tempo real.
+   *
+   * Nao e latencia: o primeiro frame continua saindo imediato, entao o TTFAB
+   * nao muda. Zerar isto faz o playback rodar na beira do underrun, que e
+   * exatamente o defeito que o lead existe para corrigir.
+   */
+  audioPacingLeadMs: number;
+  /**
    * `server_vad` corta o turno por silêncio (a janela entra no TTFAB, como o
    * VAD do Gemini); `semantic_vad` decide pelo conteúdo e ignora
    * `openaiVadSilenceMs`.
@@ -165,6 +176,13 @@ function parseEndSensitivity(value: string | undefined): EndSensitivityName | nu
   if (upper === 'HIGH' || upper === 'LOW') return upper;
   throw new Error(`GEMINI_VAD_END_SENSITIVITY inválido: "${value}". Use "HIGH" ou "LOW".`);
 }
+
+/**
+ * 250 ms: precisa ser maior que o prebuffer do firmware
+ * (PLAYBACK_PREBUFFER_BYTES, 128 ms) para que a rajada inicial ja o satisfaca,
+ * e e irrisorio contra os 512 KB (~16 s) do buffer de playback do satelite.
+ */
+export const AUDIO_PACING_LEAD_MS_DEFAULT = 250;
 
 function parseOptionalNumber(name: string): number | null {
   const raw = process.env[name];
@@ -284,6 +302,8 @@ export function loadConfig(): AppConfig {
     // um atraso fixo pequeno; no Gemini é essencial — sem ele, cortaria no
     // primeiro fragmento de transcrição, ainda no meio da frase.
     userSilenceCutoffMs: parseOptionalNumber('USER_SILENCE_CUTOFF_MS') ?? 500,
+    audioPacingLeadMs:
+      parseOptionalNumber('AUDIO_PACING_LEAD_MS') ?? AUDIO_PACING_LEAD_MS_DEFAULT,
     // Mesmo default do GEMINI_VAD_SILENCE_MS: os dois providers precisam do
     // mesmo endpointing para a comparação de TTFAB significar alguma coisa.
     openaiVadType: parseVadType(process.env.OPENAI_VAD_TYPE) ?? 'server_vad',

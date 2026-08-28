@@ -155,7 +155,8 @@ satélite                              servidor                        provider
    |<-- speaking_start ------------------|    (nao espera o 1o audio)
    |   LED off, TX suspenso (AEC)        |<-- onAudioResponse ------------|
    |<-- audio_response (imediato) -------|
-   |<-- audio_response (a cada 32ms) ----|   fila paceada por sala
+   |<-- audio_response (rajada ate o lead)|  enche o prebuffer
+   |<-- audio_response (tempo real) -----|   fila paceada por sala
    |            :                        |<-- onTurnComplete -------------|
    |<-- speaking_end --------------------|    (ultimo item da fila)
    |   [150ms] -> volta a IDLE_LISTENING |
@@ -168,13 +169,50 @@ inteira na socket estoura o buffer de playback do satélite (512 KB de PSRAM, ~1
 16 kHz) e o excesso é descartado **silenciosamente** do lado do firmware
 (`xStreamBufferSend` com timeout 0).
 
-Por isso o servidor enfileira os frames por sala e os envia no ritmo em que o
-alto-falante realmente consome — `AUDIO_FRAME_INTERVAL_MS` (32 ms), derivado do
-tamanho do frame e da taxa de amostragem. **O primeiro frame de cada resposta sai
-imediato**, para não somar latência ao TTFAB.
+Por isso o servidor enfileira os frames por sala e os pacea contra um **relógio de
+mídia** (`audioClockByRoom` no `Orchestrator`): cada frame enviado avança o relógio
+pela duração que ele **realmente carrega** (`bytes / 32` ms), e o próximo envio é
+agendado para quando esse relógio ficar a menos de um *lead* à frente do relógio de
+parede.
+
+Dois detalhes desse desenho não são cosméticos, e desfazer qualquer um deles traz de
+volta o áudio cortado:
+
+- **O relógio é absoluto, não um intervalo fixo entre envios.** Um `setTimeout(32)`
+  nunca dispara adiantado, só atrasado; o erro é unilateral e acumula sem nunca ser
+  recuperado, deixando a entrega permanentemente abaixo das 16 000 amostras/s que o
+  I2S do satélite consome. Recalcular contra `Date.now()` a cada item faz a taxa
+  média convergir para tempo real.
+- **Cada frame custa o que carrega, não o que caberia nele.** O último frame de cada
+  chunk do provider quase nunca tem 1024 B; cobrar 32 ms por um frame de 128 B (4 ms
+  de áudio) sozinho já punha a entrega 15-30% abaixo de tempo real.
+
+**O primeiro frame de cada resposta sai imediato**, para não somar latência ao TTFAB.
+
+#### O lead (`AUDIO_PACING_LEAD_MS`, default 250 ms)
+
+Quanto áudio o servidor mantém adiantado em relação à reprodução. Os primeiros frames
+de cada resposta saem em rajada até encher esse cushion, e só depois a entrega assenta
+em tempo real.
+
+**O lead não é latência** — o primeiro frame continua saindo imediato, o TTFAB não muda.
+Ele é o prebuffer dos clientes: é o que eles consomem para absorver jitter de rede sem
+que o alto-falante seque. Zerar isto (ou "otimizá-lo" para perto de zero) faz o playback
+rodar na beira do underrun, que é exatamente o defeito que o lead existe para corrigir.
+
+Precisa ficar **acima** do prebuffer do firmware (`PLAYBACK_PREBUFFER_BYTES`, 128 ms) e
+do lead do desktop (`PLAYBACK_LEAD_S`, 200 ms), para que a rajada inicial já os
+satisfaça; e é irrisório contra os 512 KB (~16 s) do buffer do satélite.
 
 O `speaking_end` é o **último item da mesma fila**, nunca enviado por fora dela —
 senão chegaria antes do áudio que ainda está sendo drenado.
+
+#### Como medir
+
+O servidor loga `audio_delivery` por turno (`frames`, `audio_ms`, `wall_ms`, `ratio`).
+`ratio` abaixo de 1 é starvation garantida no cliente. O `luna-client-test` mede o mesmo
+do lado do cliente (`[entrega] ... ratio`), sem precisar de hardware; o firmware conta
+`underruns`/`silencio` no log de fim de resposta e o desktop loga cada salto de cursor.
 
 ### Garantias de `speaking_end`
 

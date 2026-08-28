@@ -96,10 +96,14 @@ O `luna-server` (`Orchestrator.enqueueAudioFrames`/`drainAudioQueue`) não despe
 inteira na conexão assim que o provider (Gemini/OpenAI) a entrega — Gemini e OpenAI geram áudio
 bem mais rápido que tempo real, e um envio síncrono estourava o buffer de playback do satélite
 (512KB de PSRAM, ~16s a 16kHz) numa resposta longa, com o excesso descartado silenciosamente do
-lado do firmware. O servidor enfileira os frames por sala e os envia no ritmo em que o
-alto-falante realmente consome (`AUDIO_FRAME_INTERVAL_MS`, calculado a partir do tamanho do
-frame e da taxa de amostragem); o primeiro frame de cada resposta sai imediato, para não somar
-latência ao TTFAB. O campo `seq` de `audio_response` é monotônico por sala (não mais
+lado do firmware. O servidor enfileira os frames por sala e os pacea contra um
+**relógio de mídia** (`audioClockByRoom`): cada frame avança o relógio pela duração que ele
+realmente carrega, e o próximo envio espera até o relógio ficar a menos de um lead
+(`AUDIO_PACING_LEAD_MS`, 250ms) à frente do relógio de parede. Relógio absoluto em vez de
+intervalo fixo porque `setTimeout` só atrasa, nunca adianta — o erro acumulava e a entrega
+ficava permanentemente abaixo de tempo real, que o satélite reproduzia como buraco no meio da
+fala. O lead vira o prebuffer dos clientes; o primeiro frame de cada resposta continua saindo
+imediato, para não somar latência ao TTFAB. O campo `seq` de `audio_response` é monotônico por sala (não mais
 `Date.now()`, que repetia entre frames emitidos no mesmo milissegundo).
 
 Em espelho, `RESPONDING_TIMEOUT_MS` (20s, `luna-firmware/include/config.h`) é rearmado a cada

@@ -571,7 +571,7 @@ export class ReminderStore {
 
 /**
  * WAL + `synchronous = NORMAL`: o `DatabaseSync` bloqueia o event loop, que é o
- * mesmo que roda o tick de 32 ms de `drainAudioQueue`. Um fsync lento no
+ * mesmo que roda o drain paceado de `drainAudioQueue`. Um fsync lento no
  * `INSERT` de um lembrete viraria buraco audível na resposta de **outro**
  * cômodo.
  */

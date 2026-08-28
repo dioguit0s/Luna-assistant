@@ -2,7 +2,12 @@ import WebSocket from 'ws';
 import type { AppConfig } from '../../config/env.js';
 import type { IAudioProvider } from '../IAudioProvider.js';
 import type { CompletedTurn, ProviderSessionConfig, ToolCall } from '../types.js';
-import { resample16kTo24k, resample24kTo16k } from '../utils/resampler.js';
+import {
+  createDownsampler24kTo16k,
+  createUpsampler16kTo24k,
+  type RationalResampler,
+} from '../utils/resampler.js';
+import { AudioDump } from '../utils/audioDump.js';
 import { getLogger } from '../../logging/logger.js';
 import {
   normalizeFunctionCallItem,
@@ -28,6 +33,14 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
   private ws: WebSocket | null = null;
   private connected = false;
   private disposed = false;
+  // Diagnostico: so grava com AUDIO_DUMP_DIR setado (ver AudioDump).
+  private readonly dump = new AudioDump('openai');
+  // Reamostradores com estado por SESSAO (nao por turno): o audio dentro de
+  // uma sessao e um unico stream continuo mesmo aparecendo em turnos
+  // separados no protocolo. reset() roda em connect() - o unico ponto onde
+  // uma sessao OpenAI nasce, sem renovacao automatica como o Gemini tem.
+  private readonly downlink: RationalResampler = createDownsampler24kTo16k();
+  private readonly uplink: RationalResampler = createUpsampler16kTo24k();
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
@@ -78,6 +91,8 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
   }
 
   async connect(sessionConfig: ProviderSessionConfig): Promise<void> {
+    this.downlink.reset();
+    this.uplink.reset();
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(this.config.openaiRealtimeModel)}`;
     this.roomId = sessionConfig.roomId;
 
@@ -162,7 +177,7 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
       return;
     }
 
-    const pcm24k = resample16kTo24k(pcm16kHz);
+    const pcm24k = this.uplink.process(pcm16kHz);
     this.sendEvent({
       type: 'input_audio_buffer.append',
       audio: pcm24k.toString('base64'),
@@ -289,7 +304,9 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
       case 'response.output_audio.delta':
         if (event.delta) {
           const pcm24k = Buffer.from(event.delta, 'base64');
-          const pcm16k = resample24kTo16k(pcm24k);
+          const pcm16k = this.downlink.process(pcm24k);
+          this.dump.write('24k-in', pcm24k);
+          this.dump.write('16k-out', pcm16k);
           this.audioResponseCb?.(pcm16k);
         }
         break;
@@ -321,6 +338,7 @@ export class OpenAIRealtimeAdapter implements IAudioProvider {
         break;
 
       case 'response.done':
+        this.dump.endTurn();
         this.handleResponseDone(event.response?.output ?? []);
         break;
 

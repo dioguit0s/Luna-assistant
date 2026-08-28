@@ -10,9 +10,10 @@ bool begin();
 // Escreve PCM16 mono no speaker (bloqueia até caber no buffer DMA).
 void write(const uint8_t *pcm, size_t len);
 
-// Toca um tom senoidal para validação de hardware (Fase B) e aviso de offline.
-// Bloqueia até terminar e escreve direto no I2S1 — não chamar de outra task
-// enquanto o playbackTask estiver rodando, senão os dois disputam o barramento.
+// Toca um tom senoidal para validação de hardware (Fase B), chamado do setup()
+// antes do playbackTask existir. Bloqueia até terminar e escreve direto no
+// I2S1 — não chamar de outra task enquanto o playbackTask estiver rodando,
+// senão os dois disputam o barramento (para isso, ver renderTone abaixo).
 void playTone(uint16_t freqHz, uint16_t durationMs);
 
 // Gera o mesmo seno em memória, sem tocar no I2S, com envelope de ataque/decaimento

@@ -143,8 +143,15 @@ Detalhes de temporização e as garantias de `speaking_end` estão em
 | Endpointing | `GEMINI_VAD_*` | `OPENAI_VAD_TYPE` / `OPENAI_VAD_SILENCE_MS` |
 | Particularidade | `thinkingBudget` (default `0`) | `OPENAI_VOICE` (default `marin`) |
 
-Ambos entregam áudio a 24 kHz e reamostram para 16 kHz em `resample24kTo16k` antes de
-chamar `onAudioResponse` — é o que mantém o contrato de rede simétrico.
+Ambos entregam áudio a 24 kHz e reamostram para 16 kHz via `RationalResampler`
+(`downlink`, uma instância por sessão) antes de chamar `onAudioResponse` — é o que
+mantém o contrato de rede simétrico. A OpenAI também reamostra o uplink (16k→24k) com
+um `upsampler` irmão; o Gemini recebe 16 kHz nativo e não precisa. Banco de filtros
+polyphase com estado por SESSÃO (`reset()` só roda ao (re)conectar, nunca por turno nem
+por chunk) — é o que elimina a descontinuidade de fase que uma versão sem estado teria
+a cada fronteira de chunk do provider. Ver comentário de topo de
+`providers/utils/resampler.ts` para o racional completo (por que polyphase, por que um
+único protótipo FIR a 48 kHz serve os dois sentidos).
 
 Cada provider tem seu `tool-mapping.ts`, que traduz a `ToolDefinition` neutra para o
 schema do SDK. As limitações de schema de cada API vivem ali, comentadas.

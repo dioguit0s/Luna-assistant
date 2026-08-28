@@ -73,6 +73,12 @@ function prerenderInstruction(label: string): string {
 // (AUDIO_CHUNK_SIZE em protocol.ts), então o contrato é simétrico.
 const AUDIO_RESPONSE_SAMPLE_RATE_HZ = 16_000;
 
+// Bytes de PCM16 mono por milissegundo de áudio: 16000 amostras/s x 2 bytes
+// / 1000. Converter tamanho de frame em duração é a base tanto do pacing
+// quanto da instrumentação de taxa de entrega — um frame parcial vale a
+// duração que ele realmente carrega, não a de um frame cheio.
+const BYTES_PER_MS = (AUDIO_RESPONSE_SAMPLE_RATE_HZ * 2) / 1000;
+
 // Frames pequenos: satélites embarcados (ESP32 / arduinoWebSockets) fecham a
 // conexão ao receber um frame binário grande; o cliente de testes (Node)
 // aceita qualquer tamanho.
@@ -82,14 +88,26 @@ export const MAX_AUDIO_FRAME_BYTES = 1024; // múltiplo de 2 (PCM16)
 // resposta de 30s cai inteira na socket em poucos segundos se despachada sem
 // controle. Isso estoura o buffer de playback do firmware (512KB, ~16s —
 // luna-firmware/include/config.h) e o excesso é *descartado* silenciosamente
-// do lado de lá (xStreamBufferSend com timeout 0). Pacear a saída no ritmo em
-// que o alto-falante realmente consome evita o descarte sem precisar de
-// nenhuma sinalização adicional do firmware. O primeiro frame de cada
-// resposta sai imediato (preserva o TTFAB); só os seguintes esperam este
-// intervalo.
-export const AUDIO_FRAME_INTERVAL_MS = Math.round(
-  ((MAX_AUDIO_FRAME_BYTES / 2 / AUDIO_RESPONSE_SAMPLE_RATE_HZ) * 1000),
-);
+// do lado de lá (xStreamBufferSend com timeout 0).
+//
+// O pacing é feito contra um RELOGIO DE MIDIA por sala (`audioClockByRoom`),
+// não por um intervalo fixo entre envios. A diferença não é cosmética:
+//
+//  - Um `setTimeout(32)` nunca dispara adiantado, só atrasado. O erro é
+//    unilateral e acumula sem nunca ser recuperado, então a entrega fica
+//    permanentemente abaixo das 16000 amostras/s que o I2S do satélite
+//    consome. O relógio absoluto recalcula contra `Date.now()` a cada item, e
+//    a taxa média converge para tempo real.
+//
+//  - Cada frame custa a duração que ele REALMENTE carrega, não a de um frame
+//    cheio. O último frame de cada chunk do provider quase nunca tem 1024 B;
+//    cobrar 32 ms por um frame de 128 B (4 ms de áudio) sozinho já colocava a
+//    entrega 15-30% abaixo de tempo real.
+//
+// O lead (`audioPacingLeadMs`) é o que sobra de graça desse desenho: os
+// primeiros frames saem em rajada até encher o cushion, e só depois a entrega
+// assenta. É o prebuffer dos clientes, e não custa TTFAB — o primeiro frame
+// continua saindo imediato.
 
 /**
  * Fan-out de um payload para todos os satélites de um cômodo. Devolve quantos
@@ -103,6 +121,24 @@ interface AudioCapture {
   bytes: number;
   truncated: boolean;
   settle: (pcm: Buffer | null) => void;
+}
+
+/**
+ * Instrumentação da taxa de entrega de áudio por sala (permanente, não
+ * temporária). Compara quanto áudio saiu (`audio_ms`, soma da duração real de
+ * cada frame) com quanto tempo de parede levou para sair (`wall_ms`). A razão
+ * entre os dois é a métrica que diz se o pacing está entregando em tempo real:
+ * `ratio < 1` significa que o alto-falante do satélite consome mais rápido do
+ * que o servidor entrega — starvation, que vira silêncio injetado no meio da
+ * fala (firmware) ou salto de cursor (desktop). Não há como distinguir isso de
+ * "Wi-Fi ruim" sem medir dos dois lados, daí o log aqui e os contadores de
+ * underrun no cliente.
+ */
+interface AudioDeliveryStats {
+  audioMs: number;
+  frames: number;
+  firstSentAtMs: number;
+  lastSentAtMs: number;
 }
 
 /** Item da fila por sala: um frame de áudio paceado, ou o speaking_end do turno. */
@@ -120,9 +156,9 @@ export class Orchestrator implements AlarmAudioSink {
   // Watchdog do SPEAKING_WATCHDOG_MS acima: rearmado a cada audio_response
   // (resposta longa não dispara), forçado quando o áudio para de chegar.
   private readonly speakingWatchdogByRoom = new Map<string, NodeJS.Timeout>();
-  // Fila de envio por sala: frames de audio_response paceados no ritmo de
-  // AUDIO_FRAME_INTERVAL_MS (evita estourar o buffer de playback do firmware
-  // numa resposta longa) mais o próprio speaking_end enfileirado como último
+  // Fila de envio por sala: frames de audio_response paceados contra o
+  // relógio de mídia (evita estourar o buffer de playback do firmware numa
+  // resposta longa) mais o próprio speaking_end enfileirado como último
   // item — nunca enviado direto por fora da fila, senão chegaria ANTES de
   // frames de áudio do mesmo turno ainda pendentes de pacing, uma condição de
   // corrida que faria a FSM do firmware sair de RESPONDING achando que a
@@ -132,6 +168,13 @@ export class Orchestrator implements AlarmAudioSink {
   // seq monotônico por sala: Date.now() repetia entre frames emitidos no
   // mesmo milissegundo, inutilizando o campo para ordenação/detecção de perda.
   private readonly audioSeqByRoom = new Map<string, number>();
+  // Relógio de mídia por sala: instante de parede (epoch ms) até o qual o
+  // áudio já entregue cobre a reprodução. É contra ele, e não contra um
+  // intervalo fixo, que o próximo envio é agendado.
+  private readonly audioClockByRoom = new Map<string, number>();
+  // Instrumentação da taxa de entrega (ver AudioDeliveryStats): zerada em
+  // startSpeaking, logada quando o speaking_end do turno sai da fila.
+  private readonly audioDeliveryByRoom = new Map<string, AudioDeliveryStats>();
   // Satélite que transmitiu por último em cada cômodo. Só para log: com o bind
   // dos callbacks na criação da sessão (RoomManager), não existe mais um
   // `deviceId` no escopo do bind — e nem sempre existe um, já que a sessão
@@ -428,7 +471,7 @@ export class Orchestrator implements AlarmAudioSink {
       const pendente = this.pendingPrerenderByRoom.get(roomId);
       if (pendente) pendente.audioSeen = true;
 
-      // Fragmenta e enfileira — não envia direto: ver AUDIO_FRAME_INTERVAL_MS.
+      // Fragmenta e enfileira — não envia direto: ver drainAudioQueue.
       this.enqueueAudioFrames(roomId, chunk);
     });
 
@@ -676,6 +719,8 @@ export class Orchestrator implements AlarmAudioSink {
   private startSpeaking(roomId: string): number {
     if (this.speakingByRoom.get(roomId)) return 0;
     this.speakingByRoom.set(roomId, true);
+    this.audioDeliveryByRoom.delete(roomId);
+    this.audioClockByRoom.delete(roomId);
     // Endereça o cômodo, não uma conexão: o conjunto de satélites da sala
     // muda embaixo (reconexão, segundo satélite entrando). Quem resolve é o
     // `WsServer`.
@@ -974,7 +1019,7 @@ export class Orchestrator implements AlarmAudioSink {
         reminder_id: reminderId,
         bytes: pcm.length,
         truncated: capture.truncated,
-        // `DatabaseSync` bloqueia o mesmo event loop do tick de 32 ms de
+        // `DatabaseSync` bloqueia o mesmo event loop do drain paceado de
         // `drainAudioQueue`: um BLOB grande e lento vira buraco audível na
         // resposta de OUTRO cômodo. Medido para a regressão ser visível em
         // log, não audível.
@@ -1052,6 +1097,8 @@ export class Orchestrator implements AlarmAudioSink {
       this.audioDrainTimerByRoom.delete(roomId);
     }
     this.audioSeqByRoom.delete(roomId);
+    this.audioDeliveryByRoom.delete(roomId);
+    this.audioClockByRoom.delete(roomId);
   }
 
   private nextAudioSeq(roomId: string): number {
@@ -1119,9 +1166,10 @@ export class Orchestrator implements AlarmAudioSink {
 
   /**
    * Envia um item da fila da sala e reagenda a si mesma para o próximo. Itens
-   * de áudio são espaçados por AUDIO_FRAME_INTERVAL_MS — o ritmo em que o
-   * alto-falante do satélite realmente consome o áudio; speaking_end não tem
-   * conteúdo a pacear e sai assim que chega a vez dele na fila.
+   * de áudio avançam o relógio de mídia da sala pela duração que carregam, e o
+   * próximo envio é agendado para quando esse relógio ficar a menos de um lead
+   * à frente do relógio de parede; speaking_end não tem conteúdo a pacear e sai
+   * assim que chega a vez dele na fila.
    * O destino é resolvido aqui dentro, a cada item — nunca capturado no
    * enfileiramento: entre o primeiro frame e o último de uma resposta longa o
    * satélite pode reconectar, ou um segundo satélite pode entrar no cômodo.
@@ -1137,8 +1185,14 @@ export class Orchestrator implements AlarmAudioSink {
     const item = queue.shift()!;
     if (item.kind === 'audio') {
       this.sendToRoom(roomId, Buffer.concat([item.header, item.piece]));
+      this.noteAudioDelivered(roomId, item.piece.length);
+      this.advanceAudioClock(roomId, item.piece.length);
     } else {
       this.sendToRoom(roomId, serializeControlMessage(createEnvelope('speaking_end', roomId)));
+      // O speaking_end é o último item da fila do turno, então é aqui que a
+      // entrega de áudio do turno realmente terminou — não em `endSpeaking`,
+      // que só *enfileira*.
+      this.logAudioDelivery(roomId);
     }
 
     if (queue.length === 0) {
@@ -1150,18 +1204,95 @@ export class Orchestrator implements AlarmAudioSink {
       // speaking_end, atrasando a recuperação à toa.
       this.audioQueueByRoom.delete(roomId);
       this.audioDrainTimerByRoom.delete(roomId);
+      this.audioClockByRoom.delete(roomId);
       return;
     }
 
     // O atraso vale para o PRÓXIMO envio, então depende do tipo do PRÓXIMO
     // item (queue[0] agora), não do que acabou de sair: um speaking_end
     // enfileirado atrás de áudio não carrega bytes nenhum disputando o buffer
-    // de playback do firmware — atrasá-lo por AUDIO_FRAME_INTERVAL_MS só
-    // adiaria a notificação de "resposta acabou" sem nenhum ganho de pacing.
-    const nextDelayMs = queue[0]!.kind === 'audio' ? AUDIO_FRAME_INTERVAL_MS : 0;
+    // de playback do firmware — atrasá-lo só adiaria a notificação de
+    // "resposta acabou" sem nenhum ganho de pacing.
+    const nextDelayMs = queue[0]!.kind === 'audio' ? this.nextAudioDelayMs(roomId) : 0;
     this.audioDrainTimerByRoom.set(
       roomId,
       setTimeout(() => this.drainAudioQueue(roomId), nextDelayMs),
+    );
+  }
+
+  /**
+   * Avança o relógio de mídia da sala pela duração real do frame que acabou de
+   * sair (`bytes / 32` ms).
+   *
+   * A reancoragem em `now` não é detalhe: cobre o início do turno e, sobretudo,
+   * o caso em que o PROVIDER ficou mais lento que tempo real (uma pausa longa
+   * do TTS). Sem ela o relógio ficaria para trás do relógio de parede durante
+   * a pausa e, quando o áudio voltasse, liberaria tudo em rajada — exatamente
+   * o despejo sem controle que o pacing existe para evitar.
+   */
+  private advanceAudioClock(roomId: string, bytes: number): void {
+    const now = Date.now();
+    const clock = Math.max(this.audioClockByRoom.get(roomId) ?? now, now);
+    this.audioClockByRoom.set(roomId, clock + bytes / BYTES_PER_MS);
+  }
+
+  /**
+   * Quanto esperar antes do próximo frame: o tanto que o relógio de mídia está
+   * adiantado além do lead. Enquanto o cushion não encheu isto dá 0, e os
+   * frames saem em rajada — é assim que o prebuffer do cliente é preenchido no
+   * começo de cada resposta.
+   */
+  private nextAudioDelayMs(roomId: string): number {
+    const clock = this.audioClockByRoom.get(roomId);
+    if (clock === undefined) return 0;
+    return Math.max(0, clock - this.config.audioPacingLeadMs - Date.now());
+  }
+
+  /** Contabiliza um frame entregue. `bytes / 32` = duração real em ms (PCM16 @16kHz). */
+  private noteAudioDelivered(roomId: string, bytes: number): void {
+    const now = Date.now();
+    const stats = this.audioDeliveryByRoom.get(roomId);
+    if (!stats) {
+      this.audioDeliveryByRoom.set(roomId, {
+        audioMs: bytes / BYTES_PER_MS,
+        frames: 1,
+        firstSentAtMs: now,
+        lastSentAtMs: now,
+      });
+      return;
+    }
+    stats.audioMs += bytes / BYTES_PER_MS;
+    stats.frames += 1;
+    stats.lastSentAtMs = now;
+  }
+
+  /**
+   * Fecha a medição do turno. `ratio` abaixo de 1 é starvation no cliente; o
+   * `wall_ms` é medido do PRIMEIRO ao ÚLTIMO frame, não incluindo o frame
+   * inicial em si — um turno de um frame só não tem taxa a medir e é omitido.
+   */
+  private logAudioDelivery(roomId: string): void {
+    const stats = this.audioDeliveryByRoom.get(roomId);
+    this.audioDeliveryByRoom.delete(roomId);
+    if (!stats || stats.frames < 2) return;
+
+    const wallMs = stats.lastSentAtMs - stats.firstSentAtMs;
+    // O último frame ainda não foi consumido pelo alto-falante quando sai, daí
+    // descontar a duração dele do numerador: o que se compara é o áudio que já
+    // deveria ter tocado contra o tempo que passou.
+    const pacedAudioMs = stats.audioMs - stats.audioMs / stats.frames;
+    const ratio = wallMs > 0 ? pacedAudioMs / wallMs : null;
+    getLogger().info(
+      {
+        event: 'audio_delivery',
+        room_id: roomId,
+        frames: stats.frames,
+        audio_ms: Math.round(stats.audioMs),
+        wall_ms: wallMs,
+        ratio: ratio === null ? null : Number(ratio.toFixed(3)),
+      },
+      `Entrega de áudio: ${Math.round(stats.audioMs)}ms em ${wallMs}ms` +
+        (ratio === null ? '' : ` (ratio ${ratio.toFixed(2)})`),
     );
   }
 

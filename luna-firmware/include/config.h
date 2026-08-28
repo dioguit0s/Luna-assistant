@@ -104,6 +104,31 @@
 // rápido que o tempo real (16 KB/s). Buffer grande na PSRAM absorve a rajada.
 #define PLAYBACK_BUFFER_BYTES (512 * 1024) // ~16 s @ 16k, alocado na PSRAM
 
+// Bloco que o playbackTask entrega ao I2S por iteracao, e sua duracao. Um
+// bloco de silencio injetado por falta de audio custa exatamente isto de
+// buraco audivel - e a unidade em que playbackSilenceMs conta.
+#define PLAYBACK_BLOCK_BYTES 512 // 256 amostras
+#define PLAYBACK_BLOCK_MS (PLAYBACK_BLOCK_BYTES / 2 * 1000 / SAMPLE_RATE)
+
+// Prebuffer: quanto audio precisa estar acumulado na PSRAM antes de o
+// playbackTask comecar a entregar uma resposta ao I2S. Sem cushion nenhum, o
+// buffer vive perto de zero e qualquer jitter de rede seca o alto-falante no
+// meio da fala. Fica ABAIXO do AUDIO_PACING_LEAD_MS do servidor (250ms) para
+// que a rajada inicial do pacing ja o satisfaca: o custo em latencia
+// percebida e ~0, nao 128ms.
+#define PLAYBACK_PREBUFFER_BYTES 4096 // 2048 amostras = 128 ms @16k
+
+// Escape do gate: uma resposta mais curta que o prebuffer, ou uma rede muito
+// ruim, nao pode ficar presa esperando bytes que nunca virao.
+#define PLAYBACK_PREBUFFER_MAX_WAIT_MS 400
+
+// Trigger level do StreamBuffer de playback. Com 1 (o valor antigo) o Receive
+// voltava com qualquer byte disponivel, drenando o buffer continuamente e
+// impedindo qualquer acumulo. Um bloco inteiro por leitura reduz wakeups e
+// leituras parciais; o timeout do Receive continua garantindo que a cauda da
+// resposta saia mesmo sem completar um bloco.
+#define PLAYBACK_READ_TRIGGER_BYTES PLAYBACK_BLOCK_BYTES
+
 // --- Wake word local ("Hey Luna") ---
 // Detecção roda no ESP32-S3 via microWakeWord (TFLite-micro). Enquanto não houver
 // wake word, o microfone continua aberto LOCALMENTE mas nada sai pela rede.
@@ -219,7 +244,7 @@
 // main.cpp:onAudioResponse). Antes disso o teto contava só a partir do início
 // da resposta e ignorava áudio ainda chegando — uma resposta falada mais
 // longa que 20s (o servidor agora despacha o áudio no ritmo real do
-// playback, ver Orchestrator.ts:AUDIO_FRAME_INTERVAL_MS, então isso é comum)
+// playback, ver o relógio de mídia em Orchestrator.ts, então isso é comum)
 // era cortada no meio mesmo com o provider ainda enviando. Agora o teto
 // significa "20s SEM áudio novo", preservando a rede de segurança original
 // (turno de fato travado no provider continua recuperando) sem impor limite

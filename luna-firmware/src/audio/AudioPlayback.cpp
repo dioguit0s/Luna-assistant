@@ -52,7 +52,7 @@ void write(const uint8_t *pcm, size_t len) {
   const int16_t *mono = reinterpret_cast<const int16_t *>(pcm);
   const size_t samples = len / 2;
 
-  static int16_t stereo[256]; // 128 amostras mono por bloco
+  int16_t stereo[256]; // 128 amostras mono por bloco (local: write() e reentrante)
   size_t i = 0;
   while (i < samples) {
     size_t n = 0;
