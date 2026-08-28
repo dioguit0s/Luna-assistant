@@ -30,12 +30,6 @@ export class GeminiLiveAdapter implements IAudioProvider {
   private sessionConfig: ProviderSessionConfig | null = null;
   // Diagnostico: so grava com AUDIO_DUMP_DIR setado (ver AudioDump).
   private readonly dump = new AudioDump('gemini');
-  // Reamostrador do downlink (24kHz -> 16kHz), com estado por SESSAO (nao por
-  // turno nem por chunk): o audio dentro de uma sessao e um unico stream
-  // continuo mesmo aparecendo em turnos separados no protocolo. reset() so
-  // roda em openLiveSession, entao cobre o connect() inicial e a renovacao
-  // por goAway (renewSession) - os dois unicos pontos onde uma sessao nasce.
-  private readonly downlink: RationalResampler = createDownsampler24kTo16k();
   private audioResponseCb: ((chunk: Buffer) => void) | null = null;
   private turnCompleteCb: ((turn: CompletedTurn) => void) | null = null;
   private errorCb: ((err: Error) => void) | null = null;
@@ -129,7 +123,19 @@ export class GeminiLiveAdapter implements IAudioProvider {
   }
 
   private async openLiveSession(sessionConfig: ProviderSessionConfig): Promise<LiveSession> {
-    this.downlink.reset();
+    // Reamostrador do downlink (24kHz -> 16kHz), local a ESTA sessão, não um
+    // campo único compartilhado. `renewSession` fecha a sessão ANTIGA só
+    // depois de abrir a nova — nesse intervalo (que pode ser segundos, não
+    // instantâneo: a antiga só é fechada pelo lado do Gemini quando o socket
+    // realmente cai) a antiga pode continuar entregando o resto de uma
+    // resposta já em voo. Uma instância por sessão deixa cada uma continuar
+    // com sua própria fase/histórico intactos em vez de herdar o estado
+    // (resetado) da sessão seguinte — sem isso, ou a fase da sessão nova
+    // quebrava (bug original), ou a resposta da antiga tinha que ser
+    // descartada inteira para evitar isso (bug pior, encontrado depois:
+    // um "vinte e cinco graus" inteiro sumiu porque a rodada seguinte de
+    // handleGoAway bateu no meio da fala).
+    const downlink = createDownsampler24kTo16k();
     const automaticActivityDetection = this.buildActivityDetection();
     const generation = ++this.sessionGeneration;
 
@@ -159,22 +165,15 @@ export class GeminiLiveAdapter implements IAudioProvider {
           : {}),
       },
       callbacks: {
-        onmessage: (message) => {
-          // Mesma guarda de `sessionGeneration` do onclose abaixo, mas para
-          // áudio: `renewSession` só troca `this.session` e fecha a sessão
-          // ANTIGA depois de `openLiveSession` (que já resetou `this.downlink`
-          // para a sessão NOVA) resolver — nesse intervalo a sessão antiga
-          // continua viva e sua `onmessage` está ligada a este mesmo closure.
-          // Sem esta guarda, um `audio_response` tardio dela seria processado
-          // pelo downlink já resetado (fase/histórico da sessão nova),
-          // reintroduzindo a descontinuidade que ter estado existe para
-          // eliminar — e não é só o resampler: duas sessões de modelo
-          // diferentes não deveriam nunca alimentar o mesmo turno de qualquer
-          // forma, já que o Orchestrator assume um único fluxo de fala ativo
-          // por sala.
-          if (generation !== this.sessionGeneration) return;
-          this.handleMessage(message);
-        },
+        // SEM guarda de sessionGeneration aqui — de propósito. `handleMessage`
+        // recebe o `downlink` desta sessão fechado no closure, então mesmo a
+        // sessão ANTIGA (ainda entregando o resto de uma resposta em voo
+        // durante uma renovação) processa com fase/histórico corretos e
+        // consistentes com o resto daquela mesma resposta. Bloquear a
+        // mensagem aqui (como uma versão anterior fazia) evita o problema
+        // errado: joga fora áudio real que o usuário está esperando ouvir,
+        // trocando um pequeno glitch de fase por uma resposta inteira muda.
+        onmessage: (message) => this.handleMessage(message, downlink),
         onerror: (e: { message?: string }) => {
           this.errorCb?.(new Error(e.message ?? 'Erro Gemini Live'));
         },
@@ -390,18 +389,25 @@ export class GeminiLiveAdapter implements IAudioProvider {
     }
   }
 
-  private handleMessage(message: {
-    toolCall?: RawToolCall;
-    goAway?: { timeLeft?: string };
-    serverContent?: {
-      inputTranscription?: { text?: string };
-      outputTranscription?: { text?: string };
-      modelTurn?: { parts?: Array<{ inlineData?: { data?: string } }> };
-      turnComplete?: boolean;
-      interrupted?: boolean;
-      generationComplete?: boolean;
-    };
-  }): void {
+  private handleMessage(
+    message: {
+      toolCall?: RawToolCall;
+      goAway?: { timeLeft?: string };
+      serverContent?: {
+        inputTranscription?: { text?: string };
+        outputTranscription?: { text?: string };
+        modelTurn?: { parts?: Array<{ inlineData?: { data?: string } }> };
+        turnComplete?: boolean;
+        interrupted?: boolean;
+        generationComplete?: boolean;
+      };
+    },
+    // Resampler DESTA sessão (ver openLiveSession) — não `this.downlink`, que
+    // não existe mais como campo único: era o que causava tanto o bug
+    // original (fase resetada embaixo de uma sessão ainda em voo) quanto o
+    // bug pior que o substituiu (áudio real descartado por inteiro).
+    downlink: RationalResampler,
+  ): void {
     // Diagnóstico de sessão (foi assim que apareceu o `interrupted` do modo
     // manual). Expõe transcrição da fala do usuário no log — só em depuração.
     if (this.config.geminiDebugMessages) {
@@ -472,7 +478,7 @@ export class GeminiLiveAdapter implements IAudioProvider {
       const data = part.inlineData?.data;
       if (data && this.audioResponseCb) {
         const pcm24k = Buffer.from(data, 'base64');
-        const pcm16k = this.downlink.process(pcm24k);
+        const pcm16k = downlink.process(pcm24k);
         this.dump.write('24k-in', pcm24k);
         this.dump.write('16k-out', pcm16k);
         this.audioResponseCb(pcm16k);

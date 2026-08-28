@@ -229,3 +229,76 @@ describe('GeminiLiveAdapter: renovação de sessão pega hora atual', () => {
     );
   });
 });
+
+describe('GeminiLiveAdapter: áudio em voo durante renewSession', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  /** Buffer PCM16 24kHz não-vazio, só para exercitar o resampler de verdade. */
+  function fakeAudioChunk(samples = 480): string {
+    const buf = Buffer.alloc(samples * 2);
+    for (let i = 0; i < samples; i++) {
+      buf.writeInt16LE(Math.round(5000 * Math.sin(i / 10)), i * 2);
+    }
+    return buf.toString('base64');
+  }
+
+  /**
+   * Regressão: uma correção anterior bloqueava QUALQUER `onmessage` da sessão
+   * antiga assim que `renewSession` completava (guarda de `sessionGeneration`
+   * também em `onmessage`, não só em `onclose`). Isso "consertava" a
+   * descontinuidade de fase do resampler jogando fora um problema muito
+   * pior: `renewSession` fecha a sessão antiga só DEPOIS de abrir a nova, e
+   * nesse intervalo ela pode entregar o RESTO de uma resposta genuína já em
+   * voo — bloquear a mensagem faz essa cauda de áudio (e, em produção, uma
+   * resposta inteira observada sumindo assim) desaparecer sem nenhum sinal.
+   * A correção certa é um resampler por sessão (ver `openLiveSession`), não
+   * bloquear a entrega.
+   */
+  it('áudio que chega pela sessão ANTIGA depois da renovação completar ainda é entregue', async () => {
+    const { client, calls } = buildFakeClient();
+    const delivered: Buffer[] = [];
+
+    const adapter = new GeminiLiveAdapter(baseConfig, () => client);
+    adapter.onAudioResponse((chunk) => delivered.push(chunk));
+
+    await adapter.connect(SESSION_CONFIG);
+    adapter.sendAudio(Buffer.alloc(4));
+
+    // Uma resposta já começou a chegar pela sessão 1 antes do goAway — é
+    // exatamente o caso real: o goAway pega uma resposta em andamento.
+    calls[0]!.callbacks.onmessage({
+      serverContent: { modelTurn: { parts: [{ inlineData: { data: fakeAudioChunk() } }] } },
+    });
+    assert.equal(delivered.length, 1, 'primeiro chunk da sessão 1 deveria ter sido entregue');
+
+    // goAway -> renewSession abre a sessão 2 e fecha a sessão 1.
+    calls[0]!.callbacks.onmessage({ goAway: { timeLeft: '5s' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(calls.length, 2, 'renewSession deveria ter aberto a sessão 2');
+    assert.equal(calls[0]!.session.closed, true, 'sessão 1 deveria estar marcada como fechada');
+
+    // O resto da MESMA resposta ainda chega pela sessão 1 (closed=true é só
+    // o nosso lado tendo pedido o fechamento — o evento já estava em voo).
+    calls[0]!.callbacks.onmessage({
+      serverContent: { modelTurn: { parts: [{ inlineData: { data: fakeAudioChunk() } }] } },
+    });
+    assert.equal(
+      delivered.length,
+      2,
+      'áudio da sessão antiga chegado DEPOIS da renovação não pode ser descartado — é a cauda de uma resposta real',
+    );
+
+    // E a sessão 2 (a atual) entrega normalmente também — as duas convivem
+    // sem uma bloquear a outra.
+    calls[1]!.callbacks.onmessage({
+      serverContent: { modelTurn: { parts: [{ inlineData: { data: fakeAudioChunk() } }] } },
+    });
+    assert.equal(delivered.length, 3);
+
+    for (const chunk of delivered) {
+      assert.ok(chunk.length > 0, 'todo chunk entregue deve ter conteúdo (resampler não pode zerar a saída)');
+    }
+  });
+});
