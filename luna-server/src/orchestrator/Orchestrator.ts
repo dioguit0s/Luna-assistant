@@ -1098,6 +1098,7 @@ export class Orchestrator implements AlarmAudioSink {
     }
     this.audioSeqByRoom.delete(roomId);
     this.audioDeliveryByRoom.delete(roomId);
+    this.audioClockByRoom.delete(roomId);
   }
 
   private nextAudioSeq(roomId: string): number {

@@ -105,8 +105,15 @@ static void onSpeakingStart() {
   // silenciosamente na maior parte das vezes; quem executa e o proprio
   // playbackTask, onde por definicao nao esta bloqueado.
   playbackFlushRequest = true;
-  playbackArmed = false;
+  // Deadline gravado ANTES de fechar o gate: playbackArmed e
+  // prebufferDeadlineMs sao duas escritas volatile separadas, sem secao
+  // critica com o playbackTask. Se ele ler o gate exatamente entre as duas,
+  // a ordem inversa faria o deadline ainda ser o do turno anterior (ja
+  // vencido), abrindo o gate na hora e pulando o prebuffer do turno novo.
+  // Nesta ordem, o pior caso e o oposto: o gate ainda aberto por mais uma
+  // iteracao, inofensivo.
   prebufferDeadlineMs = millis() + PLAYBACK_PREBUFFER_MAX_WAIT_MS;
+  playbackArmed = false;
   Serial.println("[luna] respondendo (captura suspensa)");
 }
 

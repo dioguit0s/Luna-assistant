@@ -159,7 +159,22 @@ export class GeminiLiveAdapter implements IAudioProvider {
           : {}),
       },
       callbacks: {
-        onmessage: (message) => this.handleMessage(message),
+        onmessage: (message) => {
+          // Mesma guarda de `sessionGeneration` do onclose abaixo, mas para
+          // áudio: `renewSession` só troca `this.session` e fecha a sessão
+          // ANTIGA depois de `openLiveSession` (que já resetou `this.downlink`
+          // para a sessão NOVA) resolver — nesse intervalo a sessão antiga
+          // continua viva e sua `onmessage` está ligada a este mesmo closure.
+          // Sem esta guarda, um `audio_response` tardio dela seria processado
+          // pelo downlink já resetado (fase/histórico da sessão nova),
+          // reintroduzindo a descontinuidade que ter estado existe para
+          // eliminar — e não é só o resampler: duas sessões de modelo
+          // diferentes não deveriam nunca alimentar o mesmo turno de qualquer
+          // forma, já que o Orchestrator assume um único fluxo de fala ativo
+          // por sala.
+          if (generation !== this.sessionGeneration) return;
+          this.handleMessage(message);
+        },
         onerror: (e: { message?: string }) => {
           this.errorCb?.(new Error(e.message ?? 'Erro Gemini Live'));
         },
