@@ -21,7 +21,7 @@ O revisor só reporta — as correções são suas. Apresente os achados junto c
 
 ## Comandos
 
-`luna-server` (TypeScript, Node ≥20, ESM):
+`luna-server` (TypeScript, Node ≥22.5, ESM):
 
 ```bash
 cd luna-server && npm test
