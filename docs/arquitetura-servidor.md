@@ -304,11 +304,60 @@ A âncora correta é o último instante em que sabemos que o usuário **ainda es
 falando** (`markUserSpeech`, alimentado pela transcrição de entrada do provider). O
 primeiro chunk de áudio serve só como âncora de fallback.
 
+### A medição é um intervalo, não um número
+
+A âncora por transcrição corrige o viés grande do open-mic, mas deixa um viés menor na
+mesma direção, e ele é **estrutural**: `markUserSpeech` carimba o instante em que o
+*fragmento de transcrição chegou*, não o instante em que a fala aconteceu. A transcrição
+de entrada vem atrasada em relação ao áudio, e esse atraso é todo subtraído do número.
+Não há sinal no protocolo do provider que permita descontá-lo com exatidão, então o log
+traz os dois lados:
+
+| Campo | O que é |
+| --- | --- |
+| `latency_ms` | Limite **inferior** (otimista). Da última transcrição ao primeiro áudio — a série histórica, mantida com o mesmo nome e significado |
+| `since_turn_start_ms` | Limite **superior** (pessimista). Do primeiro chunk do turno ao primeiro áudio; inclui o usuário ainda falando |
+| `transcript_anchor_moves` | Quantas vezes a transcrição empurrou a âncora. `0` = os dois limites medem a mesma coisa |
+| `provider_wait_ms` | Quanto o turno esperou por `getOrCreateProvider` |
+| `session_cold` | `true` quando essa espera foi uma sessão sendo aberta de verdade |
+
+A verdade está entre os dois limites. Intervalo estreito = medição confiável; intervalo
+largo com `anchor_moves` alto = transcrição atrasada mascarando o número de baixo.
+
+### Sessão fria não aparece no `latency_ms`
+
+Com wake word o satélite **não transmite nada em repouso**, então o `goAway` por
+ociosidade do Gemini derruba a sessão (ver `handleGoAway`, janela de 60 s). A próxima
+fala paga um `live.connect()` inteiro dentro de `handleAudioChunk` — teto de
+`PROVIDER_CONNECT_TIMEOUT_MS`, default 5000 ms — **antes** de o provider poder
+transcrever qualquer coisa. Como é a chegada dessa transcrição que reancora o TTFAB em
+"agora", o custo inteiro some do `latency_ms`: o usuário espera segundos e o log mostra
+um número bom.
+
+Por isso `provider_wait_ms`/`session_cold` são carimbados no próprio turno, e não só em
+`room_created` (que também ganhou `connect_ms`): diagnosticar isso não deve depender de
+cruzar dois eventos à mão.
+
 ```bash
 cd luna-server && npm run dev
 ```
 
-Os campos relevantes no log são `ttfab` e `model_decision_ms`, ambos por `room_id`.
+Os campos relevantes no log são `ttfab`, `model_decision_ms` e `room_created`, todos por
+`room_id`.
+
+### Do outro lado: o orçamento dentro do satélite
+
+O servidor não enxerga o que acontece depois que o frame sai pela socket. O firmware
+imprime uma linha `[lat]` por resposta, no instante em que o áudio fica audível:
+
+```
+[lat] wake->tx=800 tx->speaking_start=1300 speaking_start->audio1=950 audio1->gate=60 wake->gate=3110 (ms)
+```
+
+`speaking_start->audio1` é o análogo direto do que o `luna-desktop` já loga, e é o que
+separa "modelo lento" de "rede ruim". `audio1->gate` é o custo local do prebuffer
+(esperado: dezenas de ms — ver `PLAYBACK_PREBUFFER_BYTES`). Um `-` significa marco
+ausente no turno, nunca "zero": no open-mic não existe wake para ancorar.
 
 ***
 

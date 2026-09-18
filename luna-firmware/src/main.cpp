@@ -79,6 +79,64 @@ static volatile bool waitingForPlaybackDrain = false;
 static volatile uint32_t playbackUnderruns = 0;
 static volatile uint32_t playbackSilenceMs = 0;
 
+// Instrumentacao de latencia por turno (permanente, mesmo criterio do bloco
+// acima). O satelite era o unico cliente impossivel de medir: o luna-desktop
+// ja loga speaking_start -> primeiro audio_response, e aqui nao havia marco
+// nenhum — o cliente lento era justamente o que nao dava numero. Os cinco
+// instantes abaixo cobrem o turno inteiro, e sao os DELTAS entre eles que
+// separam "modelo lento" de "rede ruim" de "gate do prebuffer segurando".
+//
+// Todos em millis(), com 0 = "nao aconteceu neste turno" (por isso nenhum
+// delta e calculado a partir de um zero — ver deltaMs).
+static volatile uint32_t turnWakeAtMs = 0;
+static volatile uint32_t turnFirstTxAtMs = 0;
+static volatile uint32_t turnSpeakingStartAtMs = 0;
+static volatile uint32_t turnFirstAudioAtMs = 0;
+static volatile uint32_t turnGateOpenAtMs = 0;
+
+// O playbackTask levanta esta bandeira, o loop() imprime. Nao e capricho de
+// estilo: Serial aqui e o USB CDC nativo (HWCDC), e um write bloqueia quando
+// nao ha host lendo o monitor. Bloquear a task que alimenta o I2S produziria
+// exatamente o buraco audivel que esta instrumentacao existe para medir.
+static volatile bool turnLatencyPending = false;
+
+static void resetTurnLatency() {
+  turnWakeAtMs = 0;
+  turnFirstTxAtMs = 0;
+  turnSpeakingStartAtMs = 0;
+  turnFirstAudioAtMs = 0;
+  turnGateOpenAtMs = 0;
+}
+
+// -1 = marco ausente. Distinguir isso de "0 ms" importa: um zero silencioso
+// numa linha de latencia e indistinguivel de uma medicao instantanea.
+static int32_t deltaMs(uint32_t from, uint32_t to) {
+  if (from == 0 || to == 0) return -1;
+  return (int32_t)(to - from);
+}
+
+static const char *fmtDelta(char *buf, size_t n, int32_t ms) {
+  if (ms < 0) snprintf(buf, n, "-");
+  else snprintf(buf, n, "%ld", (long)ms);
+  return buf;
+}
+
+// Uma linha por resposta, no momento em que o audio fica audivel. Como ler:
+//   wake->tx          voce falando "Hey Luna" + a deteccao fechar (nao e defeito)
+//   tx->speaking_start voce falando o comando + o endpointing do provider
+//   speaking_start->audio1  o modelo pensando — o mesmo numero que o desktop loga
+//   audio1->gate      custo local do prebuffer (esperado: dezenas de ms)
+static void logTurnLatency() {
+  char a[12], b[12], c[12], d[12], e[12];
+  Serial.printf("[lat] wake->tx=%s tx->speaking_start=%s speaking_start->audio1=%s "
+                "audio1->gate=%s wake->gate=%s (ms)\n",
+                fmtDelta(a, sizeof(a), deltaMs(turnWakeAtMs, turnFirstTxAtMs)),
+                fmtDelta(b, sizeof(b), deltaMs(turnFirstTxAtMs, turnSpeakingStartAtMs)),
+                fmtDelta(c, sizeof(c), deltaMs(turnSpeakingStartAtMs, turnFirstAudioAtMs)),
+                fmtDelta(d, sizeof(d), deltaMs(turnFirstAudioAtMs, turnGateOpenAtMs)),
+                fmtDelta(e, sizeof(e), deltaMs(turnWakeAtMs, turnGateOpenAtMs)));
+}
+
 // Gate do prebuffer. Comeca aberto: fora de uma resposta (bipe de wake, tom de
 // boot) nao ha o que acumular, e um gate fechado por default engoliria esses
 // sons. So onSpeakingStart o fecha.
@@ -89,6 +147,7 @@ static volatile uint32_t prebufferDeadlineMs = 0;
 static void onSpeakingStart() {
   // AEC: para de transmitir e descarta o backlog de captura (evita eco).
   StateMachine::onSpeakingStart();
+  turnSpeakingStartAtMs = millis();
   if (txQueue) xQueueReset(txQueue);
   responseBytes = 0;
   playbackUnderruns = 0;
@@ -140,6 +199,7 @@ static void onAudioResponse(const uint8_t *pcm, size_t len) {
   // resposta mais longa que o teto (contado desde o speaking_start) era
   // cortada no meio mesmo com áudio ainda chegando do servidor.
   StateMachine::noteResponseAudio();
+  if (turnFirstAudioAtMs == 0) turnFirstAudioAtMs = millis();
 
   responseBytes += len;
   if (!playbackBuffer) return;
@@ -259,6 +319,11 @@ static void wakeTask(void *) {
 
     if (WakeWord::takeDetection()) {
       StateMachine::onWakeWord();
+      // Zera antes de marcar: o turno anterior pode ter terminado sem resposta
+      // (janela de escuta fechada por silencio), e marcos velhos produziriam
+      // deltas sem sentido na linha do turno novo.
+      resetTurnLatency();
+      turnWakeAtMs = millis();
       queueWakeChirp();
       Serial.println("[luna] wake word — capturando");
     }
@@ -281,6 +346,11 @@ static void playbackTask(void *) {
     if (!playbackArmed) {
       if (xStreamBufferBytesAvailable(playbackBuffer) >= PLAYBACK_PREBUFFER_BYTES ||
           (int32_t)(millis() - prebufferDeadlineMs) >= 0 || waitingForPlaybackDrain) {
+        // Este e o instante em que a resposta fica audivel — o unico fim de
+        // linha honesto para o orcamento do turno. So o onSpeakingStart fecha
+        // o gate, entao isto roda exatamente uma vez por resposta.
+        turnGateOpenAtMs = millis();
+        turnLatencyPending = true;
         playbackArmed = true;
       } else {
         memset(buf, 0, sizeof(buf));
@@ -455,6 +525,13 @@ void loop() {
     StateMachine::onSpeakingEnd();
   }
 
+  // Orcamento do turno, impresso fora do playbackTask (ver turnLatencyPending).
+  if (turnLatencyPending) {
+    turnLatencyPending = false;
+    logTurnLatency();
+    resetTurnLatency();
+  }
+
   StateMachine::update();
   updateStatusLed();
 
@@ -472,6 +549,11 @@ void loop() {
   const uint32_t drainDeadline = millis() + 15;
   while ((int32_t)(millis() - drainDeadline) < 0 &&
          xQueueReceive(txQueue, &out, 0) == pdTRUE) {
+    // Marcado aqui, e nao no captureTask, porque o que interessa e quando o
+    // audio entrou na socket — o tempo parado na txQueue faz parte do custo.
+    // Guardado por turnWakeAtMs: no open-mic a transmissao e continua e nao
+    // existe "primeiro chunk do turno" para medir.
+    if (turnWakeAtMs != 0 && turnFirstTxAtMs == 0) turnFirstTxAtMs = millis();
     LunaWsClient::sendAudioChunk(seqCounter++, (const uint8_t *)out.samples,
                                  (size_t)out.count * sizeof(int16_t));
   }

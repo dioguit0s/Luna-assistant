@@ -102,14 +102,25 @@ export class RoomManager {
         buildLunaSystemPrompt(roomId, this.ringBuffer.getHistory(roomId), undefined, weatherEnabled),
     });
 
+    // Medido em volta do connect e logado junto: abrir sessão é a maior
+    // parcela isolada de latência que um turno pode pagar (teto de
+    // `providerConnectTimeoutMs`), e ela é invisível no `ttfab`, que só começa
+    // a contar quando a transcrição do provider chega — ou seja, depois disto.
+    // Ver `providerWaitMsByRoom` no Orchestrator, que carimba o mesmo custo no
+    // turno que de fato esperou.
+    const connectStartedAt = performance.now();
     await this.awaitConnectWithTimeout(roomId, provider, connectPromise);
+    const connectMs = Math.round(performance.now() - connectStartedAt);
 
     // Antes de `sessions.set`: nenhum caminho pode alcançar este provider sem
     // os callbacks já registrados.
     this.bindProvider(roomId, provider);
 
     this.sessions.set(roomId, { provider });
-    getLogger().info({ room_id: roomId, event: 'room_created' }, 'Sala criada');
+    getLogger().info(
+      { room_id: roomId, event: 'room_created', connect_ms: connectMs },
+      `Sala criada (connect: ${connectMs}ms)`,
+    );
 
     return provider;
   }
