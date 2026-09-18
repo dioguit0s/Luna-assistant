@@ -1,7 +1,7 @@
 import { describe, it, before, beforeEach, afterEach, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import type { AppConfig } from '../config/env.js';
-import { createLogger } from '../logging/logger.js';
+import { createLogger, getLogger } from '../logging/logger.js';
 import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import { ReminderStore } from '../reminders/ReminderStore.js';
 import { ReminderScheduler } from '../reminders/ReminderScheduler.js';
@@ -237,6 +237,12 @@ async function feedAudio(h: Harness): Promise<void> {
 
 function buildHarness(
   respond: (call: FetchCall) => Response | Promise<Response>,
+  /**
+   * `providerConnectDelayMs` simula o custo de abrir sessão no provider —
+   * a "sessão fria" que o satélite com wake word paga sempre que fica parado
+   * tempo suficiente para o `goAway` por ociosidade derrubar a anterior.
+   */
+  opts: { providerConnectDelayMs?: number } = {},
 ): Harness {
   const provider = new FakeAudioProvider();
   const ringBuffer = new ConversationRingBuffer();
@@ -257,6 +263,10 @@ function buildHarness(
     },
     getOrCreateProvider: async (roomId: string) => {
       if (!bound) {
+        // Só na primeira: sessão já viva devolve na hora, como a de verdade.
+        if (opts.providerConnectDelayMs) {
+          await new Promise((resolve) => setTimeout(resolve, opts.providerConnectDelayMs));
+        }
         bound = true;
         bindProvider(roomId, provider);
       }
@@ -1613,5 +1623,90 @@ describe('Orchestrator: set_reminder ponta a ponta', () => {
     await harness.provider.emitToolCall(toolCall({ in_seconds: 60 }, 'set_reminder'));
 
     assert.equal(harness.reminderStore.countLiveByRoom(ROOM_ID), 1);
+  });
+});
+
+describe('Orchestrator: instrumentação de latência do turno', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  after(() => {
+    for (const buffer of ringBuffers) buffer.destroy();
+    // Drena, não itera: ver o comentário do `after()` do primeiro describe.
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  /** O log de `ttfab` do turno, já desembrulhado do primeiro argumento do pino. */
+  function ttfabLog(calls: { arguments: unknown[] }[]): Record<string, unknown> | undefined {
+    return calls
+      .map((call) => call.arguments[0] as Record<string, unknown> | undefined)
+      .find((fields) => fields?.event === 'ttfab');
+  }
+
+  it('carimba o custo da sessão fria no turno que de fato esperou por ela', async () => {
+    const harness = buildHarness(() => new Response('{}'), { providerConnectDelayMs: 300 });
+    const logs = mock.method(getLogger(), 'info');
+
+    try {
+      await feedAudio(harness); // este chunk paga o connect inteiro
+      harness.provider.emitUserSpeech(); // reancora o TTFAB em "agora"
+      harness.provider.emitAudioResponse(Buffer.alloc(320));
+
+      const ttfab = ttfabLog(logs.mock.calls);
+      assert.ok(ttfab, 'nenhum log de ttfab foi emitido');
+      assert.equal(ttfab.session_cold, true);
+      assert.ok(
+        (ttfab.provider_wait_ms as number) >= 250,
+        `provider_wait_ms: ${ttfab.provider_wait_ms}`,
+      );
+
+      // O ponto do teste, e o bug que o diagnóstico encontrou: o `latency_ms`
+      // sozinho não enxerga nada disso — a transcrição reancorou DEPOIS do
+      // connect. O usuário esperou 300ms a mais e o número de sempre não muda.
+      assert.ok((ttfab.latency_ms as number) < 250, `latency_ms: ${ttfab.latency_ms}`);
+    } finally {
+      logs.mock.restore();
+    }
+  });
+
+  it('o limite superior enxerga a espera que o latency_ms desconta', async () => {
+    const harness = buildHarness(() => new Response('{}'), { providerConnectDelayMs: 300 });
+    const logs = mock.method(getLogger(), 'info');
+
+    try {
+      await feedAudio(harness);
+      harness.provider.emitUserSpeech();
+      harness.provider.emitAudioResponse(Buffer.alloc(320));
+
+      const ttfab = ttfabLog(logs.mock.calls);
+      assert.ok(ttfab);
+      assert.ok(
+        (ttfab.since_turn_start_ms as number) >= 300,
+        `since_turn_start_ms: ${ttfab.since_turn_start_ms}`,
+      );
+      assert.equal(ttfab.transcript_anchor_moves, 1);
+    } finally {
+      logs.mock.restore();
+    }
+  });
+
+  it('sessão já viva não é marcada como fria', async () => {
+    const harness = buildHarness(() => new Response('{}'));
+
+    await feedAudio(harness); // cria a sessão (sem atraso)
+    const logs = mock.method(getLogger(), 'info');
+
+    try {
+      await feedAudio(harness);
+      harness.provider.emitUserSpeech();
+      harness.provider.emitAudioResponse(Buffer.alloc(320));
+
+      const ttfab = ttfabLog(logs.mock.calls);
+      assert.ok(ttfab);
+      assert.equal(ttfab.session_cold, false);
+    } finally {
+      logs.mock.restore();
+    }
   });
 });

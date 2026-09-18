@@ -20,8 +20,8 @@ describe('TtfabTracker', () => {
     busyWait(30);
     tracker.markClientAudioReceived();
 
-    const latency = tracker.markFirstResponseSent();
-    assert.ok(latency !== null && latency >= 25, `esperava >= 25ms, veio ${latency}`);
+    const sample = tracker.markFirstResponseSent();
+    assert.ok(sample !== null && sample.latencyMs >= 25, `esperava >= 25ms, veio ${sample?.latencyMs}`);
   });
 
   it('reancora no último sinal de fala do usuário', () => {
@@ -31,8 +31,68 @@ describe('TtfabTracker', () => {
     busyWait(30);
     tracker.markUserSpeech(); // usuário ainda falava agora
 
-    const latency = tracker.markFirstResponseSent();
-    assert.ok(latency !== null && latency < 25, `esperava < 25ms, veio ${latency}`);
+    const sample = tracker.markFirstResponseSent();
+    assert.ok(sample !== null && sample.latencyMs < 25, `esperava < 25ms, veio ${sample?.latencyMs}`);
+  });
+
+  it('o limite superior não é descontado pela transcrição', () => {
+    // O ponto do intervalo: `latencyMs` é reancorado pela transcrição e some,
+    // `sinceTurnStartMs` continua contando desde o começo do turno. Um relatório
+    // que mostrasse só o de baixo esconderia os 30ms de espera real.
+    const tracker = new TtfabTracker();
+
+    tracker.markClientAudioReceived();
+    busyWait(30);
+    tracker.markUserSpeech();
+
+    const sample = tracker.markFirstResponseSent();
+    assert.ok(sample !== null);
+    assert.ok(sample.latencyMs < 25, `limite inferior: ${sample.latencyMs}`);
+    assert.ok(sample.sinceTurnStartMs !== null && sample.sinceTurnStartMs >= 25,
+              `limite superior: ${sample.sinceTurnStartMs}`);
+  });
+
+  it('conta quantas vezes a transcrição moveu a âncora', () => {
+    // anchorMoves = 0 significa que os dois limites medem a mesma coisa; é o
+    // que separa "medição confiável" de "transcrição atrasada mascarando".
+    const tracker = new TtfabTracker();
+
+    tracker.markClientAudioReceived();
+    const semFala = new TtfabTracker();
+    semFala.markClientAudioReceived();
+    assert.equal(semFala.markFirstResponseSent()?.anchorMoves, 0);
+
+    tracker.markUserSpeech();
+    tracker.markUserSpeech();
+    assert.equal(tracker.markFirstResponseSent()?.anchorMoves, 2);
+  });
+
+  it('sinceTurnStartMs é null quando a fala não foi precedida de áudio do cliente', () => {
+    // Fala espontânea (alarme, segundo turno de tool call): não há turno de
+    // usuário para ancorar o limite superior, e inventar um seria mentira.
+    const tracker = new TtfabTracker();
+
+    tracker.markUserSpeech();
+
+    assert.equal(tracker.markFirstResponseSent()?.sinceTurnStartMs, null);
+  });
+
+  it('o limite superior reancora a cada turno', () => {
+    // Sem zerar `turnStartedAt` ao emitir, o segundo turno herdaria o começo do
+    // primeiro e o limite superior cresceria sem parar ao longo da conversa.
+    const tracker = new TtfabTracker();
+
+    tracker.markClientAudioReceived();
+    busyWait(30);
+    tracker.markUserSpeech();
+    assert.notEqual(tracker.markFirstResponseSent(), null);
+
+    tracker.markUserSpeech(); // novo turno
+    tracker.markClientAudioReceived();
+    const segundo = tracker.markFirstResponseSent();
+    assert.ok(segundo !== null);
+    assert.ok(segundo.sinceTurnStartMs !== null && segundo.sinceTurnStartMs < 25,
+              `herdou o turno anterior: ${segundo.sinceTurnStartMs}`);
   });
 
   it('loga a latência só uma vez por turno', () => {

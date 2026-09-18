@@ -84,6 +84,14 @@ const BYTES_PER_MS = (AUDIO_RESPONSE_SAMPLE_RATE_HZ * 2) / 1000;
 // aceita qualquer tamanho.
 export const MAX_AUDIO_FRAME_BYTES = 1024; // múltiplo de 2 (PCM16)
 
+/**
+ * Acima disto, a espera por `getOrCreateProvider` foi uma sessão sendo aberta
+ * de verdade, não o microtask de um `await` sobre uma sessão já viva. Serve só
+ * para carimbar `session_cold` no log do turno — o número em si
+ * (`provider_wait_ms`) vai cru de qualquer jeito.
+ */
+const COLD_SESSION_WAIT_MS = 250;
+
 // Gemini/OpenAI entregam áudio muito mais rápido que tempo real — uma
 // resposta de 30s cai inteira na socket em poucos segundos se despachada sem
 // controle. Isso estoura o buffer de playback do firmware (512KB, ~16s —
@@ -148,6 +156,20 @@ type AudioQueueItem =
 
 export class Orchestrator implements AlarmAudioSink {
   private readonly ttfabByRoom = new Map<string, TtfabTracker>();
+  /**
+   * Maior espera por `getOrCreateProvider` desde o último `ttfab` logado.
+   *
+   * Existe porque o `TtfabTracker` é estruturalmente cego a este custo: numa
+   * sessão fria (o satélite com wake word não manda nada em repouso, então o
+   * `goAway` por ociosidade derruba a sessão) o turno paga um `live.connect()`
+   * inteiro ANTES de o provider poder transcrever qualquer coisa — e é a
+   * chegada dessa transcrição que reancora o TTFAB em "agora". O usuário espera
+   * segundos e o log mostra um número bom.
+   *
+   * O máximo, e não a soma: todos os chunks do turno esperam a MESMA promise de
+   * connect, então somar contaria a mesma espera dezenas de vezes.
+   */
+  private readonly providerWaitMsByRoom = new Map<string, number>();
   private readonly speakingByRoom = new Map<string, boolean>();
   // Debounce de "usuário parou de falar" (ver userSilenceCutoffMs): dispara
   // speaking_start antes do primeiro áudio de resposta, para o LED apagar
@@ -375,7 +397,12 @@ export class Orchestrator implements AlarmAudioSink {
     this.roomManager.getRingBuffer().touch(roomId);
 
     // Os callbacks já vêm registrados de `RoomManager.createProviderSession`.
+    const waitStartedAt = performance.now();
     const provider = await this.roomManager.getOrCreateProvider(roomId);
+    const waitedMs = Math.round(performance.now() - waitStartedAt);
+    if (waitedMs > (this.providerWaitMsByRoom.get(roomId) ?? 0)) {
+      this.providerWaitMsByRoom.set(roomId, waitedMs);
+    }
 
     provider.sendAudio(pcm);
   }
@@ -439,17 +466,33 @@ export class Orchestrator implements AlarmAudioSink {
         return;
       }
 
-      const latencyMs = tracker.markFirstResponseSent();
-      if (latencyMs !== null) {
+      const sample = tracker.markFirstResponseSent();
+      if (sample !== null) {
+        const providerWaitMs = this.providerWaitMsByRoom.get(roomId) ?? 0;
+        this.providerWaitMsByRoom.delete(roomId);
+        const sessionCold = providerWaitMs >= COLD_SESSION_WAIT_MS;
         getLogger().info(
           {
             event: 'ttfab',
             room_id: roomId,
             device_id: deviceId(),
             provider: providerName,
-            latency_ms: latencyMs,
+            // Limite inferior (otimista). Série histórica: mantém nome e
+            // significado, para não quebrar comparação com medições antigas.
+            latency_ms: sample.latencyMs,
+            // Limite superior, e o quanto a transcrição descontou do de baixo.
+            // Ver o intervalo documentado em TtfabTracker.
+            since_turn_start_ms: sample.sinceTurnStartMs,
+            transcript_anchor_moves: sample.anchorMoves,
+            // O custo que o `latency_ms` não enxerga: quanto este turno esperou
+            // por uma sessão de provider. Carimbado no próprio turno para não
+            // depender de cruzar com `room_created`/`gemini_session_expired`.
+            provider_wait_ms: providerWaitMs,
+            session_cold: sessionCold,
           },
-          `TTFAB: ${latencyMs}ms`,
+          `TTFAB: ${sample.latencyMs}ms` +
+            (sample.sinceTurnStartMs !== null ? `–${sample.sinceTurnStartMs}ms` : '') +
+            (sessionCold ? ` (sessão fria: +${providerWaitMs}ms de connect)` : ''),
         );
       }
 
@@ -1055,6 +1098,7 @@ export class Orchestrator implements AlarmAudioSink {
    */
   releaseRoom(roomId: string): void {
     this.ttfabByRoom.delete(roomId);
+    this.providerWaitMsByRoom.delete(roomId);
     this.speakingByRoom.delete(roomId);
     this.lastDeviceIdByRoom.delete(roomId);
     this.lastUserSpeechAtByRoom.delete(roomId);
