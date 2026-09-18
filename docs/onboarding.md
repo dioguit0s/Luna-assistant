@@ -80,7 +80,10 @@ No Windows o `naudiodon` precisa do PortAudio — detalhes e alternativa por WAV
 [README do client-test](../luna-client-test/README.md).
 
 Fale e ouça a resposta. Nos logs do servidor procure `ttfab` (meta: < 800 ms) e
-`model_decision_ms`.
+`model_decision_ms`. O `ttfab` traz dois limites (`latency_ms` e `since_turn_start_ms`)
+porque a medição é um intervalo, não um número — ver
+[Métrica: TTFAB](arquitetura-servidor.md#métrica-ttfab) antes de concluir que a meta foi
+batida com base só no primeiro.
 
 ### 1.3 Verificação do nível 1
 
@@ -244,6 +247,17 @@ Suba `GEMINI_DEBUG_MESSAGES=true` (ou `OPENAI_DEBUG_MESSAGES=true`) e observe `t
 
 Medições de 19/07/2026 **não** mostraram ganho ajustando a janela do VAD — o gargalo
 está no modelo, não no endpointing. Os knobs seguem como ferramenta de diagnóstico.
+
+Antes de acreditar num `latency_ms` bom, confira no mesmo log de `ttfab`:
+
+- `session_cold: true` — o turno pagou um `live.connect()` que o `latency_ms` não conta.
+  É a causa mais provável de "a primeira pergunta depois de um tempo parado demora".
+- `since_turn_start_ms` muito acima de `latency_ms`, com `transcript_anchor_moves` alto —
+  a transcrição atrasada está descontando o número de baixo.
+
+No satélite, a linha `[lat]` (uma por resposta) quebra o orçamento entre wake word, rede,
+modelo e prebuffer local. `speaking_start->audio1` é o número do modelo; `audio1->gate`
+é o custo local, e dezenas de ms é o esperado.
 
 ### Retreinar a wake word
 
