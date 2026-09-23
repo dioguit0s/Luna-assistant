@@ -60,6 +60,28 @@ config["features"] = [
     },
 ]
 
+# Negativos pt-BR opcionais (ver 04b_generate_custom_negatives.py e "Se o
+# modelo dispara demais" no README) — só entra se alguém rodou aquela etapa.
+# `sampling_weight` alto de propósito: são poucas amostras comparado aos
+# negativos em inglês baixados prontos, e são exatamente as frases que o
+# treino atual nunca viu como negativo (a causa mais provável de disparo em
+# frase aleatória em pt-BR).
+_custom_ptbr = "negative_datasets/custom_ptbr"
+if os.path.isdir(_custom_ptbr):
+    config["features"].append(
+        {
+            "features_dir": _custom_ptbr,
+            "sampling_weight": 15.0,
+            "penalty_weight": 1.0,
+            "truth": False,
+            "truncation_strategy": "random",
+            "type": "mmap",
+        }
+    )
+    print(f"[config] incluindo negativos customizados de {_custom_ptbr}")
+else:
+    print(f"[config] {_custom_ptbr} não existe — pulando negativos pt-BR (etapa opcional, ver README)")
+
 config["training_steps"] = [5000]  # reduzido de 10000: treino em CPU vaza memória e
 # precisa de reinícios periódicos (ver scripts/06b_train_loop.sh); menos passos
 # = menos ciclos de OOM+retomada até concluir.
