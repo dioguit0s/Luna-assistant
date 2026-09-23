@@ -49,12 +49,13 @@ docker build -t mww-train .   # uma vez
 Ou etapa por etapa (útil para rodar o treino em background sem travar o terminal):
 
 ```bash
-./run.sh samples      # gera ~2000 "hey luna" sintéticas (Piper TTS)
-./run.sh augdata       # baixa RIR/AudioSet/FMA para augmentation
-./run.sh negatives     # baixa os datasets negativos pré-processados
-./run.sh features      # aplica augmentation e gera os espectrogramas
-./run.sh train         # treina (a etapa longa)
-./run.sh export        # copia o .tflite final e escreve o manifesto JSON
+./run.sh samples            # gera ~2000 "hey luna" sintéticas (Piper TTS)
+./run.sh augdata             # baixa RIR/AudioSet/FMA para augmentation
+./run.sh negatives           # baixa os datasets negativos pré-processados
+./run.sh custom_negatives    # opcional: negativos pt-BR próprios, ver seção abaixo
+./run.sh features            # aplica augmentation e gera os espectrogramas
+./run.sh train               # treina (a etapa longa)
+./run.sh export              # copia o .tflite final e escreve o manifesto JSON
 ```
 
 Cada etapa pula sozinha se a saída já existir — pode interromper e retomar.
@@ -86,3 +87,39 @@ desistir, tente nesta ordem (mais barato → mais caro):
 3. Ajustar os pesos de amostragem/penalidade em `05_write_training_config.py`.
 4. Se nada disso ajudar e o "Hey Luna" continuar ruim, `okay_nabu` fica como fallback —
    ele já está validado e funcionando no satélite.
+
+## Se o modelo dispara demais (falso-positivo em frase aleatória)
+
+Sintoma oposto ao acima: o wake word ativa sozinho ouvindo conversa normal, TV, etc.
+Ordem recomendada (mais barato → mais caro):
+
+1. **Recalibrar o cutoff com áudio pt-BR de verdade primeiro.** O procedimento de
+   `luna-desktop/wakeword-sidecar/README.md` ("Calibração do cutoff no desktop") vale
+   igual para o satélite: grave ≥15 min de TV/conversa **em português** (o único teste
+   feito até hoje foi 50s de ruído sem fala nenhuma — não prova nada sobre frase real) e
+   ≥5 repetições de "Hey Luna", rode com `--trace`/`WAKE_DEBUG` e compare `max_mean_prob`.
+   Se a folga entre o pior positivo e o pior negativo for pequena (<0,05), subir só o
+   `WAKE_PROB_CUTOFF` (`luna-firmware/include/config.h`) ou `WAKEWORD_THRESHOLD`
+   (`.env` do `luna-desktop`) já resolve, sem retreinar nada.
+2. **Se a folga for grande mesmo assim** (ou seja, o cutoff já está bem calibrado e o
+   problema é o modelo confundir a frase, não o limiar): o suspeito é os negativos de
+   treino serem só em inglês (`speech`/`dinner_party`/`no_speech`, baixados por
+   `04_download_negatives.sh`) — nenhuma frase em português entrou como "isto não é a
+   wake word" durante o treino. `./run.sh custom_negatives` (opcional, roda sempre e é
+   no-op se vazio) existe para isto:
+   - Grave (ou baixe de um corpus como o Common Voice pt-BR) alguns clipes de fala
+     comum em português: TV, conversa de fundo, e principalmente **palavras parecidas
+     com "hey luna"** — "lua", "uma", "luna" sem o "hey", "e aí, Luna?" — as que mais
+     provavelmente cruzam o cutoff por acidente.
+   - Salve cada clipe como `.wav` (mono, qualquer sample rate) em
+     `wake-training/work/custom_negatives_wav/`.
+   - `./run.sh custom_negatives` gera as features em
+     `work/negative_datasets/custom_ptbr/`; `05_write_training_config.py` inclui esse
+     diretório como negativo (`sampling_weight` alto, 15.0, porque tende a ter bem menos
+     amostras que os negativos em inglês) automaticamente se a pasta existir — nenhuma
+     mudança manual de config necessária.
+   - Retreine (`./run.sh train`) e reexporte (`./run.sh export`).
+3. **Se ainda disparar**: considerar ligar `time_mask_*`/`freq_mask_*` (SpecAugment,
+   hoje zerados em `05_write_training_config.py`) ou subir `negative_class_weight`
+   (hoje 20) — não testado neste repositório ainda, ver comentários no notebook oficial
+   do microWakeWord antes de mexer.
