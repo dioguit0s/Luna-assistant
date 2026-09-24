@@ -108,6 +108,8 @@ luna-desktop/
 
 ## Fora de escopo para v1
 
+A janela de configurações e parte do resto desta lista viraram o [painel de controle](painel-de-controle.md) ([ADR 010](adr/010-painel-de-controle-e-api-admin.md)).
+
 - Janela de configurações / troca de sala em runtime.
 - Histórico/transcrição de conversa na UI.
 - Atalhos de Home Assistant na tray.
