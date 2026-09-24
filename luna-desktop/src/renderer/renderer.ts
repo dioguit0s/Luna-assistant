@@ -68,10 +68,14 @@ async function main(): Promise<void> {
       ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
     };
     let next: MediaStream;
+    let opened = deviceId;
     try {
       next = await navigator.mediaDevices.getUserMedia({ audio: constraints });
     } catch (err) {
       if (!deviceId) throw err;
+      // Em uso fica o padrão: escolher o mesmo mic de novo depois de replugar
+      // tem que tentar abrir, não parecer "já é esse".
+      opened = '';
       // Mic escolhido sumiu (USB desplugado): cai para o padrão em vez de
       // deixar a Luna surda, e avisa — o main mostra no tray.
       window.luna.sendCaptureError(
@@ -84,17 +88,24 @@ async function main(): Promise<void> {
     stream = next;
     source = audioCtx.createMediaStreamSource(next);
     source.connect(captureNode);
-    currentMicId = deviceId;
+    currentMicId = opened;
   }
 
   await openMic('');
 
+  // Trocas em fila: duas escolhas rápidas no painel não podem terminar com o
+  // `getUserMedia` da primeira resolvendo por último e vencendo.
+  let micSwitch: Promise<void> = Promise.resolve();
+
   window.luna.onSetAudioDevices(({ micDeviceId, speakerDeviceId }) => {
-    if (micDeviceId !== currentMicId) {
-      openMic(micDeviceId).catch((err: unknown) => {
+    micSwitch = micSwitch.then(async () => {
+      if (micDeviceId === currentMicId) return;
+      try {
+        await openMic(micDeviceId);
+      } catch (err) {
         window.luna.sendCaptureError(`falha ao trocar de microfone: ${err instanceof Error ? err.message : String(err)}`);
-      });
-    }
+      }
+    });
     // `setSinkId` no AudioContext (Chromium 110+) — ainda fora do lib.dom do TS.
     const ctx = audioCtx as AudioContext & { setSinkId?: (id: string) => Promise<void> };
     ctx.setSinkId?.(speakerDeviceId).catch((err: unknown) => {

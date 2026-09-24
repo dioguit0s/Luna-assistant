@@ -5,6 +5,7 @@ import type { SettingsStore } from './SettingsStore.js';
 import {
   ENV_SEEDS,
   GROUP_NAMES,
+  SECRET_FIELDS,
   VALIDATORS,
   seedFromConfig,
   toStored,
@@ -51,39 +52,59 @@ export class RuntimeSettings {
   ): RuntimeSettings {
     const seed = seedFromConfig(base, loadDeviceSeed(), env);
     const values = { ...seed };
-    const seeded: GroupName[] = [];
+    const toSeed: GroupName[] = [];
+    const filled: string[] = [];
 
+    // Tudo validado ANTES de qualquer gravação. Uma semente inválida (`.env`
+    // sem a chave do provider, `HA_URL` sem esquema) gravada no banco viraria
+    // a verdade: o operador corrigiria o `.env`, o banco continuaria vencendo,
+    // e o boot falharia para sempre — sem API admin de pé para consertar.
     for (const group of GROUP_NAMES) {
       const stored = store.get(group);
+      const set = (value: unknown): void => {
+        (values as Record<GroupName, unknown>)[group] = value;
+      };
       if (stored === undefined) {
-        store.set(group, toStored(group, seed[group]));
-        seeded.push(group);
+        toSeed.push(group);
+        set(validate(group, seed[group], toStored(group, seed[group]), 'no .env/devices.json'));
         continue;
       }
-      try {
-        // Validar por cima da semente preenche campo novo que uma versão
-        // anterior não gravava — a migração do conteúdo é aditiva também.
-        (values as Record<GroupName, unknown>)[group] = VALIDATORS[group](seed[group] as never, stored);
-      } catch (err) {
-        throw new Error(
-          `Configuração "${group}" inválida no banco: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
+      // Validar por cima da semente preenche campo novo que uma versão
+      // anterior não gravava — a migração do conteúdo é aditiva também.
+      const value = validate(group, seed[group], stored, 'no banco') as unknown as Record<string, unknown>;
+      // Segredo vazio no banco é "nunca definido", não "apagado de
+      // propósito" (a API não apaga segredo): o `.env` completa. É a saída
+      // para quem semeou sem a chave e depois a pôs no `.env`.
+      const seedValue = seed[group] as unknown as Record<string, unknown>;
+      let changed = false;
+      for (const secret of SECRET_FIELDS[group] ?? []) {
+        if (!value[secret] && seedValue[secret]) {
+          value[secret] = seedValue[secret];
+          filled.push(`${group}.${secret}`);
+          changed = true;
+        }
       }
+      set(value);
+      if (changed) store.set(group, toStored(group, values[group]));
     }
 
-    if (seeded.length > 0) {
+    for (const group of toSeed) store.set(group, toStored(group, values[group]));
+
+    if (toSeed.length > 0) {
       getLogger().info(
-        { event: 'config_seeded', groups: seeded },
-        `Configuração semeada a partir do .env/devices.json: ${seeded.join(', ')}`,
+        { event: 'config_seeded', groups: toSeed },
+        `Configuração semeada a partir do .env/devices.json: ${toSeed.join(', ')}`,
+      );
+    }
+    if (filled.length > 0) {
+      getLogger().info(
+        { event: 'config_env_filled', fields: filled },
+        `Segredos vazios no banco completados pelo .env: ${filled.join(', ')}`,
       );
     }
 
     const settings = new RuntimeSettings(base, store, values);
-    settings.warnIgnoredEnv(seed, seeded, env);
-    // Grupo semeado de um `.env` sem a chave do provider falha aqui, como o
-    // `loadConfig` falhava antes do banco existir.
-    VALIDATORS.provider(values.provider, {});
+    settings.warnIgnoredEnv(seed, toSeed, env);
     return settings;
   }
 
@@ -182,5 +203,21 @@ export class RuntimeSettings {
           'a configuração de runtime vive no banco — edite pelo painel',
       );
     }
+  }
+}
+
+/** Valida um grupo e diz de onde veio o valor ruim — é a mensagem do boot que falhou. */
+function validate<G extends GroupName>(
+  group: G,
+  current: SettingsGroups[G],
+  raw: unknown,
+  where: string,
+): SettingsGroups[G] {
+  try {
+    return VALIDATORS[group](current, raw);
+  } catch (err) {
+    throw new Error(
+      `Configuração "${group}" inválida ${where}: ` + (err instanceof Error ? err.message : String(err)),
+    );
   }
 }

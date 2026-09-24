@@ -200,7 +200,10 @@ curl -s "http://127.0.0.1:$WS_PORT/health"
 # restart manual. Token do HA e chaves de provider: pelo painel, não aqui.
 sudo nano /etc/luna-server.env && sudo systemctl restart luna-server
 
-# API admin (da própria máquina ou da LAN, nunca de fora)
+# API admin (da própria máquina ou da LAN, nunca de fora). O filtro de rede
+# aceita loopback: um proxy ou túnel NO MESMO HOST (ex.: Cloudflare Tunnel)
+# apontado para esta porta faria toda requisição de fora chegar como
+# 127.0.0.1, e só o token protegeria. Não exponha esta porta por túnel.
 curl -s -H "Authorization: Bearer $LUNA_ADMIN_TOKEN" "http://127.0.0.1:$WS_PORT/admin/v1/status"
 ```
 
@@ -215,3 +218,25 @@ sudo systemctl restart luna-server
 
 Reverter no Git (`git revert` + push na `main`) também funciona e é preferível,
 já que mantém o servidor e o repositório em sincronia.
+
+**Rollback para trás de uma migração do banco não funciona só com o symlink.**
+O código recusa abrir um banco com `user_version` maior do que as migrações que
+conhece (é de propósito: ler um schema desconhecido é pior que parar). Então,
+se a release nova migrou o banco (ex.: a v3, tabela `settings`, do painel de
+controle) e é preciso voltar para uma anterior — por symlink **ou** por `git
+revert` —, o serviço antigo morre no boot com `Banco de lembretes na versão 3,
+mais nova que este código (2)`, e o rollback automático do `activate.sh` também
+falha. O `activate.sh` não restaura banco nenhum. Para voltar:
+
+```bash
+sudo systemctl stop luna-server
+ls -1t /var/lib/luna-server/luna.db.pre-v*     # cópia feita pelo próprio processo antes de migrar
+sudo -u luna cp /var/lib/luna-server/luna.db /var/lib/luna-server/luna.db.descartado-$(date +%s)
+sudo -u luna cp /var/lib/luna-server/luna.db.pre-v2-<carimbo> /var/lib/luna-server/luna.db
+sudo -u luna rm -f /var/lib/luna-server/luna.db-wal /var/lib/luna-server/luna.db-shm
+# troque o symlink como acima e:
+sudo systemctl start luna-server
+```
+
+Isso **perde** o que mudou depois da cópia: lembretes criados e toda a
+configuração feita pelo painel (que volta a vir do `.env`/`devices.json`).

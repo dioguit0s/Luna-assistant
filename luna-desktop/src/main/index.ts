@@ -9,7 +9,7 @@
 // avaliado de forma assíncrona e o evento 'ready' pode passar antes de os
 // listeners serem registrados.
 
-import { app, shell } from 'electron';
+import { app, dialog, shell } from 'electron';
 
 import { createTray, type TrayController } from './tray.js';
 import { isAutostartEnabled, setAutostart, wasAutoLaunched } from './autostart.js';
@@ -22,7 +22,11 @@ import {
   saveLocalSettings,
   type DesktopConfig,
 } from './config.js';
-import { connectionChanged, type ResolvedLocalSettings } from './local-settings.js';
+import {
+  LocalSettingsError,
+  connectionChanged,
+  type ResolvedLocalSettings,
+} from './local-settings.js';
 import { Session } from './session.js';
 import { LunaWsClient } from './ws/client.js';
 import { createCaptureWindow, type CaptureWindow } from './window.js';
@@ -315,6 +319,28 @@ if (!gotLock) {
           view: localView,
           async save(patch) {
             const before = local ?? readLocalSettings();
+            // Os segredos gravados seguem a URL do servidor: o token admin e o
+            // segredo do satélite passam a ir para o host novo. Um renderer do
+            // painel comprometido poderia mudar a URL para exfiltrá-los — a
+            // confirmação é um diálogo nativo, fora do alcance dele.
+            const newUrl = patch.serverUrl?.trim().replace(/\/+$/, '');
+            const secretsFollow =
+              (before.adminToken && patch.adminToken === undefined) ||
+              (before.authSecret && patch.authSecret === undefined);
+            if (newUrl && newUrl !== before.serverUrl && secretsFollow) {
+              const { response } = await dialog.showMessageBox({
+                type: 'question',
+                buttons: ['Trocar servidor', 'Cancelar'],
+                defaultId: 1,
+                cancelId: 1,
+                title: 'Luna — trocar servidor',
+                message: `Usar o servidor ${newUrl}?`,
+                detail:
+                  'O segredo do satélite e o token admin já gravados passam a ser enviados para ele. ' +
+                  'Confirme só se foi você quem pediu essa troca.',
+              });
+              if (response !== 0) throw new LocalSettingsError('serverUrl', 'Troca de servidor cancelada.');
+            }
             local = saveLocalSettings(patch);
             if (patch.micDeviceId !== undefined || patch.speakerDeviceId !== undefined) {
               captureWindow?.setAudioDevices(local.micDeviceId, local.speakerDeviceId);

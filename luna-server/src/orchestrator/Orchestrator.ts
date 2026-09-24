@@ -369,8 +369,8 @@ export class Orchestrator implements AlarmAudioSink {
     // primeiro chunk de áudio: um provider criado por qualquer outro caminho
     // — o disparo de alarme, que fala sem ter sido perguntado — nasceria sem
     // `onAudioResponse` e a fala cairia no vazio, sem erro nenhum.
-    roomManager.setProviderBinder((roomId, provider) =>
-      this.bindProviderCallbacks(roomId, provider),
+    roomManager.setProviderBinder((roomId, provider, providerName) =>
+      this.bindProviderCallbacks(roomId, provider, providerName),
     );
   }
 
@@ -428,7 +428,7 @@ export class Orchestrator implements AlarmAudioSink {
    * se um caminho novo chamar de novo — dois binds no mesmo provider dobrariam
    * cada `speaking_start` e cada frame de áudio.
    */
-  private bindProviderCallbacks(roomId: string, provider: IAudioProvider): void {
+  private bindProviderCallbacks(roomId: string, provider: IAudioProvider, sessionProviderName?: string): void {
     if (this.boundProviders.has(provider)) return;
     this.boundProviders.add(provider);
 
@@ -437,7 +437,10 @@ export class Orchestrator implements AlarmAudioSink {
     const deviceId = (): string | null => this.lastDeviceIdByRoom.get(roomId) ?? null;
 
     const tracker = this.getTtfabTracker(roomId);
-    const providerName = getActiveProviderName(this.config);
+    // O provider desta sessão, não o do `.env`: depois do ADR 010 ele vem do
+    // banco e pode ser trocado pelo painel. Rotular o `ttfab` com o do boot
+    // estragaria justamente a comparação Gemini × OpenAI.
+    const providerName = sessionProviderName ?? getActiveProviderName(this.config);
 
     provider.onUserSpeech(() => {
       tracker.markUserSpeech();

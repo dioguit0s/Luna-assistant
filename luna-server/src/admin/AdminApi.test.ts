@@ -206,6 +206,18 @@ describe('API admin', () => {
     assert.equal(h.settings.current().haToken, 'um-token-longo-do-ha-abcd');
   });
 
+  it('testar conexão com URL de outra origem não leva o token gravado', async () => {
+    // Estado do teste anterior: HA gravado em http://192.168.0.10:8123 com token.
+    const res = await call(h, 'POST', '/admin/v1/settings/ha/test', { url: 'http://192.168.0.99:9999' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, false);
+    assert.match(res.body.error, /digite o token/);
+  });
+
+  it('caminho com escape malformado é 400, não 500', async () => {
+    assert.equal((await call(h, 'PUT', '/admin/v1/satellites/%E0', { name: 'x' })).status, 400);
+  });
+
   it('grupos fora da lista editável não existem na rota genérica', async () => {
     assert.equal((await call(h, 'GET', '/admin/v1/settings/rooms')).status, 404);
   });

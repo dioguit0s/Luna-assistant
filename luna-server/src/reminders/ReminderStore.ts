@@ -122,8 +122,10 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
    * versão anterior **não** consegue abrir um banco com `user_version` maior
    * que o número de migrações que ela conhece (ver `migrate`), então esta é a
    * primeira migração que torna o rollback do `activate.sh` letal se o banco
-   * não tiver backup. O `activate.sh` copia o `.db` antes de trocar o symlink
-   * justamente por isso.
+   * não tiver backup. Quem copia é o próprio processo, antes de migrar
+   * (`backupBeforeMigrating`, `luna.db.pre-v<N>-*`) — o `activate.sh` não
+   * restaura banco nenhum; voltar para trás de uma migração é restaurar essa
+   * cópia à mão (ver "Rollback manual" em `deploy/README.md`).
    */
   (db) => {
     db.exec(`
@@ -140,6 +142,9 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
    * não numa lista de migrações própria do `SettingsStore`, porque o banco é
    * um só e `user_version` também: duas listas contando a mesma versão
    * pisariam uma na outra.
+   *
+   * Como toda migração, torna o rollback para a release anterior (que conhece
+   * só 2) impossível sem restaurar `luna.db.pre-v2-*` — ver `deploy/README.md`.
    */
   (db) => {
     db.exec(`

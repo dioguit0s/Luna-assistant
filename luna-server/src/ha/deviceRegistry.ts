@@ -134,9 +134,14 @@ export class DeviceRegistry {
     };
   }
 
-  /** Dispositivos de um cômodo, para log e diagnóstico. */
+  /**
+   * Dispositivos de uma **área** do HA. Não aplica o mapeamento sala → área:
+   * quem chama com a sala da sessão passa `areaFor(sala)` antes. Aplicar aqui
+   * desviaria também uma área real pedida pelo nome ("o que tem no
+   * escritório?") para a área mapeada a ela.
+   */
   devicesInRoom(roomId: string): DeviceEntry[] {
-    const room = this.areaFor(roomId);
+    const room = normalize(roomId);
     return this.distinctEntries().filter((entry) => normalize(entry.roomId) === room);
   }
 

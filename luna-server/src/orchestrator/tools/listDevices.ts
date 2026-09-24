@@ -49,7 +49,9 @@ export function createListDevicesHandler(deps: ListDevicesDeps): ToolHandler {
     // Cômodo pedido que não existe não é erro: cai no cômodo da sessão, e o
     // sinalizador abaixo deixa a Luna dizer "não conheço esse ambiente" antes
     // de listar o que há aqui — em vez de silenciosamente listar o lugar errado.
-    const room = matched ?? ctx.roomId;
+    // O mapeamento sala → área do painel (ADR 010) vale só para a sala da
+    // sessão: um cômodo pedido pelo nome já é uma área real do HA.
+    const room = matched ?? registry.areaFor(ctx.roomId);
     const unknownRoom = requested && !matched ? requested : null;
 
     const devices = spokenNames(registry.devicesInRoom(room));

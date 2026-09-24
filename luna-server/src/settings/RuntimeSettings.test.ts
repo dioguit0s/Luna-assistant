@@ -111,6 +111,32 @@ describe('RuntimeSettings', () => {
     );
   });
 
+  it('semente inválida não é gravada: corrigir o .env destrava o boot seguinte', () => {
+    assert.throws(() =>
+      RuntimeSettings.open({ ...base, geminiApiKey: '' }, store, () => EMPTY_OVERRIDES, {}),
+    );
+    assert.equal(store.get('provider'), undefined, 'nada do provider gravado');
+    assert.equal(store.get('ha'), undefined, 'nem dos outros grupos');
+
+    const fixed = RuntimeSettings.open(base, store, () => EMPTY_OVERRIDES, {});
+    assert.equal(fixed.current().geminiApiKey, 'gemini-key-do-env-1234');
+  });
+
+  it('HA_URL sem esquema falha já no primeiro boot, não no segundo', () => {
+    assert.throws(
+      () => RuntimeSettings.open({ ...base, haUrl: '192.168.0.10:8123' }, store, () => EMPTY_OVERRIDES, {}),
+      /"ha" inválida no \.env/,
+    );
+    assert.equal(store.get('ha'), undefined);
+  });
+
+  it('segredo vazio no banco é completado pelo .env', () => {
+    RuntimeSettings.open({ ...base, haToken: '' }, store, () => EMPTY_OVERRIDES, {});
+    const reopened = RuntimeSettings.open(base, store, () => EMPTY_OVERRIDES, { HA_TOKEN: 'token-do-env' });
+    assert.equal(reopened.get('ha').token, 'token-do-env');
+    assert.deepEqual((store.get('ha') as { token: string }).token, 'token-do-env', 'e gravado');
+  });
+
   it('notifica só os ouvintes do grupo alterado, com o valor novo e o anterior', () => {
     const settings = RuntimeSettings.open(base, store, () => EMPTY_OVERRIDES, {});
     const calls: string[] = [];

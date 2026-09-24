@@ -66,7 +66,10 @@ cliente de áudio de tempo real e um cliente de formulário.
 - **Só aceita origem de rede privada ou loopback** (`remoteAddress` em
   `10/8`, `172.16/12`, `192.168/16`, `127/8`, `::1`). É defesa em
   profundidade para o dia em que alguém abrir a porta no roteador por causa
-  dos satélites — não substitui o token.
+  dos satélites — não substitui o token. Limite conhecido: um proxy ou túnel
+  no **mesmo host** (o homeserver roda um Cloudflare Tunnel) faria toda
+  requisição de fora chegar como loopback; a porta do `luna-server` não pode
+  entrar num túnel.
 - **Sem TLS nesta versão.** Na LAN de casa, com um usuário só, o risco aceito é
   alguém na mesma rede capturar o token em trânsito. Se o painel um dia sair da
   LAN, TLS deixa de ser opcional e este ADR precisa ser revisto.

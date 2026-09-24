@@ -14,7 +14,7 @@ interface RoomSession {
 }
 
 /** Registra os callbacks do port num provider recém-criado. Ver `setProviderBinder`. */
-export type ProviderBinder = (roomId: string, provider: IAudioProvider) => void;
+export type ProviderBinder = (roomId: string, provider: IAudioProvider, providerName?: string) => void;
 
 export class RoomManager {
   private readonly sessions = new Map<string, RoomSession>();
@@ -143,7 +143,7 @@ export class RoomManager {
 
     // Antes de `sessions.set`: nenhum caminho pode alcançar este provider sem
     // os callbacks já registrados.
-    this.bindProvider(roomId, provider);
+    this.bindProvider(roomId, provider, config.audioProvider);
 
     this.sessions.set(roomId, { provider });
     getLogger().info(

@@ -123,11 +123,16 @@ export class AdminApi {
   ): Promise<{ status?: number; body: unknown }> {
     const path = url.split('?')[0]!;
     if (!path.startsWith(PREFIX)) throw new HttpError(404, 'rota desconhecida');
-    const segments = path
-      .slice(PREFIX.length)
-      .split('/')
-      .filter(Boolean)
-      .map((s) => decodeURIComponent(s));
+    let segments: string[];
+    try {
+      segments = path
+        .slice(PREFIX.length)
+        .split('/')
+        .filter(Boolean)
+        .map((s) => decodeURIComponent(s));
+    } catch {
+      throw new HttpError(400, 'caminho malformado');
+    }
     const method = req.method ?? 'GET';
     const [head, id, action] = segments;
 
@@ -281,7 +286,7 @@ export class AdminApi {
       effective_area: registry.areaFor(roomId),
       // O mesmo que `list_devices` responderia nesta sala (ADR 009): nomes,
       // sem estado e sem I/O.
-      devices: registry.devicesInRoom(roomId).map((d) => ({
+      devices: registry.devicesInRoom(registry.areaFor(roomId)).map((d) => ({
         device: d.device,
         name: d.name ?? null,
         entity_id: d.entityId,
@@ -379,29 +384,39 @@ export class AdminApi {
   /**
    * Testa com o que veio no corpo, completando com o que está gravado — dá
    * para testar uma URL nova sem redigitar o token.
+   *
+   * Mas o token gravado **só** acompanha uma URL da mesma origem da gravada.
+   * Sem isso, `{"url":"https://qualquer-host"}` faria o servidor mandar o
+   * `HA_TOKEN` para lá — e quem tem o token admin extrairia um segredo que a
+   * API jura nunca devolver (ADR 010, decisão 4).
    */
   private async testConnection(group: GroupName, body: unknown): Promise<unknown> {
+    if (group !== 'ha' && group !== 'calendar') {
+      throw new HttpError(404, `não há teste de conexão para "${group}"`);
+    }
     const patch = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
-    const pick = (key: string, current: string): string =>
-      typeof patch[key] === 'string' && (patch[key] as string).trim() !== ''
-        ? (patch[key] as string).trim()
-        : current;
+    const given = (key: string): string =>
+      typeof patch[key] === 'string' ? (patch[key] as string).trim() : '';
+
+    const current = this.deps.settings.get(group);
+    const url = given('url') || current.url;
+    let token = given('token');
+    if (!token) {
+      if (!sameOrigin(url, current.url)) {
+        return {
+          ok: false,
+          latency_ms: 0,
+          error: 'URL diferente da gravada: digite o token para testar',
+        };
+      }
+      token = current.token;
+    }
 
     if (group === 'ha') {
-      const current = this.deps.settings.get('ha');
-      const result = await this.deps.haClient.checkConnection({
-        haUrl: pick('url', current.url),
-        haToken: pick('token', current.token),
-      });
+      const result = await this.deps.haClient.checkConnection({ haUrl: url, haToken: token });
       return { ok: result.ok, latency_ms: result.latencyMs, error: result.error ?? null };
     }
-
-    if (group === 'calendar') {
-      const current = this.deps.settings.get('calendar');
-      return this.testCalendar(pick('url', current.url), pick('token', current.token));
-    }
-
-    throw new HttpError(404, `não há teste de conexão para "${group}"`);
+    return this.testCalendar(url, token);
   }
 
   /**
@@ -454,6 +469,14 @@ export class AdminApi {
     // Depois de a resposta sair: o shutdown fecha o servidor HTTP.
     setTimeout(() => this.deps.onRestart(), 200).unref();
     return { restarting: true };
+  }
+}
+
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
   }
 }
 
