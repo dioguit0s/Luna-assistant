@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      CSP restritiva (ADR 010, decisão 6): o painel exibe dado vindo de fora
+      (nomes do HA, rótulos de lembrete) e não precisa de rede nenhuma — toda
+      chamada passa pelo processo principal via IPC. Nada inline, nada remoto.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'"
+    />
+    <title>Luna — Configurações</title>
+    <link rel="stylesheet" href="./panel.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-dot" id="brand-dot"></span>
+        <div>
+          <div class="brand-name">Luna</div>
+          <div class="brand-sub" id="brand-sub">painel de controle</div>
+        </div>
+      </div>
+      <nav id="nav"></nav>
+    </aside>
+    <main>
+      <header class="topbar">
+        <h1 id="page-title"></h1>
+        <button type="button" class="ghost" id="refresh">Atualizar</button>
+      </header>
+      <section id="page"></section>
+    </main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script src="./panel.js"></script>
+  </body>
+</html>

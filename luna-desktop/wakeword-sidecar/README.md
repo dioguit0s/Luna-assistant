@@ -65,6 +65,7 @@ M4 vai parsear. Todo log humano (incluindo `--trace`) vai para stderr.
 |---|---|---|
 | `ready` | ao carregar o modelo | `model`, `model_sha256`, `stride`, `threshold`, `input_scale`, `input_zero_point` |
 | `wake` | a cada disparo | `audio_ms`, `prob`, `mean_prob`, `inference` (+ `label` no modo `--wav`) |
+| `score` | só com `--score-interval-ms N` (`--stdin`), a cada N ms de áudio | `audio_ms`, `mean_prob` (máximo da média no intervalo) — alimenta o teste de mic do painel |
 | `eof` | fim de cada clipe (`--wav`) ou do stdin | `inferences`, `max_mean_prob`, `detections` (+ `label`) |
 | `error` | falha fatal (modelo ausente, geometria errada, `.wav` inválido) | `message` (+ `label` se for de um clipe específico) |
 

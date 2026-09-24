@@ -20,6 +20,12 @@ describe('parseWakewordLine', () => {
     assert.equal(parsed.event === 'ready' && parsed.model, 'hey_luna_trained.tflite');
   });
 
+  it('parseia o evento score (teste de mic do painel)', () => {
+    const parsed = parseWakewordLine(JSON.stringify({ event: 'score', audio_ms: 1200.0, mean_prob: 0.412 }));
+    assert.ok(parsed);
+    assert.equal(parsed.event === 'score' && parsed.mean_prob, 0.412);
+  });
+
   it('parseia o evento wake', () => {
     const line = JSON.stringify({ event: 'wake', audio_ms: 4320.0, prob: 0.9843, mean_prob: 0.9781, inference: 216 });
     const parsed = parseWakewordLine(line);

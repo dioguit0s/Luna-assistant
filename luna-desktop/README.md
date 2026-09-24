@@ -29,20 +29,22 @@ Marco 5 (em andamento): empacotamento num instalador Windows (ver seção
 
 ```bash
 cd luna-desktop
-copy .env.example .env
 npm install
 ```
 
 O `npm install` baixa o binário do Electron (~150 MB). Atrás de proxy, use
 `ELECTRON_MIRROR` ou coloque o zip à mão em `%LOCALAPPDATA%\electron\Cache`.
 
-Preencha o `.env`:
+**Configuração pelo painel.** Na primeira execução sem segredo configurado, o
+app abre **Configurações → Este computador**: URL do servidor (`ws://host:porta`),
+sala (`room_id`), segredo do satélite (idêntico ao `WS_AUTH_SECRET` do
+`luna-server`) e o token admin (o `LUNA_ADMIN_TOKEN` do servidor, que libera as
+telas do servidor no painel). Grava em `userData/settings.json`, com os dois
+segredos cifrados pelo `safeStorage` (DPAPI) — nunca em claro.
 
-```
-WS_AUTH_SECRET=dev-secret-change-me   # precisa ser IDÊNTICO ao do luna-server
-WS_SERVER_URL=ws://localhost:8080     # ou o host/porta real do luna-server
-ROOM_ID=desktop_diogo
-```
+O `.env` continua funcionando como **semente opcional** (`copy .env.example .env`):
+o que o painel grava vence o que está nele. Ver
+[`docs/painel-de-controle.md`](../docs/painel-de-controle.md).
 
 `DEVICE_ID` não entra no `.env` — é um UUID gerado sozinho na primeira
 execução e persistido em `userData/device.json` (`%APPDATA%\luna-desktop\`).
@@ -211,12 +213,9 @@ python -m venv .venv
 Mesmos passos de [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md),
 só que a partir da instalação em vez do checkout do repo.
 
-**`.env` na primeira execução:** o instalador não pergunta nada — na primeira
-vez que o app roda sem um `.env` em `userData`
-(`%APPDATA%\luna-desktop\.env`), ele copia sozinho o modelo bundlado
-(`.env.example`) pra lá e fica em estado de erro até você abrir
-"Configurações" no menu, preencher `WS_AUTH_SECRET` (idêntico ao do
-`luna-server`) e reiniciar o app.
+**Primeira execução:** o instalador não pergunta nada — o app sobe em estado de
+erro e abre **Configurações → Este computador** sozinho. Preenchido o segredo,
+ele conecta na hora, sem reiniciar.
 
 ## Bandeja
 

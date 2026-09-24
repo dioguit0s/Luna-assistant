@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** Planejado — inventário fechado, nenhum marco iniciado
+**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 não iniciada
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -224,6 +224,38 @@ separados dos eventos da agenda.
 
 Tudo marcado **depois** fica fora destes marcos: exige protocolo e/ou firmware e
 merece plano próprio.
+
+### O que a v1 entregou
+
+- **Servidor:** `settings/` (SQLite, semeadura, `config_env_ignored`, aplicação a quente por
+  grupo) e `admin/` (API da seção acima). Unit com `StateDirectoryMode=0700`.
+- **Desktop:** janela `panel/` isolada (sandbox, partição própria, CSP), cliente admin e
+  whitelist de métodos em `src/main/admin/` e `src/main/panel/`, configuração local em
+  `userData/settings.json` com segredos no `safeStorage`. O item "Configurações" da bandeja
+  abre o painel; sem segredo configurado, o app abre o painel sozinho.
+- **Sidecar:** evento `score` (`--score-interval-ms`) para o medidor de wake word ao vivo.
+
+Diferenças em relação ao inventário:
+
+- O item "Mutar, forçar escuta, autostart" ganhou tela, mas continua também na bandeja.
+- "Configuração de bootstrap, só leitura" e "Reiniciar o servidor" ficaram numa tela
+  **Servidor** própria.
+- A tela de salas lista as áreas do HA que têm ao menos um dispositivo acionável
+  (`switch`/`light`/`fan`) — área vazia não aparece, porque o registro só conhece o que
+  descobriu.
+- O semáforo do provider reflete a **última sessão aberta**, não uma sonda: até alguém
+  falar com a Luna depois do boot, fica amarelo ("nenhuma sessão aberta").
+
+### Verificação manual pendente
+
+1. No servidor: reinstalar a unit (`sudo cp` + `daemon-reload`, ver `deploy/README.md`) e
+   definir `LUNA_ADMIN_TOKEN` em `/etc/luna-server.env` **antes** do deploy — o
+   `activate.sh` recusa o deploy enquanto a unit divergir.
+2. No desktop: token admin em Este computador; Início com semáforos verdes.
+3. Marco 3: painel aberto e fechado com a voz funcionando o tempo todo.
+4. Marco 4: trocar o token do HA pelo painel e acender uma luz sem restart; trocar a voz e
+   ouvir a nova na conversa seguinte.
+5. Marco 5: mapear `desktop_diogo → <área>` e "acende a luz" a partir do desktop.
 
 ## Pegadinhas conhecidas antes de começar
 
