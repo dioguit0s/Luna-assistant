@@ -143,8 +143,20 @@ describe('RuntimeSettings', () => {
     settings.onChange('ha', (next, prev) => calls.push(`ha:${prev.url}->${next.url}`));
     settings.onChange('rooms', () => calls.push('rooms'));
 
-    settings.update('ha', { url: 'https://casa.local' });
+    settings.update('ha', { url: 'https://casa.local', token: 'token-novo' });
     assert.deepEqual(calls, ['ha:http://ha.local:8123->https://casa.local']);
+  });
+
+  it('trocar a origem da URL sem mandar o token é recusado: o token gravado não segue para outro host', () => {
+    const settings = RuntimeSettings.open(base, store, () => EMPTY_OVERRIDES, {});
+    assert.throws(
+      () => settings.update('ha', { url: 'https://outro-host.example' }),
+      (err: unknown) => err instanceof SettingsValidationError && err.field === 'token',
+    );
+    assert.equal(settings.get('ha').url, 'http://ha.local:8123');
+    // Mesma origem, outro caminho: não é troca de servidor.
+    settings.update('ha', { url: 'http://ha.local:8123/' });
+    assert.equal(settings.get('ha').token, 'token-do-env');
   });
 
   it('ouvinte que lança não desfaz a gravação', () => {

@@ -142,6 +142,33 @@ function stringMap(
   return out;
 }
 
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * URL + token de uma integração. Trocar a **origem** da URL exige o token no
+ * mesmo patch: o token gravado segue a URL, e o HA reconfigurado a quente o
+ * mandaria na hora para o host novo — quem tivesse o token admin extrairia o
+ * `HA_TOKEN` com um `PUT` (ADR 010, decisão 4).
+ */
+function connectionGroup(
+  current: { url: string; token: string },
+  patch: Record<string, unknown>,
+): { url: string; token: string } {
+  const url = httpUrl(patch, 'url', current.url);
+  const token = text(patch, 'token', current.token, { max: MAX_SECRET });
+  const before = originOf(current.url);
+  if (patch.token === undefined && current.token && before && originOf(url) !== before) {
+    throw new SettingsValidationError('token', 'Digite o token de novo para trocar de servidor.');
+  }
+  return { url, token };
+}
+
 type Validator<G extends GroupName> = (
   current: SettingsGroups[G],
   patch: unknown,
@@ -152,13 +179,7 @@ type Validator<G extends GroupName> = (
  * `SettingsValidationError`; o banco nunca recebe configuração inválida.
  */
 export const VALIDATORS: { [G in GroupName]: Validator<G> } = {
-  ha: (current, raw) => {
-    const patch = asObject(raw, 'ha');
-    return {
-      url: httpUrl(patch, 'url', current.url),
-      token: text(patch, 'token', current.token, { max: MAX_SECRET }),
-    };
-  },
+  ha: (current, raw) => connectionGroup(current, asObject(raw, 'ha')),
 
   provider: (current, raw) => {
     const patch = asObject(raw, 'provider');
@@ -180,13 +201,7 @@ export const VALIDATORS: { [G in GroupName]: Validator<G> } = {
     return next;
   },
 
-  calendar: (current, raw) => {
-    const patch = asObject(raw, 'calendar');
-    return {
-      url: httpUrl(patch, 'url', current.url),
-      token: text(patch, 'token', current.token, { max: MAX_SECRET }),
-    };
-  },
+  calendar: (current, raw) => connectionGroup(current, asObject(raw, 'calendar')),
 
   devices: (current, raw) => {
     const patch = asObject(raw, 'devices');

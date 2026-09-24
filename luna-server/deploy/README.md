@@ -230,7 +230,9 @@ falha. O `activate.sh` não restaura banco nenhum. Para voltar:
 
 ```bash
 sudo systemctl stop luna-server
-ls -1t /var/lib/luna-server/luna.db.pre-v*     # cópia feita pelo próprio processo antes de migrar
+# Sem glob: com StateDirectoryMode=0700 só o usuário luna lista o diretório,
+# e um `ls ...pre-v*` do seu shell diria "No such file" mesmo com backup lá.
+sudo -u luna ls -1t /var/lib/luna-server/        # procure luna.db.pre-v2-<carimbo>
 sudo -u luna cp /var/lib/luna-server/luna.db /var/lib/luna-server/luna.db.descartado-$(date +%s)
 sudo -u luna cp /var/lib/luna-server/luna.db.pre-v2-<carimbo> /var/lib/luna-server/luna.db
 sudo -u luna rm -f /var/lib/luna-server/luna.db-wal /var/lib/luna-server/luna.db-shm

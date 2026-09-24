@@ -214,6 +214,19 @@ describe('API admin', () => {
     assert.match(res.body.error, /digite o token/);
   });
 
+  it('trocar a URL do HA sem o token é 422 no campo token', async () => {
+    const res = await call(h, 'PUT', '/admin/v1/settings/ha', { url: 'https://host-qualquer.example' });
+    assert.equal(res.status, 422);
+    assert.equal(res.body.field, 'token');
+    assert.equal(h.settings.current().haUrl, 'http://192.168.0.10:8123');
+  });
+
+  it('testar a agenda sem nada configurado pede URL e token', async () => {
+    const res = await call(h, 'POST', '/admin/v1/settings/calendar/test', {});
+    assert.equal(res.body.ok, false);
+    assert.match(res.body.error, /obrigatórios/);
+  });
+
   it('caminho com escape malformado é 400, não 500', async () => {
     assert.equal((await call(h, 'PUT', '/admin/v1/satellites/%E0', { name: 'x' })).status, 400);
   });

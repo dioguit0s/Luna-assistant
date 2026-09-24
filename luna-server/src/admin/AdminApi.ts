@@ -400,6 +400,7 @@ export class AdminApi {
 
     const current = this.deps.settings.get(group);
     const url = given('url') || current.url;
+    if (!url) return { ok: false, latency_ms: 0, error: 'URL e token são obrigatórios' };
     let token = given('token');
     if (!token) {
       if (!sameOrigin(url, current.url)) {

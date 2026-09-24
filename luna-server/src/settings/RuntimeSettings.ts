@@ -69,21 +69,25 @@ export class RuntimeSettings {
         set(validate(group, seed[group], toStored(group, seed[group]), 'no .env/devices.json'));
         continue;
       }
-      // Validar por cima da semente preenche campo novo que uma versão
-      // anterior não gravava — a migração do conteúdo é aditiva também.
-      const value = validate(group, seed[group], stored, 'no banco') as unknown as Record<string, unknown>;
-      // Segredo vazio no banco é "nunca definido", não "apagado de
-      // propósito" (a API não apaga segredo): o `.env` completa. É a saída
-      // para quem semeou sem a chave e depois a pôs no `.env`.
+      // Segredo vazio no banco é completado pelo `.env` ANTES de validar —
+      // senão a chave do provider escolhido, vazia, falharia a validação e o
+      // preenchimento nunca rodaria. Regra assumida: um segredo apagado pelo
+      // painel volta no boot se ainda estiver no `.env`; para apagar de vez,
+      // tire-o do `.env` também. É a saída para quem subiu sem uma chave e só
+      // depois a pôs no `.env`.
+      const storedObj = { ...(stored as Record<string, unknown>) };
       const seedValue = seed[group] as unknown as Record<string, unknown>;
       let changed = false;
       for (const secret of SECRET_FIELDS[group] ?? []) {
-        if (!value[secret] && seedValue[secret]) {
-          value[secret] = seedValue[secret];
+        if (!storedObj[secret] && seedValue[secret]) {
+          storedObj[secret] = seedValue[secret];
           filled.push(`${group}.${secret}`);
           changed = true;
         }
       }
+      // Validar por cima da semente preenche campo novo que uma versão
+      // anterior não gravava — a migração do conteúdo é aditiva também.
+      const value = validate(group, seed[group], storedObj, 'no banco');
       set(value);
       if (changed) store.set(group, toStored(group, values[group]));
     }
