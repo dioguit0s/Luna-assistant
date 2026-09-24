@@ -10,6 +10,13 @@ export interface AppConfig {
   geminiApiKey: string;
   openaiApiKey: string;
   wsAuthSecret: string;
+  /**
+   * Token da API admin (`/admin/v1/*`, ADR 010). Bootstrap: autentica quem
+   * mexe no banco, então não pode viver nele. Vazio = API admin inexistente
+   * (404 em tudo). Opcional no tipo para os literais de teste não precisarem
+   * dele.
+   */
+  adminToken?: string;
   wsPort: number;
   logLevel: string;
   geminiLiveModel: string;
@@ -273,6 +280,7 @@ export function loadConfig(): AppConfig {
     geminiApiKey: process.env.GEMINI_API_KEY ?? '',
     openaiApiKey: process.env.OPENAI_API_KEY ?? '',
     wsAuthSecret: requireEnv('WS_AUTH_SECRET'),
+    adminToken: process.env.LUNA_ADMIN_TOKEN?.trim() ?? '',
     wsPort: Number(process.env.WS_PORT ?? 8080),
     logLevel: process.env.LOG_LEVEL ?? 'info',
     geminiLiveModel:
@@ -327,12 +335,9 @@ export function loadConfig(): AppConfig {
     weatherMaxStaleMs: parseOptionalNumber('WEATHER_MAX_STALE_MS') ?? 3 * 60 * 60_000,
   };
 
-  if (audioProvider === 'gemini' && !config.geminiApiKey) {
-    throw new Error('GEMINI_API_KEY é obrigatória quando AUDIO_PROVIDER=gemini');
-  }
-  if (audioProvider === 'openai' && !config.openaiApiKey) {
-    throw new Error('OPENAI_API_KEY é obrigatória quando AUDIO_PROVIDER=openai');
-  }
+  // A chave do provider não é mais checada aqui: ela é configuração de
+  // runtime e vive no banco depois da semeadura (ADR 010). Quem falha alto
+  // sem ela é `RuntimeSettings.open`, já com o valor efetivo.
   // Meia coordenada é erro de digitação, não configuração parcial legítima:
   // subir com a tool "meio ligada" esconderia o problema até alguém perguntar
   // do tempo e ouvir "não configurado" sem explicação nenhuma no log de boot.

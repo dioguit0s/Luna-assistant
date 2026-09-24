@@ -128,6 +128,12 @@ HA_URL=http://192.168.0.10:8123
 HA_TOKEN=<o token>
 ```
 
+Isso vale para a **primeira** subida: o `.env` só semeia o banco. Depois, URL e
+token do HA se trocam pelo painel do `luna-desktop` (**Integrações**), sem
+reiniciar — editar o `.env` de novo só gera o aviso `config_env_ignored` no log.
+O mesmo vale para o `devices.json`: os apelidos passam a ser editados em **Salas
+e dispositivos**. Ver [ADR 010](adr/010-painel-de-controle-e-api-admin.md).
+
 Reinicie o servidor. Ele descobre os dispositivos no boot e revalida a cada 5 min —
 cadastrar um dispositivo no HA e atribuir uma área o torna acionável **sem editar
 arquivo nem reiniciar**.
@@ -276,7 +282,8 @@ Roda em Docker. Estado do modelo atual e o que fazer se sair fraco em
 |---|---|
 | Satélite não autentica | `WS_AUTH_SECRET` divergente; NVS com segredo velho (`pio run -t erase`) |
 | `auth_error: room_id fora do formato` | `room_id` precisa casar `/^[a-z0-9_]{1,64}$/` |
-| Comando de voz não acha o dispositivo | Área do HA não bate com o `ROOM_ID`; ou falta apelido no `devices.json` |
+| Comando de voz não acha o dispositivo | Área do HA não bate com o `ROOM_ID` (mapeie a sala no painel, **Salas e dispositivos**); ou falta apelido |
+| Mudei o `.env`/`devices.json` e nada mudou | Depois da semeadura o banco manda — log `config_env_ignored`; edite pelo painel |
 | Satélite mudo depois de uma resposta | Preso em `RESPONDING` — ver [garantias de `speaking_end`](protocolo-websocket.md#garantias-de-speaking_end) |
 | Resposta longa cortada no meio | Pacing / `RESPONDING_TIMEOUT_MS` — mesma seção |
 | Speaker só chia | BCLK/LRC no GPIO8/9 em vez de 16/17 |

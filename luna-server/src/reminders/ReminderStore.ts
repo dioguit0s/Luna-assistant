@@ -134,6 +134,22 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
       );
     `);
   },
+  /**
+   * Configuração de runtime editada pelo painel (ADR 010, decisão 3): um
+   * documento JSON por grupo (`ha`, `provider`, `devices`...). Mora aqui, e
+   * não numa lista de migrações própria do `SettingsStore`, porque o banco é
+   * um só e `user_version` também: duas listas contando a mesma versão
+   * pisariam uma na outra.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        grp        TEXT    PRIMARY KEY,
+        value      TEXT    NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+  },
 ];
 
 /**
@@ -280,6 +296,26 @@ export class ReminderStore {
   close(): void {
     this.statements.clear();
     this.db.close();
+  }
+
+  /**
+   * Handle do mesmo banco para o `SettingsStore`. Só existe porque o schema
+   * dos dois vive numa lista de migrações só (ver `MIGRATIONS`): abrir um
+   * segundo `DatabaseSync` duplicaria pragmas e o controle de versão.
+   */
+  sharedDatabase(): DatabaseSync {
+    return this.db;
+  }
+
+  /** Tudo que está vivo, de todas as salas, na ordem em que vai tocar. Para o painel. */
+  listLive(): Reminder[] {
+    return this.stmt(
+      `SELECT ${REMINDER_COLUMNS} FROM reminders
+        WHERE status IN ${LIVE_STATUSES}
+        ORDER BY next_due_utc`,
+    )
+      .all()
+      .map(toReminder);
   }
 
   /** Prepara sob demanda e reaproveita: o scheduler chama o mesmo SQL a cada acordada. */

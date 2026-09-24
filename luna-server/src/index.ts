@@ -13,6 +13,9 @@ import { WsServer } from './ws/WsServer.js';
 import { ReminderStore } from './reminders/ReminderStore.js';
 import { ReminderScheduler } from './reminders/ReminderScheduler.js';
 import { nextDueAfter } from './reminders/recurrence.js';
+import { SettingsStore } from './settings/SettingsStore.js';
+import { RuntimeSettings } from './settings/RuntimeSettings.js';
+import { AdminApi } from './admin/AdminApi.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -61,15 +64,38 @@ async function main(): Promise<void> {
     'Banco de lembretes aberto',
   );
 
-  const ringBuffer = new ConversationRingBuffer();
-  const roomManager = new RoomManager(config, ringBuffer);
+  // Configuração de runtime (ADR 010): `.env` e `devices.json` são semente, o
+  // banco é a verdade. Depois do banco e antes de tudo que consome HA,
+  // provider ou overrides — lança se o que está gravado não valida, com a
+  // mesma falha barulhenta do `loadConfig`.
+  const settings = RuntimeSettings.open(
+    config,
+    new SettingsStore(reminderStore.sharedDatabase()),
+    () => loadDeviceOverrides(config.devicesConfigPath),
+  );
 
-  const haClient = new HomeAssistantClient(config);
+  const ringBuffer = new ConversationRingBuffer();
+  // Função, não o objeto: cada sessão nova lê o provider/modelo/voz do
+  // momento — a troca pelo painel vale "na próxima conversa".
+  const roomManager = new RoomManager(() => settings.current(), ringBuffer);
+
+  const haClient = new HomeAssistantClient(settings.current());
   const deviceRegistry = new DeviceRegistrySource(
     haClient,
-    loadDeviceOverrides(config.devicesConfigPath),
+    settings.get('devices'),
     config.deviceRegistryTtlMs,
   );
+  deviceRegistry.setRoomAreas(settings.get('rooms').areas);
+
+  // Aplicação a quente por grupo (ADR 010, decisão 5). O provider não tem
+  // listener: `RoomManager` lê `settings.current()` a cada sessão nova.
+  settings.onChange('ha', (ha) => {
+    haClient.reconfigure(ha.url, ha.token);
+    // Credencial nova = catálogo possivelmente novo; não espera o TTL.
+    void deviceRegistry.refresh();
+  });
+  settings.onChange('devices', (overrides) => deviceRegistry.setOverrides(overrides));
+  settings.onChange('rooms', (rooms) => deviceRegistry.setRoomAreas(rooms.areas));
   // Descobre os dispositivos antes de aceitar conexões; se o HA não responder,
   // sobe com os overrides e o refresh por TTL recupera depois.
   await deviceRegistry.start();
@@ -124,6 +150,35 @@ async function main(): Promise<void> {
   });
 
   wsServer.setReminderScheduler(reminderScheduler);
+  wsServer.setProviderNameSource(() => settings.current().audioProvider);
+
+  // `shutdown` só existe mais abaixo; o reinício pelo painel chega por aqui.
+  let requestRestart: () => void = () => {};
+  wsServer.setAdminHandler(
+    new AdminApi({
+      config,
+      settings,
+      satellites: () => wsServer.listSatellites(),
+      deviceRegistry,
+      haClient,
+      roomManager,
+      reminderStore,
+      cancelReminder: (reminder) => {
+        // Mesma sequência do `manage_reminders` por voz: banco, toque, timer.
+        reminderStore.markStatus(reminder.id, 'cancelled');
+        alarmRinger.dismissByShortId(reminder.shortId);
+        reminderScheduler.reschedule();
+      },
+      weatherSource,
+      onRestart: () => requestRestart(),
+    }).handle,
+  );
+  getLogger().info(
+    { event: 'admin_api', enabled: Boolean(config.adminToken) },
+    config.adminToken
+      ? 'API admin ativa em /admin/v1 (somente rede local)'
+      : 'API admin desligada: LUNA_ADMIN_TOKEN ausente',
+  );
   // Rehydrate: fecha `ringing` órfão de um processo anterior e arma o timer a
   // partir do banco — é o que faz um alarme sobreviver ao deploy.
   reminderScheduler.start();
@@ -135,10 +190,10 @@ async function main(): Promise<void> {
   // sem isso, comparação antes/depois vira arqueologia de deploys.
   getLogger().info(
     {
-      provider: config.audioProvider,
+      provider: settings.current().audioProvider,
       port: config.wsPort,
       devices: deviceRegistry.current().size,
-      model: config.geminiLiveModel,
+      model: settings.current().geminiLiveModel,
       vad_silence_ms: config.geminiVadSilenceMs,
       thinking_budget: config.geminiThinkingBudget,
       event: 'server_start',
@@ -182,6 +237,10 @@ async function main(): Promise<void> {
     reminderStore.close();
     process.exit(0);
   };
+
+  // Sai com 0 como num SIGTERM: o `Restart=always` da unit traz o processo de
+  // volta. Em dev (`tsx watch`) o processo só encerra.
+  requestRestart = () => void shutdown('admin_restart');
 
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

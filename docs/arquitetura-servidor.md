@@ -16,6 +16,13 @@ módulo certo antes de mexer em qualquer coisa. Para o *porquê* das decisões, 
 src/
 ├── index.ts              # boot: ordem de inicialização e shutdown
 ├── config/env.ts         # AppConfig — toda variável de ambiente passa aqui
+├── settings/             # configuração de runtime no SQLite (ADR 010)
+│   ├── SettingsStore.ts  #   tabela `settings`, um JSON por grupo
+│   ├── groups.ts         #   grupos, validadores, semente, máscara de segredo
+│   └── RuntimeSettings.ts#   fonte observável: current() + onChange por grupo
+├── admin/                # API admin HTTP do painel (ADR 010)
+│   ├── AdminApi.ts       #   rotas /admin/v1/*, no mesmo servidor do /health
+│   └── auth.ts           #   token Bearer timing-safe + filtro de rede privada
 ├── logging/logger.ts     # pino, timestamp em America/Sao_Paulo
 ├── time/clock.ts         # relógio único do processo
 ├── ws/                   # camada de transporte
@@ -74,10 +81,37 @@ A ordem importa e é deliberada:
    abrir (permissão, corrupção, Node sem `node:sqlite`), o processo morre aqui, o
    health check do `activate.sh` falha e o rollback dispara. Um fallback silencioso
    para `:memory:` faria alarmes sumirem a cada deploy sem nenhum sinal.
-5. **`ConversationRingBuffer` + `RoomManager`.**
-6. **`HomeAssistantClient` + `DeviceRegistrySource`** — descobre os dispositivos antes
+5. **`RuntimeSettings.open`** — lê a configuração de runtime do banco e semeia do
+   `.env`/`devices.json` o grupo que ainda não existe. Daí em diante o banco manda;
+   divergência no `.env` vira o aviso `config_env_ignored`. Ver
+   [Configuração de runtime](#configuração-de-runtime).
+6. **`ConversationRingBuffer` + `RoomManager`.**
+7. **`HomeAssistantClient` + `DeviceRegistrySource`** — descobre os dispositivos antes
    de aceitar conexões.
-7. **`WsServer.start()`.**
+8. **`WsServer.start()`**, com a `AdminApi` ligada no mesmo servidor HTTP.
+
+***
+
+## Configuração de runtime
+
+[ADR 010](adr/010-painel-de-controle-e-api-admin.md). O `AppConfig` do `loadConfig()`
+continua imutável e guarda o **bootstrap** (porta, segredo WS, token admin, banco, log,
+knobs de latência). Os grupos de **runtime** — `ha`, `provider`, `calendar`, `devices`,
+`rooms`, `satellites` — vivem na tabela `settings` e são lidos por `RuntimeSettings`:
+
+| Grupo | Quem consome | Quando vale |
+|---|---|---|
+| `provider` | `RoomManager` chama `settings.current()` a cada sessão nova | Próxima conversa da sala |
+| `ha` | `onChange` → `HomeAssistantClient.reconfigure` + refresh do registro | Imediato |
+| `devices`, `rooms` | `onChange` → `DeviceRegistrySource.setOverrides` / `setRoomAreas` | Imediato |
+| `calendar`, `satellites` | Só o painel, por enquanto | — |
+
+`rooms.areas` mapeia uma sala da Luna para uma área do HA (`desktop_diogo → escritorio`):
+`DeviceRegistry.areaFor` resolve `control_device` e `list_devices` pela área mapeada.
+
+A **API admin** (`/admin/v1/*`) só existe com `LUNA_ADMIN_TOKEN` definido (senão 404),
+só aceita origem privada/loopback (403) e nunca devolve segredo — leitura mostra
+`{ set, last4 }`. Rotas e contrato estão em [`painel-de-controle.md`](painel-de-controle.md#api-admin-v1).
 
 ***
 

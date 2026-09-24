@@ -146,6 +146,33 @@ O "não perturbe" precisa decidir o que acontece com um alarme marcado dentro da
 janela — segurar até o fim dela, tocar assim mesmo ou tocar só em sala escolhida.
 Decisão para quando o item entrar, não agora.
 
+## API admin v1
+
+Implementada em `luna-server/src/admin/AdminApi.ts`. Base `http://<servidor>:<WS_PORT>/admin/v1/`,
+header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
+
+| Rota | O que faz |
+|---|---|
+| `GET status` | Versão, uptime, satélites online, semáforo por conexão (`ha`, `provider`, `weather`, `calendar`: `ok`/`error`/`unknown`/`off`) e os 5 próximos lembretes |
+| `GET bootstrap` | Porta, caminho do banco, nível de log — só leitura, sem segredo |
+| `GET satellites` | Conectados agora + vistos desde o boot + nomeados; `online`, `connected_since`, `last_seen_at` |
+| `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove |
+| `GET rooms` | Salas (de satélite, áreas do HA, mapeadas), área efetiva e o que o `list_devices` veria nelas |
+| `PUT rooms/:room_id` | `{ "area": "escritorio" }` — `null` remove o mapeamento |
+| `GET devices` / `PUT devices` | Overrides; v1 grava só `{ "aliases": {...} }` |
+| `GET reminders` | Lembretes vivos de todas as salas, com a frase falada |
+| `DELETE reminders/:id` | Cancela: banco, toque em curso e scheduler |
+| `GET settings/:grupo` | `ha`, `provider` ou `calendar`, com segredos como `{ set, last4 }` e `applies` (`immediate` / `next_session`) |
+| `PUT settings/:grupo` | Patch parcial; campo ausente = mantém. 422 com `field` quando inválido |
+| `POST settings/ha/test`, `POST settings/calendar/test` | Testa com o corpo completado pelo que está gravado — dá para testar sem gravar |
+| `POST restart` | 202 e shutdown gracioso; o `Restart=always` traz de volta |
+
+Códigos: 404 em tudo sem `LUNA_ADMIN_TOKEN`; 403 fora de loopback/rede privada; 401
+token errado; 422 validação; 413 corpo acima de 64 KB.
+
+O teste de conexão da agenda é **provisório**: só prova que a URL responde e aceita a
+credencial, até a API do app existir (TODO abaixo).
+
 ## TODO: API do app de agendas
 
 A API REST do app ainda não está definida. O que se sabe do uso:

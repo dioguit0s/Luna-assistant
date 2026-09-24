@@ -21,13 +21,32 @@ export class RoomManager {
   private readonly clientCounts = new Map<string, number>();
   private readonly pendingConnections = new Map<string, Promise<IAudioProvider>>();
   private bindProvider: ProviderBinder = () => {};
+  /**
+   * Lido a cada sessão nova, nunca guardado: é o que faz uma troca de
+   * provider, modelo ou voz pelo painel valer "na próxima conversa" (ADR 010,
+   * decisão 5) sem derrubar a sessão em curso no meio de uma frase.
+   */
+  private readonly currentConfig: () => AppConfig;
+  private lastConnect: { ok: boolean; at: number; error?: string } | null = null;
 
   constructor(
-    private readonly config: AppConfig,
+    config: AppConfig | (() => AppConfig),
     private readonly ringBuffer: ConversationRingBuffer,
     /** Injetável para teste (timeout de connect): mesmo padrão do `fetchImpl` de `HomeAssistantClient`. */
     private readonly providerFactory: (config: AppConfig) => IAudioProvider = createAudioProvider,
-  ) {}
+  ) {
+    this.currentConfig = typeof config === 'function' ? config : () => config;
+  }
+
+  /** Resultado da última abertura de sessão, para o semáforo do painel. */
+  lastConnectStatus(): { ok: boolean; at: number; error?: string } | null {
+    return this.lastConnect ? { ...this.lastConnect } : null;
+  }
+
+  /** Salas com sessão de provider aberta agora. */
+  activeRooms(): string[] {
+    return [...this.sessions.keys()];
+  }
 
   /**
    * O Orchestrator registra aqui, no construtor dele, o bind dos callbacks do
@@ -69,19 +88,29 @@ export class RoomManager {
     this.pendingConnections.set(roomId, connectionPromise);
 
     try {
-      return await connectionPromise;
+      const provider = await connectionPromise;
+      this.lastConnect = { ok: true, at: Date.now() };
+      return provider;
+    } catch (err) {
+      this.lastConnect = {
+        ok: false,
+        at: Date.now(),
+        error: err instanceof Error ? err.message : String(err),
+      };
+      throw err;
     } finally {
       this.pendingConnections.delete(roomId);
     }
   }
 
   private async createProviderSession(roomId: string): Promise<IAudioProvider> {
-    const provider = this.providerFactory(this.config);
+    const config = this.currentConfig();
+    const provider = this.providerFactory(config);
     const history = this.ringBuffer.getHistory(roomId);
     // `null` nas duas coordenadas desliga a tool inteira: um schema que só
     // sabe responder "não configurado" não deve pagar orçamento de instrução
     // da sessão Live nem inflar o `model_decision_ms`.
-    const weatherEnabled = this.config.weatherLatitude !== null;
+    const weatherEnabled = config.weatherLatitude !== null;
     const systemPrompt = buildLunaSystemPrompt(roomId, history, undefined, weatherEnabled);
 
     const connectPromise = provider.connect({
@@ -147,7 +176,7 @@ export class RoomManager {
     provider: IAudioProvider,
     connectPromise: Promise<void>,
   ): Promise<void> {
-    const timeoutMs = this.config.providerConnectTimeoutMs;
+    const timeoutMs = this.currentConfig().providerConnectTimeoutMs;
     let timedOut = false;
 
     const timeout = new Promise<never>((_, reject) => {

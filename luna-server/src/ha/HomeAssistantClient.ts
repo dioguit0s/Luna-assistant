@@ -81,14 +81,62 @@ function isDiscoveredEntity(row: unknown): row is DiscoveredEntity {
  */
 export class HomeAssistantClient {
   private configWarningLogged = false;
+  /**
+   * Cópia própria, não a referência ao `AppConfig`: o painel troca URL e token
+   * a quente (ADR 010, decisão 5) por `reconfigure`, e o resto da config do
+   * processo continua imutável.
+   */
+  private config: Pick<AppConfig, 'haUrl' | 'haToken'>;
 
   constructor(
-    private readonly config: AppConfig,
+    config: Pick<AppConfig, 'haUrl' | 'haToken'>,
     private readonly fetchImpl: typeof fetch = fetch,
     private readonly timeoutMs: number = DEFAULT_TIMEOUT_MS,
     private readonly sleepImpl: (ms: number) => Promise<void> = (ms) =>
       new Promise((resolve) => setTimeout(resolve, ms)),
-  ) {}
+  ) {
+    this.config = { haUrl: config.haUrl, haToken: config.haToken };
+  }
+
+  /**
+   * Vale a partir da próxima chamada. Uma chamada já em voo termina com as
+   * credenciais antigas — é um `fetch` de no máximo `timeoutMs`.
+   */
+  reconfigure(haUrl: string, haToken: string): void {
+    this.config = { haUrl, haToken };
+    // Reconfigurado sem credencial avisa de novo: o aviso é o único sinal no
+    // log de que o painel acabou de desligar a automação.
+    this.configWarningLogged = false;
+  }
+
+  /**
+   * "Testar conexão" do painel: `GET /api/` com as credenciais dadas, ou com
+   * as atuais. Não mexe na configuração — dá para testar antes de gravar.
+   */
+  async checkConnection(
+    target: { haUrl: string; haToken: string } = this.config,
+  ): Promise<{ ok: boolean; latencyMs: number; error?: string }> {
+    if (!target.haUrl || !target.haToken) {
+      return { ok: false, latencyMs: 0, error: 'URL e token são obrigatórios' };
+    }
+    const startedAt = Date.now();
+    try {
+      const res = await this.fetchImpl(`${target.haUrl.replace(/\/+$/, '')}/api/`, {
+        headers: { Authorization: `Bearer ${target.haToken}` },
+        signal: AbortSignal.timeout(this.timeoutMs),
+      });
+      const latencyMs = Date.now() - startedAt;
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false, latencyMs, error: 'token recusado pelo Home Assistant' };
+      }
+      if (!res.ok) {
+        return { ok: false, latencyMs, error: `HTTP ${res.status}` };
+      }
+      return { ok: true, latencyMs };
+    } catch (err) {
+      return { ok: false, latencyMs: Date.now() - startedAt, error: this.describeFailure(err) };
+    }
+  }
 
   /**
    * Aciona um serviço, ex: `callService('switch', 'turn_on', 'switch.luz_bancada')`.

@@ -24,6 +24,28 @@ export const EMPTY_OVERRIDES: DeviceOverrides = {
 };
 
 /**
+ * Forma de arquivo (`room_id`/`entity_id` em snake_case) de um conjunto de
+ * overrides — é o que vai para o banco, para que o mesmo
+ * `validateDeviceOverrides` leia as duas fontes.
+ */
+export function serializeDeviceOverrides(overrides: DeviceOverrides): {
+  aliases: Record<string, string>;
+  exclude: string[];
+  devices: Array<{ device: string; room_id: string; entity_id: string; name?: string }>;
+} {
+  return {
+    aliases: { ...overrides.aliases },
+    exclude: [...overrides.exclude],
+    devices: overrides.devices.map((d) => ({
+      device: d.device,
+      room_id: d.roomId,
+      entity_id: d.entityId,
+      ...(d.name ? { name: d.name } : {}),
+    })),
+  };
+}
+
+/**
  * Lê `devices.json`. Arquivo ausente é o caso normal — a descoberta cobre o uso
  * comum. Arquivo presente e inválido lança: é erro de operador, e subir com o
  * override ignorado esconderia exatamente a correção que alguém quis fazer.
@@ -56,6 +78,15 @@ export function parseDeviceOverrides(raw: string, source = 'devices.json'): Devi
     );
   }
 
+  return validateDeviceOverrides(parsed, source);
+}
+
+/**
+ * Mesma validação para o arquivo e para o que o painel grava no banco
+ * (`RuntimeSettings`, grupo `devices`): um override inválido não pode entrar
+ * por nenhum dos dois caminhos.
+ */
+export function validateDeviceOverrides(parsed: unknown, source = 'devices.json'): DeviceOverrides {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`${source} deve conter um objeto com aliases/exclude/devices.`);
   }
@@ -75,11 +106,14 @@ function parseAliases(value: unknown, source: string): Record<string, string> {
     throw new Error(`${source}: "aliases" deve ser um objeto de apelido → dispositivo.`);
   }
   for (const [key, target] of Object.entries(value)) {
+    if (key.trim().length === 0) {
+      throw new Error(`${source}: alias vazio.`);
+    }
     if (typeof target !== 'string' || target.length === 0) {
       throw new Error(`${source}: alias "${key}" deve apontar para um dispositivo.`);
     }
   }
-  return value as Record<string, string>;
+  return { ...(value as Record<string, string>) };
 }
 
 function parseExclude(value: unknown, source: string): string[] {
@@ -87,7 +121,7 @@ function parseExclude(value: unknown, source: string): string[] {
   if (!Array.isArray(value) || value.some((e) => typeof e !== 'string')) {
     throw new Error(`${source}: "exclude" deve ser uma lista de entity_id.`);
   }
-  return value as string[];
+  return [...(value as string[])];
 }
 
 function parseManualDevices(value: unknown, source: string): DeviceEntry[] {
@@ -135,18 +169,48 @@ const DEFAULT_TTL_MS = 5 * 60 * 1000;
  * no HA fique acionável sem reiniciar o servidor. Nunca lança: HA fora do ar
  * degrada para o último snapshot conhecido, nunca para um registro vazio.
  */
+export interface RegistryRefreshStatus {
+  /** `null` até o primeiro refresh terminar. */
+  ok: boolean | null;
+  at: number | null;
+}
+
 export class DeviceRegistrySource {
   private registry: DeviceRegistry;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  /** Última descoberta bem-sucedida: reconstruir com overrides novos não pode esperar o HA. */
+  private discovered: DiscoveredEntity[] = [];
+  private roomAreas: Record<string, string> = {};
+  private lastRefresh: RegistryRefreshStatus = { ok: null, at: null };
 
   constructor(
     private readonly haClient: HomeAssistantClient,
-    private readonly overrides: DeviceOverrides = EMPTY_OVERRIDES,
+    private overrides: DeviceOverrides = EMPTY_OVERRIDES,
     private readonly ttlMs: number = DEFAULT_TTL_MS,
   ) {
     // Snapshot inicial só com os overrides: resolve algo mesmo antes do primeiro
     // refresh, e é o estado final caso o HA nunca responda.
     this.registry = this.build([]);
+  }
+
+  /**
+   * Troca os overrides (painel, ADR 010) e reconstrói na hora, a partir da
+   * última descoberta — não espera o HA responder para o apelido novo valer.
+   */
+  setOverrides(overrides: DeviceOverrides): void {
+    this.overrides = overrides;
+    this.registry = this.build(this.discovered);
+  }
+
+  /** Sala da Luna → área do HA. Mesmo efeito imediato de `setOverrides`. */
+  setRoomAreas(roomAreas: Record<string, string>): void {
+    this.roomAreas = { ...roomAreas };
+    this.registry = this.build(this.discovered);
+  }
+
+  /** Resultado do último refresh contra o HA, para o semáforo do painel. */
+  refreshStatus(): RegistryRefreshStatus {
+    return { ...this.lastRefresh };
   }
 
   /** Primeira descoberta e agendamento do refresh. */
@@ -180,6 +244,7 @@ export class DeviceRegistrySource {
     const discovered = await this.haClient.listAreaEntities();
 
     if (discovered === null) {
+      this.lastRefresh = { ok: false, at: Date.now() };
       getLogger().warn(
         { event: 'device_registry_refresh', count: this.registry.size },
         'Descoberta de dispositivos falhou: mantendo o registro anterior',
@@ -187,7 +252,9 @@ export class DeviceRegistrySource {
       return;
     }
 
+    this.discovered = discovered;
     this.registry = this.build(discovered);
+    this.lastRefresh = { ok: true, at: Date.now() };
 
     getLogger().info(
       {
@@ -227,6 +294,7 @@ export class DeviceRegistrySource {
     return DeviceRegistry.fromEntries(entries, {
       aliases: this.overrides.aliases,
       exclude: this.overrides.exclude,
+      roomAreas: this.roomAreas,
     });
   }
 }
