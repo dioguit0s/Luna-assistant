@@ -26,11 +26,13 @@ tudo em um clique. O front door do repositório é o [README da raiz](../README.
 - [ADR 007 — Áudio não solicitado e endereçamento por sala](adr/007-audio-nao-solicitado.md)
 - [ADR 008 — Tempo e previsão via Open-Meteo](adr/008-tempo-e-previsao.md)
 - [ADR 009 — Inventário por cômodo](adr/009-inventario-por-comodo.md)
+- [ADR 010 — Painel de controle: API admin e configuração no SQLite](adr/010-painel-de-controle-e-api-admin.md) (proposto)
 
 ## Features / módulos
 
 - [Alarmes e lembretes](alarmes-e-lembretes.md) — plano e decisões; marcos 0 a 11 entregues
 - [luna-desktop](luna-desktop.md) — satélite para Windows
+- [Painel de controle](painel-de-controle.md) — o desktop como painel: inventário de funções e marcos
 
 ## READMEs por componente
 
