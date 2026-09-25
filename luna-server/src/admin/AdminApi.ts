@@ -20,6 +20,7 @@ import { getLogger } from '../logging/logger.js';
 import { LEVEL_VALUES, type LogLevelName, type LogRecord } from '../logging/logTap.js';
 import type { Diagnostics, LogFilter } from '../diagnostics/Diagnostics.js';
 import { matchesFilter } from '../diagnostics/Diagnostics.js';
+import { MAX_ROWS } from '../diagnostics/DiagnosticsStore.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
 
 export interface AdminApiDeps {
@@ -59,6 +60,11 @@ const MAX_LATENCY_SAMPLES = 2000;
 /** Cada stream segura um socket aberto; o painel usa um só. */
 const MAX_LOG_STREAMS = 4;
 const SSE_HEARTBEAT_MS = 15_000;
+/**
+ * Cliente que não lê (notebook dormiu com o Diagnóstico aberto) acumula linha
+ * na memória até o TCP desistir. Acima disto de bytes pendentes, o stream cai.
+ */
+const SSE_MAX_BUFFERED_BYTES = 256 * 1024;
 
 /** Grupos que o painel lê e grava inteiros pela rota genérica `settings/:grupo`. */
 const EDITABLE_GROUPS = new Set<GroupName>(['ha', 'provider', 'calendar']);
@@ -607,10 +613,13 @@ export class AdminApi {
   private latency(query: URLSearchParams): unknown {
     const hours = intParam(query, 'hours', 24, 1, 24 * 30);
     const since = this.now() - hours * 3600_000;
-    const samples = this.deps.diagnostics.store.latencySince(since, MAX_LATENCY_SAMPLES);
+    // Percentis sobre a janela inteira (a tabela já é capada em MAX_ROWS); só a
+    // série que vai para o gráfico é cortada nas mais recentes.
+    const all = this.deps.diagnostics.store.latencySince(since, MAX_ROWS);
+    const samples = all.slice(-MAX_LATENCY_SAMPLES);
 
     const groups = new Map<string, { roomId: string; provider: string; warm: number[]; cold: number }>();
-    for (const s of samples) {
+    for (const s of all) {
       const key = `${s.roomId}|${s.provider}`;
       let g = groups.get(key);
       if (!g) {
@@ -625,6 +634,8 @@ export class AdminApi {
       target_ms: TTFAB_TARGET_MS,
       since,
       hours,
+      total: all.length,
+      truncated: all.length > samples.length,
       samples: samples.map((s) => ({
         at: s.at,
         room_id: s.roomId,
@@ -696,16 +707,26 @@ export class AdminApi {
       'cache-control': 'no-store',
       connection: 'keep-alive',
     });
+    // Meio-aberto (Wi-Fi caiu sem FIN) também precisa morrer: keepalive do TCP.
+    req.socket.setKeepAlive(true, SSE_HEARTBEAT_MS);
+    const push = (chunk: string): void => {
+      if (res.destroyed) return;
+      if (res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+        res.destroy();
+        return;
+      }
+      res.write(chunk);
+    };
     const write = (record: LogRecord): void => {
-      res.write(`id: ${record.seq}\ndata: ${JSON.stringify(logWire(record))}\n\n`);
+      push(`id: ${record.seq}\ndata: ${JSON.stringify(logWire(record))}\n\n`);
     };
     for (const record of this.deps.diagnostics.recent(filter)) write(record);
-    res.write(': ok\n\n');
+    push(': ok\n\n');
 
     const unsubscribe = this.deps.diagnostics.onRecord((record) => {
       if (matchesFilter(record, filter)) write(record);
     });
-    const heartbeat = setInterval(() => res.write(': ping\n\n'), SSE_HEARTBEAT_MS);
+    const heartbeat = setInterval(() => push(': ping\n\n'), SSE_HEARTBEAT_MS);
     heartbeat.unref();
     const close = (): void => {
       clearInterval(heartbeat);

@@ -5,8 +5,14 @@
  * `logger.ts`, então só vê o que o `LOG_LEVEL` deixa passar.
  *
  * **Sem transcrição** (decisão de produto do painel): o registro leva só campos
- * escalares, e cai fora qualquer chave que possa carregar o que foi dito —
- * `raw` do `GEMINI_DEBUG_MESSAGES`, texto, transcrição, prompt.
+ * escalares, e cai fora qualquer chave de **texto** que possa carregar o que foi
+ * dito — `raw` do `GEMINI_DEBUG_MESSAGES`, texto, transcrição, prompt. Número e
+ * booleano passam mesmo com nome parecido (`transcript_anchor_moves`): não
+ * carregam fala.
+ *
+ * A mensagem também: vários pontos repetem a fala dentro do `msg`
+ * (`Turno concluído: "..."`). Todo valor de chave de fala descartada é
+ * apagado do `msg`, e os eventos conhecidos por falar ganham mensagem fixa.
  */
 
 export type LogLevelName = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
@@ -46,6 +52,13 @@ export const LEVEL_VALUES: Record<LogLevelName, number> = {
 /** Chaves que podem carregar fala do usuário ou da Luna. */
 const DENIED_KEY = /raw|transcri|text|prompt|speech|utterance/i;
 const MAX_STRING = 200;
+const REDACTED = '«fala omitida»';
+
+/** Eventos cuja mensagem é a fala: sai só o rótulo, venha o texto como vier. */
+const SPEECH_MESSAGES: Record<string, string> = {
+  turn_complete: 'Turno concluído',
+  assistant_transcript_delta: 'Delta de transcrição da Luna',
+};
 const MAX_FIELDS = 24;
 
 const listeners = new Set<LogListener>();
@@ -97,14 +110,30 @@ function toRecord(levelValue: number, args: readonly unknown[]): LogRecord {
   }
 
   const fields: LogRecord['fields'] = {};
+  const spoken: string[] = [];
   let count = 0;
   for (const [key, value] of Object.entries(obj)) {
-    if (count >= MAX_FIELDS) break;
-    if (key === 'event' || DENIED_KEY.test(key)) continue;
+    if (key === 'event') continue;
     const scalar = toScalar(value);
     if (scalar === undefined) continue;
+    if (typeof scalar === 'string' && DENIED_KEY.test(key)) {
+      // O texto inteiro, não o cortado: é ele que o `msg` pode repetir.
+      if (typeof value === 'string' && value.trim().length > 0) spoken.push(value);
+      continue;
+    }
+    if (count >= MAX_FIELDS) continue;
     fields[key] = scalar;
     count += 1;
+  }
+
+  const event = typeof obj.event === 'string' ? obj.event : null;
+  if (event !== null && Object.hasOwn(SPEECH_MESSAGES, event)) {
+    msg = SPEECH_MESSAGES[event]!;
+  } else {
+    // Mais longo primeiro: um texto que contém outro some inteiro.
+    for (const text of spoken.sort((a, b) => b.length - a.length)) {
+      msg = msg.split(text).join(REDACTED);
+    }
   }
 
   return {
@@ -112,7 +141,7 @@ function toRecord(levelValue: number, args: readonly unknown[]): LogRecord {
     ts: Date.now(),
     level: LEVEL_NAMES[levelValue] ?? 'info',
     levelValue,
-    event: typeof obj.event === 'string' ? obj.event : null,
+    event,
     roomId: typeof obj.room_id === 'string' ? obj.room_id : null,
     msg: msg.slice(0, MAX_STRING),
     fields,

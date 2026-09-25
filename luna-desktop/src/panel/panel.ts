@@ -2146,7 +2146,7 @@ pages.push({
     const summary = lat.summary as any[];
     const samples = lat.samples as any[];
     const target: number = lat.target_ms;
-    setMeta(`${samples.length} TURNOS EM ${DIAG_WINDOWS.find((w) => w.value === diag.hours)?.label ?? `${diag.hours}H`} · META ${target}MS`);
+    setMeta(`${lat.total ?? samples.length} TURNOS EM ${DIAG_WINDOWS.find((w) => w.value === diag.hours)?.label ?? `${diag.hours}H`} · META ${target}MS`);
 
     const windowCycler = cycler(DIAG_WINDOWS, DIAG_WINDOWS.findIndex((w) => w.value === diag.hours), (value) => {
       diag.hours = value;
@@ -2182,6 +2182,7 @@ pages.push({
       { style: 'gap:6px' },
       samples.length ? latencyChart(samples, target, lat.since, Date.now()) : h('div', {}, 'SEM AMOSTRAS.'),
       h('div', { class: 'small' }, '▪ VERDE: DENTRO DA META · ▪ ÂMBAR: ACIMA · ▪ APAGADO: SESSÃO FRIA'),
+      lat.truncated ? h('div', { class: 'small' }, `SÉRIE: OS ${samples.length} TURNOS MAIS RECENTES DE ${lat.total}. OS PERCENTIS USAM TODOS.`) : null,
     );
 
     const errors = (errRes.ok ? errRes.body.errors : []) as any[];

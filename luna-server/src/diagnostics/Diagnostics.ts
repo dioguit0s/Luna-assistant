@@ -10,6 +10,12 @@ import type { DiagnosticsStore, ReminderEventKind } from './DiagnosticsStore.js'
  *   entrada em "últimos erros";
  * - tudo entra num buffer circular em memória, que é o "passado recente" do
  *   log ao vivo quando o painel abre o stream.
+ *
+ * **Nada disto roda dentro da chamada de log.** O `ttfab` é logado no meio de
+ * `onAudioResponse`, antes de o primeiro chunk sair para o satélite: um
+ * `INSERT` síncrono ali somaria ao atraso real sem aparecer na métrica, que já
+ * foi tirada. O tap só enfileira; o SQLite e o SSE rodam num `setImmediate`, e
+ * a poda num timer de hora em hora.
  */
 
 /** `warn` que o painel trata como erro: HA, provider, clima ou lembrete que falhou. */
@@ -45,6 +51,9 @@ const REMINDER_EVENTS: Record<string, ReminderEventKind> = {
 };
 
 export const LIVE_BUFFER_SIZE = 500;
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/** Rajada de log com o event loop travado: acima disto, descarta o excedente. */
+const MAX_PENDING = 2000;
 
 export interface LogFilter {
   minLevel: LogLevelName;
@@ -61,21 +70,51 @@ export class Diagnostics {
   private readonly buffer: LogRecord[] = [];
   private readonly listeners = new Set<(record: LogRecord) => void>();
   private unsubscribe: (() => void) | null = null;
+  private pending: LogRecord[] = [];
+  private flushScheduled = false;
+  private pruneTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(readonly store: DiagnosticsStore) {}
 
   start(): void {
     if (this.unsubscribe) return;
-    this.unsubscribe = subscribeLogs((record) => this.ingest(record));
+    this.unsubscribe = subscribeLogs((record) => this.enqueue(record));
+    this.safePrune();
+    this.pruneTimer = setInterval(() => this.safePrune(), PRUNE_INTERVAL_MS);
+    this.pruneTimer.unref();
   }
 
   stop(): void {
     this.unsubscribe?.();
     this.unsubscribe = null;
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
+    this.pruneTimer = null;
+    this.pending = [];
     this.listeners.clear();
   }
 
-  /** Público para teste; em produção só o tap chama. */
+  private enqueue(record: LogRecord): void {
+    if (this.pending.length >= MAX_PENDING) return;
+    this.pending.push(record);
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
+    setImmediate(() => {
+      this.flushScheduled = false;
+      const batch = this.pending;
+      this.pending = [];
+      for (const r of batch) this.ingest(r);
+    });
+  }
+
+  private safePrune(): void {
+    try {
+      this.store.prune();
+    } catch {
+      // best effort, como o resto do diagnóstico
+    }
+  }
+
+  /** Síncrono. Em produção roda fora da chamada de log (ver `enqueue`); os testes chamam direto. */
   ingest(record: LogRecord): void {
     this.buffer.push(record);
     if (this.buffer.length > LIVE_BUFFER_SIZE) this.buffer.shift();

@@ -1,17 +1,17 @@
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
 
 /**
- * Wrapper das tabelas `latency_samples` e `error_log` (migração 4 do
- * `ReminderStore`, mesmo banco). Único ponto de SQL do diagnóstico.
+ * Wrapper das tabelas `latency_samples`, `error_log` e `reminder_events`
+ * (migração 4 do `ReminderStore`, mesmo banco). Único ponto de SQL do
+ * diagnóstico.
  *
  * Retenção: 30 dias **ou** 10 mil linhas por tabela, o que vier primeiro. A
- * poda roda a cada `PRUNE_EVERY` inserções — barata, e o teto nunca passa
- * muito do limite entre duas podas.
+ * poda é do `Diagnostics`, num timer próprio — nunca na mesma volta do event
+ * loop de uma inserção, que acontece no caminho do áudio (ver lá).
  */
 
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const MAX_ROWS = 10_000;
-const PRUNE_EVERY = 100;
 
 export interface LatencySample {
   at: number;
@@ -59,7 +59,6 @@ export interface ReminderEvent {
 
 export class DiagnosticsStore {
   private readonly statements = new Map<string, StatementSync>();
-  private insertsSincePrune = 0;
 
   constructor(
     private readonly db: DatabaseSync,
@@ -81,21 +80,18 @@ export class DiagnosticsStore {
       s.providerWaitMs === null ? null : Math.round(s.providerWaitMs),
       s.sessionCold ? 1 : 0,
     );
-    this.afterInsert();
   }
 
   insertError(e: Omit<ErrorEntry, 'id'>): void {
     this.stmt(
       'INSERT INTO error_log (at, level, event, room_id, msg, detail) VALUES (?, ?, ?, ?, ?, ?)',
     ).run(e.at, e.level, e.event, e.roomId, e.msg, e.detail ? JSON.stringify(e.detail) : null);
-    this.afterInsert();
   }
 
   insertReminderEvent(e: Omit<ReminderEvent, 'id' | 'label' | 'shortId'>): void {
     this.stmt(
       'INSERT INTO reminder_events (at, reminder_id, kind, room_id, via) VALUES (?, ?, ?, ?, ?)',
     ).run(e.at, e.reminderId, e.kind, e.roomId, e.via);
-    this.afterInsert();
   }
 
   /** Mais recentes primeiro, com rótulo e `short_id` atuais do lembrete. */
@@ -164,12 +160,6 @@ export class DiagnosticsStore {
         `DELETE FROM ${table} WHERE id <= (SELECT id FROM ${table} ORDER BY id DESC LIMIT 1 OFFSET ?)`,
       ).run(MAX_ROWS);
     }
-    this.insertsSincePrune = 0;
-  }
-
-  private afterInsert(): void {
-    this.insertsSincePrune += 1;
-    if (this.insertsSincePrune >= PRUNE_EVERY) this.prune();
   }
 
   private stmt(sql: string): StatementSync {

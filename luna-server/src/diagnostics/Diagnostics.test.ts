@@ -36,6 +36,28 @@ describe('logTap', () => {
     assert.deepEqual(out[0]!.fields, { ok: 1 });
   });
 
+  it('fala repetida na mensagem some: eventos reais do Orchestrator e do Gemini', () => {
+    const out = captured();
+    const fala = 'Pronto, marquei o lembrete de tomar o remédio às oito';
+    // As duas chamadas exatamente como `Orchestrator` e `GeminiLiveAdapter` fazem.
+    emitLog(30, [{ event: 'turn_complete', room_id: 'quarto', had_audio: true, assistant_text: fala }, `Turno concluído: "${fala}"`]);
+    emitLog(30, [{ event: 'assistant_transcript_delta', room_id: 'quarto', text: 'tomar o remédio', generation_complete: null }, 'Delta de transcrição da Luna: "tomar o remédio"']);
+    // Evento desconhecido que repete um campo de fala no texto.
+    emitLog(30, [{ event: 'novo_evento', user_text: 'acende a luz do quarto' }, 'Ouvi "acende a luz do quarto" agora']);
+    const all = JSON.stringify(out);
+    assert.ok(!all.includes('remédio'), all);
+    assert.ok(!all.includes('acende a luz'), all);
+    assert.equal(out[0]!.msg, 'Turno concluído');
+    assert.equal(out[2]!.msg, 'Ouvi "«fala omitida»" agora');
+  });
+
+  it('número com nome parecido com fala continua (não carrega texto)', () => {
+    const out = captured();
+    emitLog(30, [{ event: 'ttfab', transcript_anchor_moves: 3, context: 'x' }, 'TTFAB']);
+    assert.equal(out[0]!.fields.transcript_anchor_moves, 3);
+    assert.equal(out[0]!.fields.context, undefined);
+  });
+
   it('aceita (msg) e (err, msg)', () => {
     const out = captured();
     emitLog(40, ['só mensagem']);
@@ -72,6 +94,20 @@ describe('Diagnostics', () => {
     const recent = diag.recent({ minLevel: 'trace', roomId: null }, LIVE_BUFFER_SIZE * 2);
     assert.equal(recent.length, LIVE_BUFFER_SIZE);
     assert.equal(recent[0]!.msg, 'l10');
+  });
+
+  it('com o tap ligado, nada grava dentro da chamada de log', async () => {
+    resetLogTapForTests();
+    const { diag } = setup();
+    diag.start();
+    try {
+      emitLog(30, [{ event: 'ttfab', room_id: 'quarto', latency_ms: 500, provider: 'gemini' }, 'TTFAB']);
+      assert.equal(diag.store.latencySince(0).length, 0, 'gravou no caminho quente');
+      await new Promise((r) => setImmediate(r));
+      assert.equal(diag.store.latencySince(0).length, 1);
+    } finally {
+      diag.stop();
+    }
   });
 
   it('ttfab sem sala ou sem latency_ms não vira amostra', () => {

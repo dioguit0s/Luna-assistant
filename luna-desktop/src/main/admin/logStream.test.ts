@@ -71,6 +71,21 @@ describe('LogStream', () => {
     assert.deepEqual(msgs, ['a', 'b', 'c']);
   });
 
+  it('sem nem o ping do servidor, derruba e reconecta', async () => {
+    const streams = [sseResponse(), sseResponse()];
+    let n = 0;
+    const events: LogStreamEvent[] = [];
+    const stream = new LogStream(() => CONN, (e) => events.push(e), (async (_url: string, init: RequestInit) => {
+      const s = streams[n++]!;
+      init.signal?.addEventListener('abort', () => s.end());
+      return s.response;
+    }) as unknown as typeof fetch, 50);
+    stream.start({ level: 'info', room: null });
+    await new Promise((r) => setTimeout(r, 1200));
+    stream.stop(false);
+    assert.equal(n, 2, 'não reconectou depois do silêncio');
+  });
+
   it('401 não fica tentando: fecha com o erro', async () => {
     let calls = 0;
     const events: LogStreamEvent[] = [];

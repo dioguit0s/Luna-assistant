@@ -21,6 +21,8 @@ export type LogStreamEvent =
   | { type: 'log-status'; state: 'connecting' | 'open' | 'closed'; error: string | null };
 
 const CONNECT_TIMEOUT_MS = 5_000;
+/** O servidor manda `: ping` a cada 15 s; três perdidos = conexão morta. */
+const IDLE_TIMEOUT_MS = 45_000;
 const RETRY_MIN_MS = 1_000;
 const RETRY_MAX_MS = 15_000;
 const LEVELS = new Set(['trace', 'debug', 'info', 'warn', 'error', 'fatal']);
@@ -45,6 +47,7 @@ export class LogStream {
     private readonly connection: () => AdminConnection,
     private readonly emit: (event: LogStreamEvent) => void,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly idleTimeoutMs = IDLE_TIMEOUT_MS,
   ) {}
 
   start(filter: LogFilter): void {
@@ -123,16 +126,29 @@ export class LogStream {
     const reader = body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done || generation !== this.generation) return;
-      buffer += decoder.decode(value, { stream: true });
-      let cut: number;
-      while ((cut = buffer.indexOf('\n\n')) >= 0) {
-        const block = buffer.slice(0, cut);
-        buffer = buffer.slice(cut + 2);
-        this.handleBlock(block);
+    // Meio-aberto não fecha nem manda nada: sem isto a tela ficaria em
+    // "AO VIVO" para sempre. Qualquer byte (linha ou ping) rearma.
+    let idle: ReturnType<typeof setTimeout> | null = null;
+    const arm = (): void => {
+      if (idle) clearTimeout(idle);
+      idle = setTimeout(() => this.controller?.abort(), this.idleTimeoutMs);
+    };
+    arm();
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done || generation !== this.generation) return;
+        arm();
+        buffer += decoder.decode(value, { stream: true });
+        let cut: number;
+        while ((cut = buffer.indexOf('\n\n')) >= 0) {
+          const block = buffer.slice(0, cut);
+          buffer = buffer.slice(cut + 2);
+          this.handleBlock(block);
+        }
       }
+    } finally {
+      if (idle) clearTimeout(idle);
     }
   }
 
