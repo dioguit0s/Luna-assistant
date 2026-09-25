@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6–M10 feitos: Diagnóstico, Lembretes, Dispositivos, Integrações avançadas, Satélites e servidor)
+**Status:** v1 e v2 implementadas (marcos 1–11) — falta validação manual no app instalado e no servidor de produção; fora da v2 ficaram a agenda (depende do TODO da API) e o "não perturbe"
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -121,9 +121,9 @@ atrito.
 | Escolher microfone e alto-falante | Tela | v1 |
 | Teste de mic: nível e score da wake word ao vivo | Tela | v1 |
 | Mutar, forçar escuta, autostart (hoje só na bandeja) | Tela | v1 |
-| Sensibilidade da wake word | Tela + sidecar | v2 |
-| Atalho global de push-to-talk | Tela | v2 |
-| Notificação do Windows quando um lembrete tocar | Tela | v2 |
+| Sensibilidade da wake word | Tela + sidecar | v2 ✔ |
+| Atalho global de push-to-talk | Tela | v2 ✔ ("falar agora": o `globalShortcut` só vê o aperto) |
+| Notificação do Windows quando um lembrete tocar | Tela | v2 ✔ |
 | Digitar para a Luna em vez de falar | Proto | depois |
 
 ### 9. Servidor
@@ -277,6 +277,26 @@ Diferenças em relação ao inventário:
   descobriu.
 - O semáforo do provider reflete a **última sessão aberta**, não uma sonda: até alguém
   falar com a Luna depois do boot, fica amarelo ("nenhuma sessão aberta").
+
+### O que a v2 entregou
+
+Marcos 6 a 11, cada um com commit próprio e passado pelo `luna-code-reviewer`:
+
+- **M6 Diagnóstico:** `logging/logTap.ts` + `diagnostics/` (TTFAB, últimos erros, log ao vivo por
+  SSE, sem transcrição); tela Diagnóstico e quadro de erros no Início.
+- **M7 Lembretes:** criar/editar pelo painel (hora de parede de São Paulo, mesmas regras da voz),
+  histórico, fala pré-renderizada por fila própria do painel.
+- **M8 Dispositivos:** exclusões, manuais (só `switch`/`light`/`fan` novos), testar e refresh.
+- **M9 Integrações:** grupos `voice` e `weather`, clima trocável a quente com geocoding.
+- **M10 Satélites e servidor:** bloquear/desconectar, backup sem segredos e restauração,
+  release implantada (`release.json` do CI).
+- **M11 Este computador:** sensibilidade da wake word (reinicia o sidecar com `--threshold`, o
+  `frontend.py` não muda), atalho global "falar agora", notificação do Windows quando um lembrete
+  toca na sala do desktop (o processo principal consulta `GET reminders` a cada 10 s — o
+  protocolo WS não ganhou evento).
+
+A migração 4 do banco (tabelas do diagnóstico) torna o deploy de mão única — ver
+`luna-server/deploy/README.md`.
 
 ### Verificação manual pendente
 

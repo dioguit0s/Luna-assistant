@@ -110,6 +110,19 @@ export class WakewordSidecar extends EventEmitter {
     }
   }
 
+  /**
+   * Limiar novo pelo painel (v2): o sidecar só lê `--threshold` no spawn, então
+   * reinicia o processo. Alguns centésimos de segundo sem wake word — o `ready`
+   * seguinte traz o limiar em vigor.
+   */
+  setThreshold(threshold: number | undefined): void {
+    if (this.opts.threshold === threshold) return;
+    this.opts.threshold = threshold;
+    if (this.stopped) return;
+    this.stop();
+    this.start();
+  }
+
   /** Escreve PCM16LE cru no stdin do sidecar. No-op se o processo não estiver de pé. */
   feed(pcm: Buffer): void {
     if (!this.child || this.child.stdin.destroyed) return;

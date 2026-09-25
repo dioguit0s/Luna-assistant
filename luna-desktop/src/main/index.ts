@@ -11,7 +11,7 @@
 
 // Primeiro de tudo: troca o userData antes de config.ts lê-lo (ver profile.ts).
 import './profile.js';
-import { app, dialog, shell } from 'electron';
+import { app, dialog, globalShortcut, Notification, shell } from 'electron';
 import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -38,6 +38,7 @@ import { createMicDump, type MicDump } from './mic-dump.js';
 import { WakewordSidecar } from './wakeword/sidecar.js';
 import { AdminClient } from './admin/client.js';
 import { LogStream } from './admin/logStream.js';
+import { ReminderNotifier } from './reminder-notifier.js';
 import { createPanelMethods, type LocalView } from './panel/methods.js';
 import { createPanelController, type PanelController } from './panel/window.js';
 
@@ -62,6 +63,39 @@ let local: ResolvedLocalSettings | null = null;
 /** Por que o satélite não está conectado, quando não está por falta de configuração. */
 let configError: string | null = null;
 let wakeThreshold: number | null = null;
+/** Atalho global em vigor e o erro do último registro, para a tela mostrar. */
+let registeredShortcut = '';
+let shortcutError: string | null = null;
+let reminderNotifier: ReminderNotifier | null = null;
+/** WAKEWORD_THRESHOLD do .env: vale quando o painel não escolheu nada. */
+let envWakeThreshold: number | undefined;
+
+/**
+ * Troca o atalho global de "falar agora". `globalShortcut` só avisa o
+ * aperto, não a soltura — por isso é "falar agora" (mesmo efeito do
+ * "Forçar escuta" da bandeja), não segurar-para-falar.
+ *
+ * @returns `false` quando o sistema recusou (outro app já usa a combinação).
+ */
+function applyTalkShortcut(accel: string): boolean {
+  if (registeredShortcut) globalShortcut.unregister(registeredShortcut);
+  registeredShortcut = '';
+  shortcutError = null;
+  if (!accel) return true;
+  let ok = false;
+  try {
+    ok = globalShortcut.register(accel, () => session?.forceListen());
+  } catch {
+    ok = false;
+  }
+  if (!ok) {
+    shortcutError = `O atalho ${accel} já está em uso por outro programa.`;
+    console.warn(`[luna-desktop] ${shortcutError}`);
+    return false;
+  }
+  registeredShortcut = accel;
+  return true;
+}
 
 function localView(): LocalView {
   const current = local ?? readLocalSettings();
@@ -75,6 +109,11 @@ function localView(): LocalView {
     adminToken: { set: Boolean(current.adminToken), source: current.sources.adminToken },
     muted: session?.isMuted() ?? false,
     autostart: isAutostartEnabled(),
+    wakeThreshold: current.wakeThreshold,
+    wakeThresholdActive: wakeThreshold,
+    talkShortcut: current.talkShortcut,
+    talkShortcutError: shortcutError,
+    reminderNotifications: current.reminderNotifications,
     state: session?.getState() ?? 'error',
     configError,
     version: app.getVersion(),
@@ -186,6 +225,8 @@ if (!gotLock) {
   });
 
   app.on('will-quit', () => {
+    globalShortcut.unregisterAll();
+    reminderNotifier?.stop();
     // Sem isso: ícone fantasma na bandeja, WS pendurado, janelas vivas,
     // sidecar Python órfão.
     wsClient?.stop();
@@ -225,9 +266,11 @@ if (!gotLock) {
       // Threshold inválido no .env não pode impedir o painel de abrir.
       console.error(`[luna-desktop] ${err instanceof Error ? err.message : String(err)}`);
     }
+    envWakeThreshold = wakeOptions.wakewordThreshold;
     wakeword = new WakewordSidecar({
       model: wakeOptions.wakewordModelPath,
-      threshold: wakeOptions.wakewordThreshold,
+      // O painel vence o .env, como no resto da configuração local.
+      threshold: local.wakeThreshold ?? envWakeThreshold,
       scoreIntervalMs: WAKE_SCORE_INTERVAL_MS,
     });
 
@@ -291,6 +334,8 @@ if (!gotLock) {
       console.log(`[luna-desktop] wakeword pronto (modelo=${info.model} threshold=${info.threshold})`);
       wakeThreshold = info.threshold;
       session?.setSidecarHealthy(true);
+      // Limiar trocado pelo painel reinicia o sidecar: a tela mostra o novo.
+      pushLocalView();
     });
     wakeword.on('wake', (info) => {
       console.log(`[luna-desktop] wake detectado (mean_prob=${info.mean_prob.toFixed(3)})`);
@@ -351,6 +396,15 @@ if (!gotLock) {
           view: localView,
           async save(patch) {
             const before = local ?? readLocalSettings();
+            // Atalho: testa o registro ANTES de gravar — gravar um atalho que
+            // o Windows recusou deixaria a tela dizendo que ele existe.
+            if (patch.talkShortcut !== undefined && patch.talkShortcut.trim() !== before.talkShortcut) {
+              if (!applyTalkShortcut(patch.talkShortcut.trim())) {
+                const failed = shortcutError ?? 'Atalho recusado pelo sistema.';
+                applyTalkShortcut(before.talkShortcut);
+                throw new LocalSettingsError('talkShortcut', failed);
+              }
+            }
             // Os segredos gravados seguem a URL do servidor: o token admin e o
             // segredo do satélite passam a ir para o host novo. Um renderer do
             // painel comprometido poderia mudar a URL para exfiltrá-los — a
@@ -374,6 +428,9 @@ if (!gotLock) {
               if (response !== 0) throw new LocalSettingsError('serverUrl', 'Troca de servidor cancelada.');
             }
             local = saveLocalSettings(patch);
+            if (patch.wakeThreshold !== undefined) {
+              wakeword?.setThreshold(local.wakeThreshold ?? envWakeThreshold);
+            }
             if (patch.micDeviceId !== undefined || patch.speakerDeviceId !== undefined) {
               captureWindow?.setAudioDevices(local.micDeviceId, local.speakerDeviceId);
             }
@@ -420,6 +477,21 @@ if (!gotLock) {
 
     wakeword.start();
     tryConnect();
+
+    applyTalkShortcut(local.talkShortcut);
+    reminderNotifier = new ReminderNotifier(
+      admin,
+      () => (local ?? readLocalSettings()).roomId,
+      (title, body) => {
+        if (Notification.isSupported()) new Notification({ title, body, silent: true }).show();
+      },
+      // Sem token admin a API nem existe para este app: não adianta perguntar.
+      () => {
+        const current = local ?? readLocalSettings();
+        return current.reminderNotifications && Boolean(current.adminToken);
+      },
+    );
+    reminderNotifier.start();
 
     if (configError) {
       // Não é um crash: falta configuração. Em vez de mandar editar um .env,

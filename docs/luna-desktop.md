@@ -60,6 +60,13 @@ Portar (não reescrever) a lógica de `luna-client-test/src/config.ts` e `src/pr
 - `room_id`: fixo em `.env` (ex. `desktop_diogo`), não escolhido em runtime (decisão já tomada).
 - `WS_AUTH_SECRET` e URL do servidor: `.env` gitignored, mesmo modelo de confiança do `luna-client-test` — **nunca commitar** (mesma pegadinha já documentada no `CLAUDE.md` do repo pra outros secrets).
 
+### 4b. Preferências locais (painel v2)
+
+`userData/settings.json` guarda também `wakeThreshold` (0.5–0.999; ausente = `WAKEWORD_THRESHOLD`
+do `.env` ou o 0.97 do sidecar), `talkShortcut` (accelerator do Electron; o registro é testado
+antes de gravar) e `reminderNotifications` (padrão ligado; precisa do token admin, porque o aviso
+vem de `GET /admin/v1/reminders`).
+
 ### 5. Nota sobre Home Assistant (avisar o usuário, não bloqueia v1)
 
 `room_id` novo não bate com nenhum `area_id` existente no HA. Comandos de controle de dispositivo (`command_result`) disparados a partir do desktop **não vão resolver** a nenhum device físico até o usuário criar uma área no HA correspondente a `desktop_diogo` (ou apontar o `room_id` do desktop pra uma área já existente, abrindo mão do isolamento de sessão/zona). Não bloqueia a conversa por voz — só o "acender a luz daqui".

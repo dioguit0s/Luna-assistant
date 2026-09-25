@@ -22,6 +22,14 @@ export interface LocalView {
   adminToken: { set: boolean; source: 'panel' | 'env' | 'none' };
   muted: boolean;
   autostart: boolean;
+  /** Limiar escolhido no painel; `null` = o do .env ou o default do sidecar. */
+  wakeThreshold: number | null;
+  /** Limiar em vigor no sidecar agora (do último `ready`). */
+  wakeThresholdActive: number | null;
+  talkShortcut: string;
+  /** O atalho gravado não pôde ser registrado (outro app já o usa). */
+  talkShortcutError: string | null;
+  reminderNotifications: boolean;
   state: AppState;
   /** Por que o satélite não está de pé, quando não está. */
   configError: string | null;

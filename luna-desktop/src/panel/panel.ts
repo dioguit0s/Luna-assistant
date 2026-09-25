@@ -2167,6 +2167,61 @@ pages.push({
       ),
     );
 
+    // Preferências (v2): sensibilidade, atalho, notificação.
+    const thresholds: Array<{ value: number | null; label: string }> = [
+      { value: null, label: 'PADRÃO' },
+      { value: 0.9, label: '0.90 · SENSÍVEL' },
+      { value: 0.95, label: '0.95' },
+      { value: 0.97, label: '0.97 · EQUILIBRADA' },
+      { value: 0.99, label: '0.99 · RÍGIDA' },
+    ];
+    if (view.wakeThreshold !== null && !thresholds.some((t) => t.value === view.wakeThreshold)) {
+      thresholds.push({ value: view.wakeThreshold, label: view.wakeThreshold.toFixed(3) });
+    }
+    let thresholdTimer: ReturnType<typeof setTimeout> | null = null;
+    const thresholdCycler = cycler(thresholds, thresholds.findIndex((t) => t.value === view.wakeThreshold), (value, i) => {
+      if (thresholdTimer) clearTimeout(thresholdTimer);
+      thresholdTimer = setTimeout(() => void run(`SENSIBILIDADE → ${thresholds[i]!.label} · WAKE WORD REINICIANDO`, 'local.save', { wakeThreshold: value }), 600);
+    }, 'sensibilidade');
+
+    // Grava a combinação apertada, no formato de accelerator do Electron.
+    const shortcut = lineInput(view.talkShortcut, { 'aria-label': 'Atalho global para falar', placeholder: 'CLIQUE E APERTE A COMBINAÇÃO', readOnly: true });
+    shortcut.addEventListener('keydown', (e) => {
+      e.preventDefault();
+      if (e.key === 'Escape') return shortcut.blur();
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        shortcut.value = '';
+        return;
+      }
+      if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
+      const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Super'].filter(Boolean) as string[];
+      const key = e.key === ' ' ? 'Space' : /^F\d{1,2}$/.test(e.key) ? e.key : e.key.length === 1 ? e.key.toUpperCase() : e.code.replace(/^Key|^Digit/, '');
+      shortcut.value = [...mods, key].join('+');
+    });
+    const prefs = frame(
+      'PREFERÊNCIAS',
+      { style: 'gap:10px' },
+      field('SENSIBILIDADE', thresholdCycler, 'IMEDIATO (REINICIA A WAKE WORD)', 118, true),
+      h('div', { class: 'small' }, `EM VIGOR: ${view.wakeThresholdActive !== null ? view.wakeThresholdActive.toFixed(2) : '—'} · MAIS BAIXO ACORDA MAIS FÁCIL, E ACORDA SEM QUERER`),
+      field('ATALHO FALAR', shortcut, 'IMEDIATO', 118, true),
+      view.talkShortcutError ? h('div', { class: 'amber small' }, `◈ ${String(view.talkShortcutError).toUpperCase()}`) : null,
+      h(
+        'div',
+        { class: 'row', style: 'gap:8px' },
+        cmd('SALVAR ATALHO', async () => {
+          const value = shortcut.value.trim();
+          if (await run(value ? `ATALHO ${value.toUpperCase()} · VALE EM QUALQUER JANELA` : 'ATALHO REMOVIDO', 'local.save', { talkShortcut: value })) void renderCurrent();
+        }, { first: true }),
+        cmd('LIMPAR', () => {
+          shortcut.value = '';
+        }, { tone: 'quiet' }),
+      ),
+      h('div', { class: 'small', style: 'line-height:1.6' }, 'O ATALHO ABRE A ESCUTA NA HORA, COMO “FORÇAR ESCUTA”. BACKSPACE APAGA.'),
+      toggle('NOTIFICAR LEMBRETES', 'AVISO DO WINDOWS QUANDO UM LEMBRETE TOCA NESTA SALA (PRECISA DO TOKEN ADMIN)', view.reminderNotifications, async () => {
+        if (await run(`NOTIFICAR LEMBRETES ${view.reminderNotifications ? 'DESLIGADO' : 'LIGADO'}`, 'local.save', { reminderNotifications: !view.reminderNotifications })) void renderCurrent();
+      }),
+    );
+
     // Áudio
     const deviceCycler = (kind: string, current: string, key: 'micDeviceId' | 'speakerDeviceId', name: string): HTMLElement => {
       const options = [{ value: '', label: 'PADRÃO DO SISTEMA' }, ...devices.filter((d) => d.kind === kind).map((d) => ({ value: d.deviceId, label: (d.label || 'DISPOSITIVO SEM NOME').toUpperCase() }))];
@@ -2204,7 +2259,7 @@ pages.push({
         'div',
         { class: 'cols', style: 'grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)' },
         h('div', { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' }, connection, keys),
-        audio,
+        h('div', { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' }, audio, prefs),
       ),
     );
   },
