@@ -27,6 +27,7 @@ tudo em um clique. O front door do repositório é o [README da raiz](../README.
 - [ADR 008 — Tempo e previsão via Open-Meteo](adr/008-tempo-e-previsao.md)
 - [ADR 009 — Inventário por cômodo](adr/009-inventario-por-comodo.md)
 - [ADR 010 — Painel de controle: API admin e configuração no SQLite](adr/010-painel-de-controle-e-api-admin.md) (proposto)
+- [ADR 011 — Agenda por voz: integração com o Compasso](adr/011-agenda-compasso.md)
 
 ## Features / módulos
 

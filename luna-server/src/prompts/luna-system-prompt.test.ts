@@ -207,4 +207,17 @@ describe('buildLunaSystemPrompt', () => {
     assert.match(prompt, /Nunca invente temperatura/);
     assert.match(prompt, /Só acompanho o tempo daqui de casa/);
   });
+
+  it('omite a seção da agenda por padrão e a inclui com calendarEnabled', () => {
+    const off = buildLunaSystemPrompt('sala_de_estar', [], at(10), true);
+    assert.doesNotMatch(off, /get_agenda|manage_agenda|# Agenda/);
+
+    const on = buildLunaSystemPrompt('sala_de_estar', [], at(10), false, true);
+    assert.match(on, /# Agenda/);
+    assert.match(on, /get_agenda/);
+    // As duas regras do Compasso que não podem sumir do prompt.
+    assert.match(on, /exige effort/);
+    assert.match(on, /aplicativo do Compasso/);
+    assert.doesNotMatch(on, /get_weather/);
+  });
 });

@@ -66,6 +66,11 @@ src/
 │   ├── WeatherSource.ts  #   snapshot em memória, refresh com TTL
 │   ├── wmo.ts            #   código WMO -> descrição em português
 │   └── tools.ts          #   schema da tool get_weather
+├── calendar/             # agenda no Compasso (ADR 011)
+│   ├── CompassoClient.ts #   HTTP /api/v1, erros por error.code, Idempotency-Key
+│   ├── dates.ts          #   "amanhã"/"sexta"/"dia 30" → ISO com offset
+│   ├── spoken.ts         #   item da agenda → frase
+│   └── tools.ts          #   schema de get_agenda e manage_agenda
 ├── prompts/luna-system-prompt.ts  # personalidade + contexto de cômodo e hora
 └── metrics/ttfab.ts      # medição da métrica de performance do projeto
 ```
@@ -109,7 +114,8 @@ knobs de latência). Os grupos de **runtime** — `ha`, `provider`, `calendar`, 
 | `provider` | `RoomManager` chama `settings.current()` a cada sessão nova | Próxima conversa da sala |
 | `ha` | `onChange` → `HomeAssistantClient.reconfigure` + refresh do registro | Imediato |
 | `devices`, `rooms` | `onChange` → `DeviceRegistrySource.setOverrides` / `setRoomAreas` | Imediato |
-| `calendar`, `satellites` | Só o painel, por enquanto | — |
+| `calendar` | `CompassoClient` lê URL e token a cada requisição; `RoomManager` declara as tools da agenda às sessões novas | Imediato (tools: próxima conversa) |
+| `satellites` | Só o painel, por enquanto | — |
 
 `rooms.areas` mapeia uma sala da Luna para uma área do HA (`desktop_diogo → escritorio`):
 `DeviceRegistry.areaFor` resolve `control_device` e `list_devices` pela área mapeada.
@@ -217,6 +223,8 @@ Contrato agnóstico ao provider — ver [ADR 002](adr/002-function-calling-contr
 | `set_reminder` | `orchestrator/tools/setReminder.ts` | Cria alarme/lembrete/timer, único ou recorrente |
 | `manage_reminders` | `orchestrator/tools/manageReminders.ts` | `dismiss`/`snooze` do que toca agora, `list`/`cancel` do que está marcado |
 | `get_weather` | `orchestrator/tools/getWeather.ts` | Tempo agora, hoje ou amanhã, pela previsão do Open-Meteo. Só declarada ao modelo se `WEATHER_LATITUDE`/`WEATHER_LONGITUDE` estiverem configuradas |
+| `get_agenda` | `orchestrator/tools/getAgenda.ts` | Compromissos, aulas e tarefas de um dia, da semana, por busca ou pendentes, no Compasso. Só declarada com URL e token da agenda ([ADR 011](adr/011-agenda-compasso.md)) |
+| `manage_agenda` | `orchestrator/tools/manageAgenda.ts` | Cria evento, cria tarefa (exige esforço e atributo) e conclui tarefa no Compasso |
 
 **O vocabulário é deliberadamente enxuto por causa do TTFAB:** cada schema a mais infla
 o `model_decision_ms`, sobretudo com `thinkingBudget: 0`. Adicionar tool é decisão de

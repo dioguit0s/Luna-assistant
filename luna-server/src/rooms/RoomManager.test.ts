@@ -225,3 +225,36 @@ describe('RoomManager: timeout de connect()', () => {
     ringBuffer.destroy();
   });
 });
+
+describe('RoomManager: tools da agenda', () => {
+  before(() => {
+    createLogger(baseConfig);
+  });
+
+  /** Provider que guarda o `ProviderSessionConfig` recebido no connect. */
+  class CapturingProvider extends InstantProvider {
+    session: ProviderSessionConfig | null = null;
+    override connect(session: ProviderSessionConfig): Promise<void> {
+      this.session = session;
+      return Promise.resolve();
+    }
+  }
+
+  it('só declara get_agenda e manage_agenda com a agenda configurada', async () => {
+    for (const enabled of [false, true]) {
+      const ringBuffer = new ConversationRingBuffer();
+      const provider = new CapturingProvider();
+      const roomManager = new RoomManager(baseConfig, ringBuffer, () => provider);
+      if (enabled) roomManager.setCalendarEnabledSource(() => true);
+
+      await roomManager.getOrCreateProvider(ROOM_ID);
+      const names = provider.session?.tools.map((t) => t.name) ?? [];
+      assert.equal(names.includes('get_agenda'), enabled);
+      assert.equal(names.includes('manage_agenda'), enabled);
+      assert.equal(/# Agenda/.test(provider.session?.systemPrompt ?? ''), enabled);
+
+      await roomManager.destroy();
+      ringBuffer.destroy();
+    }
+  });
+});

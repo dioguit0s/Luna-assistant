@@ -5,6 +5,7 @@ import { CONTROL_DEVICE_TOOL } from '../providers/types.js';
 import { LIST_DEVICES_TOOL } from '../ha/tools.js';
 import { SET_REMINDER_TOOL, MANAGE_REMINDERS_TOOL } from '../reminders/tools.js';
 import { GET_WEATHER_TOOL } from '../weather/tools.js';
+import { GET_AGENDA_TOOL, MANAGE_AGENDA_TOOL } from '../calendar/tools.js';
 import { buildLunaSystemPrompt } from '../prompts/luna-system-prompt.js';
 import { ConversationRingBuffer } from './ConversationRingBuffer.js';
 import { getLogger } from '../logging/logger.js';
@@ -28,6 +29,13 @@ export class RoomManager {
    */
   private readonly currentConfig: () => AppConfig;
   private lastConnect: { ok: boolean; at: number; error?: string } | null = null;
+  /**
+   * Agenda configurada (URL e token do Compasso)? Fora do `AppConfig` porque
+   * não é knob do provider: é o grupo `calendar` do banco, lido a cada sessão
+   * nova como o resto. Padrão desligado — teste e boot sem agenda não declaram
+   * tool nenhuma dela.
+   */
+  private calendarEnabled: () => boolean = () => false;
 
   constructor(
     config: AppConfig | (() => AppConfig),
@@ -36,6 +44,11 @@ export class RoomManager {
     private readonly providerFactory: (config: AppConfig) => IAudioProvider = createAudioProvider,
   ) {
     this.currentConfig = typeof config === 'function' ? config : () => config;
+  }
+
+  /** Ligado em `index.ts`, com o `configured` do `CompassoClient`. */
+  setCalendarEnabledSource(source: () => boolean): void {
+    this.calendarEnabled = source;
   }
 
   /** Resultado da última abertura de sessão, para o semáforo do painel. */
@@ -111,7 +124,10 @@ export class RoomManager {
     // sabe responder "não configurado" não deve pagar orçamento de instrução
     // da sessão Live nem inflar o `model_decision_ms`.
     const weatherEnabled = config.weatherLatitude !== null;
-    const systemPrompt = buildLunaSystemPrompt(roomId, history, undefined, weatherEnabled);
+    // Mesma regra para a agenda: sem URL e token, nem as tools nem a seção do
+    // prompt. Ligar pelo painel vale na próxima sessão.
+    const calendarEnabled = this.calendarEnabled();
+    const systemPrompt = buildLunaSystemPrompt(roomId, history, undefined, weatherEnabled, calendarEnabled);
 
     const connectPromise = provider.connect({
       roomId,
@@ -123,12 +139,19 @@ export class RoomManager {
         SET_REMINDER_TOOL,
         MANAGE_REMINDERS_TOOL,
         ...(weatherEnabled ? [GET_WEATHER_TOOL] : []),
+        ...(calendarEnabled ? [GET_AGENDA_TOOL, MANAGE_AGENDA_TOOL] : []),
       ],
       // Chamado por providers que renovam a sessão sem passar por
       // `createProviderSession` de novo (ver `GeminiLiveAdapter.renewSession`):
       // precisa da hora de agora, não da hora em que a sala foi criada.
       refreshSystemPrompt: () =>
-        buildLunaSystemPrompt(roomId, this.ringBuffer.getHistory(roomId), undefined, weatherEnabled),
+        buildLunaSystemPrompt(
+          roomId,
+          this.ringBuffer.getHistory(roomId),
+          undefined,
+          weatherEnabled,
+          calendarEnabled,
+        ),
     });
 
     // Medido em volta do connect e logado junto: abrir sessão é a maior

@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 e v2 implementadas (marcos 1–11) — falta validação manual no app instalado e no servidor de produção; fora da v2 ficaram a agenda (depende do TODO da API) e o "não perturbe"
+**Status:** v1 e v2 implementadas (marcos 1–11) — falta validação manual no app instalado e no servidor de produção; a agenda por voz entrou ([ADR 011](adr/011-agenda-compasso.md)); fora da v2 ficaram as telas da agenda e o "não perturbe"
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -81,7 +81,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Função | Precisa de | Quando |
 |---|---|---|
 | **Home Assistant**: URL, token, "testar conexão" | API + Persist | v1 |
-| **Agenda**: URL, credencial, "testar conexão", status | API + Persist | v1 (tela) — as tools dependem do [TODO da agenda](#todo-api-do-app-de-agendas) |
+| **Agenda**: URL, credencial, "testar conexão", status | API + Persist | v1 (tela); tools de voz ✔ ([ADR 011](adr/011-agenda-compasso.md)) |
 | **Provedor de IA**: Gemini ou OpenAI, modelo, voz, chaves | API + Persist | v1 |
 | **Provedor de IA (avançado)**: VAD, silêncio, thinking | API + Persist | v2 ✔ |
 | **Clima**: cidade (vira lat/long), "testar" | API + Persist | v2 ✔ |
@@ -99,7 +99,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 
 | Função | Precisa de | Quando |
 |---|---|---|
-| "O que a Luna vê hoje": eventos, tarefas e aulas do dia, como ela receberia | API + TODO da agenda | v2 |
+| "O que a Luna vê hoje": eventos, tarefas e aulas do dia, como ela receberia | API | v2 |
 | Log do que a Luna consultou ou criou na agenda (ação e resultado, sem transcrição) | API + Persist | v2 |
 
 Edição de eventos e tarefas fica no app de agendas — duplicar aqui só criaria
@@ -205,27 +205,22 @@ credencial, até a API do app existir (TODO abaixo).
 
 ## TODO: API do app de agendas
 
-A API REST do app ainda não está definida. O que se sabe do uso:
+Resolvido: o app é o **Compasso**, e a integração está no [ADR 011](adr/011-agenda-compasso.md).
 
-- A Luna precisa **responder** sobre eventos, tarefas e aulas do dia (e de outros
-  dias, por data relativa — "amanhã", "sexta").
-- A Luna precisa **criar** eventos e tarefas por voz.
+- Autenticação por `Authorization: Bearer`.
+- Rota de saúde em `GET /health` autenticada, que o "testar conexão" usa.
+- Listagem por intervalo, com offset `-03:00` explícito.
+- Aulas são itens `type: "class"` na mesma agenda.
+- Tarefas têm prazo opcional, `effort` e `attribute` obrigatórios, e `POST /tasks/{id}/complete`.
+- Erros tratados por `error.code`.
 
-A definir antes de o marco da agenda começar:
+A URL gravada no painel é a base **com** `/api/v1`:
 
-- [ ] Autenticação (token fixo? qual header?)
-- [ ] Rota de saúde para o "testar conexão" do painel
-- [ ] Listagem por intervalo de datas, com fuso explícito (o contrato de tempo
-      do [ADR 006](adr/006-agendamento-e-contrato-de-tempo.md) vale aqui também)
-- [ ] Aulas: são eventos com tipo próprio, ou recurso separado?
-- [ ] Tarefas: têm data? prioridade? como marcar como feita?
-- [ ] Criação de evento e de tarefa: campos mínimos obrigatórios
-- [ ] Erros e limites (o que a Luna fala quando o app está fora)
+- Processo no homeserver: `http://127.0.0.1:8090/api/v1`.
+- Container na rede `compasso_default`: `http://compasso-api:3000/api/v1`.
+- Fora do homeserver, pelo túnel: `https://compasso.homelab-server.space/api/v1`.
 
-No servidor, a integração segue o formato de `weather/` e `reminders/`: uma fonte
-(`CalendarSource`) atrás de um *holder* trocável, e tools novas no contrato do
-[ADR 002](adr/002-function-calling-contract.md). Os lembretes da Luna continuam
-separados dos eventos da agenda.
+Continua pendente só a tela "O que a Luna vê hoje" e o log de consultas, da seção 6.
 
 ## Ordem de construção (marcos, cada um verificável isoladamente)
 

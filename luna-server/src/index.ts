@@ -7,6 +7,7 @@ import {
 } from './ha/deviceRegistrySource.js';
 import { OpenMeteoClient } from './weather/OpenMeteoClient.js';
 import { WeatherSource } from './weather/WeatherSource.js';
+import { CompassoClient } from './calendar/CompassoClient.js';
 import { ConversationRingBuffer } from './rooms/ConversationRingBuffer.js';
 import { RoomManager } from './rooms/RoomManager.js';
 import { WsServer } from './ws/WsServer.js';
@@ -126,6 +127,13 @@ async function main(): Promise<void> {
   await weatherSource.start();
   settings.onChange('weather', () => weatherSource.setClient(weatherClient()));
 
+  // Agenda (Compasso): o client lê URL e token do banco a cada requisição, então
+  // a troca pelo painel vale na hora sem holder. As tools só são declaradas às
+  // sessões novas com a agenda configurada (`RoomManager`).
+  const calendarClient = new CompassoClient(() => settings.get('calendar'));
+  roomManager.setCalendarEnabledSource(() => calendarClient.configured);
+  settings.onChange('calendar', () => calendarClient.resetStatus());
+
   // O ReminderScheduler só pode nascer depois do WsServer estar construído: o
   // onFire precisa do ciclo de toque que vive no Orchestrator lá dentro, e o
   // Orchestrator precisa do scheduler — para o handler de set_reminder chamar
@@ -141,6 +149,7 @@ async function main(): Promise<void> {
     deviceRegistry,
     reminderStore,
     weatherSource,
+    calendarClient,
   );
 
   // O ciclo de toque (rajada → janela de escuta → rajada, dispensa, soneca e o
@@ -192,6 +201,7 @@ async function main(): Promise<void> {
         else wsServer.cancelReminderPrerender(reminder.id);
       },
       weatherSource,
+      calendarStatus: () => calendarClient.lastStatus(),
       diagnostics,
       disconnectSatellite: (deviceId) => wsServer.disconnectDevice(deviceId, 'desconectado pelo painel'),
       onRestart: () => requestRestart(),

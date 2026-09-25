@@ -52,8 +52,8 @@ export interface WeatherSettings {
 }
 
 /**
- * Conexão com o app de agendas. Só a conexão: as tools dependem do TODO da API
- * do app (ver `docs/painel-de-controle.md`).
+ * Conexão com o Compasso, o app de agendas (ADR 011). `url` é a base com
+ * `/api/v1`; com os dois preenchidos, as tools da agenda são declaradas.
  */
 export interface CalendarSettings {
   url: string;

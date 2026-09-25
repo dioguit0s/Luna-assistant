@@ -139,9 +139,16 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
       },
       weatherSource: null,
       diagnostics,
-      // Só o que o clima do painel chama: geocoding e previsão do Open-Meteo.
-      fetchImpl: (async (url: string) => {
+      // Só o que o painel chama por fora: geocoding e previsão do Open-Meteo,
+      // e o health do Compasso (200 só com o token certo).
+      fetchImpl: (async (url: string, init?: RequestInit) => {
         harness.fetchCalls.push(String(url));
+        if (String(url).endsWith('/api/v1/health')) {
+          const auth = (init?.headers as Record<string, string> | undefined)?.Authorization;
+          return auth === 'Bearer token-do-compasso'
+            ? new Response(JSON.stringify({ ok: true, version: 'abc123' }))
+            : new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'Token inválido.' } }), { status: 401 });
+        }
         if (String(url).includes('geocoding-api')) {
           return new Response(JSON.stringify({ results: [{ name: 'Santos', admin1: 'São Paulo', country: 'Brasil', latitude: -23.96, longitude: -46.33 }] }));
         }
@@ -257,6 +264,22 @@ describe('API admin', () => {
     const res = await call(h, 'POST', '/admin/v1/settings/calendar/test', {});
     assert.equal(res.body.ok, false);
     assert.match(res.body.error, /obrigatórios/);
+  });
+
+  it('testar a agenda chama o /health do Compasso com o token', async () => {
+    const good = await call(h, 'POST', '/admin/v1/settings/calendar/test', {
+      url: 'http://127.0.0.1:8090/api/v1',
+      token: 'token-do-compasso',
+    });
+    assert.equal(good.body.ok, true);
+    assert.equal(good.body.version, 'abc123');
+
+    const bad = await call(h, 'POST', '/admin/v1/settings/calendar/test', {
+      url: 'http://127.0.0.1:8090/api/v1',
+      token: 'errado',
+    });
+    assert.equal(bad.body.ok, false);
+    assert.equal(bad.body.error, 'credencial recusada');
   });
 
   it('voz avançada vale na próxima sessão; clima na hora', async () => {

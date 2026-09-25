@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { CompassoClient, type CompassoStatus } from '../calendar/CompassoClient.js';
 import type { AppConfig } from '../config/env.js';
 import { ACTIONABLE_DOMAINS, type HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
@@ -52,6 +53,8 @@ export interface AdminApiDeps {
    */
   onReminderSaved: (reminder: Reminder, labelChanged: boolean) => void;
   weatherSource: WeatherSource | null;
+  /** Desfecho da última chamada ao Compasso, para o semáforo da agenda. */
+  calendarStatus?: () => CompassoStatus | null;
   /** Série de TTFAB, últimos erros e log ao vivo (v2). */
   diagnostics: Diagnostics;
   /** Fecha as conexões de um `device_id` — ver `WsServer.disconnectDevice`. */
@@ -71,7 +74,6 @@ const MAX_BODY_BYTES = 64 * 1024;
 const MAX_RESTORE_BYTES = 1024 * 1024;
 export const BACKUP_FORMAT = 'luna-backup';
 export const BACKUP_VERSION = 1;
-const CALENDAR_TEST_TIMEOUT_MS = 3000;
 /**
  * Domínios que o painel aciona ("testar") e aceita em dispositivo manual novo:
  * os da descoberta do HA. O `control_device` em si não filtra domínio — por
@@ -297,12 +299,16 @@ export class AdminApi {
   }
 
   private calendarLight(): { light: Light; detail: string } {
-    const { url } = this.deps.settings.get('calendar');
-    // Sem as tools da agenda (TODO da API do app), "configurado" é o máximo
-    // que dá para afirmar sem fazer uma requisição a cada status.
-    return url
-      ? { light: 'unknown', detail: 'configurado — use "testar conexão"' }
-      : { light: 'off', detail: 'não configurado' };
+    const { url, token } = this.deps.settings.get('calendar');
+    if (!url || !token) return { light: 'off', detail: 'não configurado' };
+    // Sem requisição a cada status: o semáforo é o desfecho da última chamada
+    // das tools de voz, e "configurado" até a primeira. O "testar" não conta:
+    // pode ter testado uma URL que ainda nem foi gravada.
+    const last = this.deps.calendarStatus?.() ?? null;
+    if (!last) return { light: 'unknown', detail: 'configurado — use "testar conexão"' };
+    return last.ok
+      ? { light: 'ok', detail: 'última consulta respondeu' }
+      : { light: 'error', detail: last.error ?? 'última consulta falhou' };
   }
 
   // ─── Satélites ─────────────────────────────────────────────────────────
@@ -769,32 +775,29 @@ export class AdminApi {
   }
 
   /**
-   * Provisório até a API do app de agendas existir (TODO em
-   * `docs/painel-de-controle.md`): só prova que a URL responde e aceita o
-   * token. Quando houver rota de saúde, é ela que entra aqui.
+   * `GET /health` autenticado do Compasso: 200 só com o token certo, 401 com
+   * token errado ou revogado — é o que distingue "a URL responde" de "a Luna
+   * consegue usar a agenda".
    */
   private async testCalendar(url: string, token: string): Promise<unknown> {
-    if (!url) return { ok: false, latency_ms: 0, error: 'URL não configurada' };
     const startedAt = Date.now();
-    try {
-      const res = await this.fetchImpl(url, {
-        headers: token ? { Authorization: `Bearer ${token}` } : {},
-        signal: AbortSignal.timeout(CALENDAR_TEST_TIMEOUT_MS),
-      });
-      const latency = Date.now() - startedAt;
-      if (res.status === 401 || res.status === 403) {
-        return { ok: false, latency_ms: latency, error: 'credencial recusada' };
-      }
-      return res.status < 500
-        ? { ok: true, latency_ms: latency, error: null }
-        : { ok: false, latency_ms: latency, error: `HTTP ${res.status}` };
-    } catch (err) {
+    const result = await new CompassoClient(() => ({ url, token }), this.fetchImpl).health();
+    const latency = Date.now() - startedAt;
+    if (!result.ok) {
       return {
         ok: false,
-        latency_ms: Date.now() - startedAt,
-        error: err instanceof Error ? err.message : 'erro desconhecido',
+        latency_ms: latency,
+        error:
+          result.code === 'unauthorized' || result.code === 'forbidden'
+            ? 'credencial recusada'
+            : result.code === 'unreachable'
+              ? 'o Compasso não respondeu'
+              : result.message,
       };
     }
+    return result.data.ok === true
+      ? { ok: true, latency_ms: latency, error: null, version: typeof result.data.version === 'string' ? result.data.version : null }
+      : { ok: false, latency_ms: latency, error: 'o Compasso respondeu, mas não está saudável' };
   }
 
   // ─── Diagnóstico ───────────────────────────────────────────────────────

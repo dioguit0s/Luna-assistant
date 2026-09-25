@@ -13,6 +13,7 @@ import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import type { ReminderStore } from '../reminders/ReminderStore.js';
 import type { WeatherSource } from '../weather/WeatherSource.js';
+import type { CompassoClient } from '../calendar/CompassoClient.js';
 import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import type { AlarmRinger } from '../reminders/AlarmRinger.js';
 import { validateAuthToken } from './auth.js';
@@ -139,6 +140,7 @@ export class WsServer {
     deviceRegistry: DeviceRegistrySource,
     reminderStore: ReminderStore,
     weatherSource: WeatherSource | null,
+    calendarClient: CompassoClient | null = null,
   ) {
     this.providerName = () => config.audioProvider;
     // O client do HA e o registro são construídos em `index.ts`: o registro tem
@@ -151,6 +153,7 @@ export class WsServer {
       (roomId, payload) => this.sendToRoom(roomId, payload),
       reminderStore,
       weatherSource,
+      calendarClient,
     );
   }
 

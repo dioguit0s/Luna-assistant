@@ -22,6 +22,10 @@ import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import { createGetWeatherHandler } from './tools/getWeather.js';
 import { GET_WEATHER_TOOL } from '../weather/tools.js';
 import type { WeatherSource } from '../weather/WeatherSource.js';
+import type { CompassoClient } from '../calendar/CompassoClient.js';
+import { GET_AGENDA_TOOL, MANAGE_AGENDA_TOOL } from '../calendar/tools.js';
+import { createGetAgendaHandler } from './tools/getAgenda.js';
+import { createManageAgendaHandler } from './tools/manageAgenda.js';
 import {
   createEnvelope,
   serializeControlMessage,
@@ -326,6 +330,13 @@ export class Orchestrator implements AlarmAudioSink {
      * handler nem precisa existir.
      */
     weatherSource: WeatherSource | null,
+    /**
+     * Cliente do Compasso. Os handlers existem sempre que ele existe: a
+     * declaração ao modelo é do `RoomManager` (só com URL e token), e o
+     * handler responde "não configurada" se a agenda for desligada no meio
+     * de uma sessão que ainda tem a tool.
+     */
+    calendarClient: CompassoClient | null = null,
   ) {
     this.alarmRinger = new AlarmRinger({
       store: reminderStore,
@@ -380,6 +391,12 @@ export class Orchestrator implements AlarmAudioSink {
       ],
       ...(weatherSource
         ? ([[GET_WEATHER_TOOL.name, createGetWeatherHandler({ source: weatherSource })]] as const)
+        : []),
+      ...(calendarClient
+        ? ([
+            [GET_AGENDA_TOOL.name, createGetAgendaHandler({ client: calendarClient })],
+            [MANAGE_AGENDA_TOOL.name, createManageAgendaHandler({ client: calendarClient })],
+          ] as const)
         : []),
     ]);
 
