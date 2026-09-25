@@ -1173,7 +1173,9 @@ pages.push({
 
     // Ocultos: o que o HA tem mas a Luna não pode acionar. Vale para todas as
     // salas — o `exclude` é global.
-    const hidden = exclude.map((entityId) => ({ entityId, info: haEntities.find((e) => e.entity_id === entityId) ?? manual.find((m) => m.entity_id === entityId) }));
+    // Mesma normalização do `DeviceRegistry`: caixa e espaço não separam nada.
+    const norm = (v: string): string => String(v ?? '').trim().toLowerCase();
+    const hidden = exclude.map((entityId) => ({ entityId, info: haEntities.find((e) => norm(e.entity_id) === norm(entityId)) ?? manual.find((m) => norm(m.entity_id) === norm(entityId)) }));
     const hiddenFrame = frame(
       'OCULTOS DA LUNA // TODAS AS SALAS',
       { tone: 'muted', style: 'gap:0' },
@@ -1193,7 +1195,7 @@ pages.push({
     // pela área efetiva (`areaFor`), então é nela que a entrada nasce — gravar
     // `desktop_diogo` numa sala mapeada para `escritorio` a deixaria inalcançável.
     const manualArea: string = room.effective_area ?? room.room_id;
-    const manualHere = manual.filter((m) => m.room_id === manualArea);
+    const manualHere = manual.filter((m) => norm(m.room_id) === norm(manualArea));
     let manualForm: HTMLElement | null = null;
     if (manualDraft) {
       const draft = manualDraft;

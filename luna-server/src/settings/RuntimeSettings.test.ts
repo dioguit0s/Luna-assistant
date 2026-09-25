@@ -107,6 +107,25 @@ describe('RuntimeSettings', () => {
     assert.equal(settings.get('weather').city, '', 'sem coordenada o rótulo não fica');
   });
 
+  it('grupos novos num banco que já existe: semeados sem mexer nos antigos, até com valor esquisito do .env', () => {
+    RuntimeSettings.open(base, store, () => DEVICES, {}).update('ha', { token: 'token-do-painel' });
+    // Simula o banco de uma versão sem os grupos da v2.
+    reminderStore.sharedDatabase().exec("DELETE FROM settings WHERE grp IN ('voice','weather')");
+    const odd = { ...base, geminiVadSilenceMs: 250.5, geminiThinkingBudget: 32768, userSilenceCutoffMs: 0 };
+    const reopened = RuntimeSettings.open(odd, store, () => DEVICES, {});
+    assert.equal(reopened.get('ha').token, 'token-do-painel', 'grupo antigo intocado');
+    assert.equal(reopened.get('voice').geminiVadSilenceMs, 250.5);
+    assert.equal(reopened.get('voice').geminiThinkingBudget, 32768);
+    assert.ok(store.get('voice') !== undefined, 'semente gravada');
+  });
+
+  it('.env numérico divergente do banco: o banco vence, sem derrubar o boot', () => {
+    RuntimeSettings.open(base, store, () => DEVICES, {}).update('voice', { userSilenceCutoffMs: 300 });
+    // Reabrir com o .env divergente não lança (o aviso é só log) e o banco vence.
+    const reopened = RuntimeSettings.open({ ...base, userSilenceCutoffMs: 700 }, store, () => DEVICES, { USER_SILENCE_CUTOFF_MS: '700' });
+    assert.equal(reopened.current().userSilenceCutoffMs, 300, 'banco vence o .env');
+  });
+
   it('voz e clima recusam faixa, tipo e coordenada pela metade', () => {
     const settings = RuntimeSettings.open(base, store, () => DEVICES, {});
     const field = (fn: () => unknown): string => {
@@ -117,7 +136,7 @@ describe('RuntimeSettings', () => {
       }
       return '(não lançou)';
     };
-    assert.equal(field(() => settings.update('voice', { geminiVadSilenceMs: 10 })), 'geminiVadSilenceMs');
+    assert.equal(field(() => settings.update('voice', { geminiVadSilenceMs: -10 })), 'geminiVadSilenceMs');
     assert.equal(field(() => settings.update('voice', { geminiThinkingBudget: 1.5 })), 'geminiThinkingBudget');
     assert.equal(field(() => settings.update('voice', { openaiVadType: 'vad_magico' })), 'openaiVadType');
     assert.equal(field(() => settings.update('voice', { userSilenceCutoffMs: null })), 'userSilenceCutoffMs');

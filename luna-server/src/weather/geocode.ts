@@ -12,7 +12,7 @@ const TIMEOUT_MS = 5000;
 const MAX_RESULTS = 5;
 
 export interface GeocodeCandidate {
-  /** "São Paulo, São Paulo, Brasil" — o que o painel mostra e grava como `city`. */
+  /** "Santos, São Paulo, Brasil" (partes repetidas caem: "São Paulo, Brasil") — o que o painel mostra e grava como `city`. */
   label: string;
   latitude: number;
   longitude: number;

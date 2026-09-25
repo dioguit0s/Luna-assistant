@@ -91,10 +91,13 @@ export class WeatherSource {
       return;
     }
 
-    this.inFlight = this.doRefresh().finally(() => {
-      this.inFlight = null;
+    // Só limpa se ainda for a própria: depois de um `setClient`, a busca antiga
+    // termina com a nova já em voo, e apagá-la abriria uma segunda em paralelo.
+    const flight: Promise<void> = this.doRefresh().finally(() => {
+      if (this.inFlight === flight) this.inFlight = null;
     });
-    await this.inFlight;
+    this.inFlight = flight;
+    await flight;
   }
 
   private async doRefresh(): Promise<void> {

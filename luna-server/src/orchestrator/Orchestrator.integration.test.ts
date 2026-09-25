@@ -593,6 +593,15 @@ describe('Orchestrator: corte de silêncio antecipa speaking_start', () => {
     assert.equal(speakingStarts(harness), 1);
   });
 
+  it('o corte vem da config de runtime a cada turno (painel), não da do boot', async () => {
+    await feedAudio(harness);
+    harness.orchestrator.setRuntimeConfigSource(() => ({ ...baseConfig, userSilenceCutoffMs: 100 }));
+
+    harness.provider.emitUserSpeech();
+    mock.timers.tick(100);
+    assert.equal(speakingStarts(harness), 1, 'não usou o corte novo');
+  });
+
   it('fragmentos repetidos de fala reagendam o timer (não corta no meio da frase)', async () => {
     await feedAudio(harness);
 

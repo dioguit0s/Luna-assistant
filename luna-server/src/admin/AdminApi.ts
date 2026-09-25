@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AppConfig } from '../config/env.js';
-import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import { ACTIONABLE_DOMAINS, type HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import type { ReminderStore, Reminder } from '../reminders/ReminderStore.js';
 import { spokenReminder } from '../reminders/spoken.js';
@@ -58,8 +58,13 @@ export type Light = 'ok' | 'error' | 'unknown' | 'off';
 const PREFIX = '/admin/v1/';
 const MAX_BODY_BYTES = 64 * 1024;
 const CALENDAR_TEST_TIMEOUT_MS = 3000;
-/** Domínios que o "testar" do painel aciona — os mesmos que o `control_device` liga e desliga. */
-const TESTABLE_DOMAINS = new Set(['switch', 'light', 'fan']);
+/**
+ * Domínios que o painel aciona ("testar") e aceita em dispositivo manual novo:
+ * os da descoberta do HA. O `control_device` em si não filtra domínio — por
+ * isso a entrada manual criada pela rede é que precisa ser barrada aqui, senão
+ * um `script.abrir_portao` viraria acionável por voz com `turn_on`.
+ */
+const TESTABLE_DOMAINS = new Set<string>(ACTIONABLE_DOMAINS);
 /** Meta de TTFAB do projeto; o gráfico do painel traça a linha aqui. */
 export const TTFAB_TARGET_MS = 800;
 const MAX_LATENCY_SAMPLES = 2000;
@@ -404,6 +409,20 @@ export class AdminApi {
     if (Object.keys(patch).length === 0) {
       throw new HttpError(422, 'nada para gravar: envie aliases, exclude ou devices', 'aliases');
     }
+    // Só a entrada NOVA passa pelo filtro de domínio: uma que já estava no
+    // banco (semeada de um devices.json antigo) continua valendo, senão o
+    // painel não conseguiria mais gravar a lista sem apagá-la.
+    if (Array.isArray(patch.devices)) {
+      const known = new Set(this.deps.settings.get('devices').devices.map((d) => d.entityId.toLowerCase()));
+      for (const row of patch.devices as Array<Record<string, unknown>>) {
+        const entityId = typeof row?.entity_id === 'string' ? row.entity_id.trim().toLowerCase() : '';
+        if (known.has(entityId)) continue;
+        const domain = entityId.split('.')[0] ?? '';
+        if (!TESTABLE_DOMAINS.has(domain)) {
+          throw new HttpError(422, `dispositivo manual só de ${ACTIONABLE_DOMAINS.join('/')}: "${domain || entityId}" não`, 'devices');
+        }
+      }
+    }
     this.deps.settings.update('devices', patch);
     return this.devices();
   }
@@ -612,6 +631,9 @@ export class AdminApi {
       value: maskGroup(group, this.deps.settings.get(group)),
       updated_at: this.deps.settings.updatedAt(group),
       applies: group === 'provider' || group === 'voice' ? 'next_session' : 'immediate',
+      // A previsão troca na hora; a tool `get_weather` só aparece ou some na
+      // próxima sessão (`RoomManager`).
+      ...(group === 'weather' ? { tool_applies: 'next_session' } : {}),
     };
   }
 

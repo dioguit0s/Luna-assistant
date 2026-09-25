@@ -28,7 +28,7 @@ const STATE_VERIFY_DELAY_MS = 1500;
  * Domínios que a Luna pode acionar. Sem essa allowlist, `automation.*`,
  * `update.*` e sensores entrariam no vocabulário da IA junto com as luzes.
  */
-const ACTIONABLE_DOMAINS = ['switch', 'light', 'fan'];
+export const ACTIONABLE_DOMAINS = ['switch', 'light', 'fan'];
 
 /**
  * Renderiza no HA o mapa (área, entidade) que o registro de dispositivos

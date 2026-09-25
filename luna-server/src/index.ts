@@ -103,6 +103,11 @@ async function main(): Promise<void> {
   });
   settings.onChange('devices', (overrides) => deviceRegistry.setOverrides(overrides));
   settings.onChange('rooms', (rooms) => deviceRegistry.setRoomAreas(rooms.areas));
+  // Mesmo papel do `server_start` abaixo: os `ttfab` seguintes dizem sob qual
+  // VAD/thinking foram medidos. Sem segredo neste grupo.
+  settings.onChange('voice', (voice) =>
+    getLogger().info({ event: 'config_voice', ...voice }, 'Ajuste fino de voz alterado pelo painel'),
+  );
   // Descobre os dispositivos antes de aceitar conexões; se o HA não responder,
   // sobe com os overrides e o refresh por TTL recupera depois.
   await deviceRegistry.start();

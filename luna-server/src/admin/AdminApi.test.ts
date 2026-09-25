@@ -335,6 +335,18 @@ describe('API admin', () => {
     assert.equal((await call(h, 'PUT', '/admin/v1/devices', {})).status, 422);
   });
 
+  it('manual novo fora de switch/light/fan é recusado; o que já estava fica', async () => {
+    const res = await call(h, 'PUT', '/admin/v1/devices', {
+      devices: [
+        { device: 'abajur', room_id: 'quarto', entity_id: 'light.abajur' },
+        { device: 'portao', room_id: 'garagem', entity_id: 'script.abrir_portao' },
+      ],
+    });
+    assert.equal(res.status, 422);
+    assert.equal(res.body.field, 'devices');
+    assert.equal(h.registry.current().resolve('portao', 'garagem').ok, false);
+  });
+
   it('testar: só entidade conhecida e domínio acionável', async () => {
     assert.equal((await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'lock.porta', action: 'off' })).status, 404);
     assert.equal((await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'light.abajur', action: 'abrir' })).status, 422);

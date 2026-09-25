@@ -299,15 +299,20 @@ export const VALIDATORS: { [G in GroupName]: Validator<G> } = {
     };
   },
 
+  // Faixas **iguais** às do `loadConfig` (`parseOptionalNumber`,
+  // `parseThinkingBudget`): o grupo nasce da semente do `.env`, e um valor que
+  // o `.env` aceitava e o validador recusasse derrubaria o primeiro boot desta
+  // versão num banco que já existe. Apertar aqui é apertar lá também.
   voice: (current, raw) => {
     const patch = asObject(raw, 'voice');
+    const ms = { min: 0, max: Number.MAX_SAFE_INTEGER };
     return {
-      geminiVadSilenceMs: num(patch, 'geminiVadSilenceMs', current.geminiVadSilenceMs, { min: 50, max: 5000, integer: true, nullable: true }),
+      geminiVadSilenceMs: num(patch, 'geminiVadSilenceMs', current.geminiVadSilenceMs, { ...ms, nullable: true }),
       geminiVadEndSensitivity: oneOf(patch, 'geminiVadEndSensitivity', current.geminiVadEndSensitivity, ['HIGH', 'LOW'] as const, true),
-      geminiThinkingBudget: num(patch, 'geminiThinkingBudget', current.geminiThinkingBudget, { min: -1, max: 24576, integer: true, nullable: true }),
+      geminiThinkingBudget: num(patch, 'geminiThinkingBudget', current.geminiThinkingBudget, { min: -1, max: Number.MAX_SAFE_INTEGER, integer: true, nullable: true }),
       openaiVadType: oneOf(patch, 'openaiVadType', current.openaiVadType, ['server_vad', 'semantic_vad'] as const, false)!,
-      openaiVadSilenceMs: num(patch, 'openaiVadSilenceMs', current.openaiVadSilenceMs, { min: 50, max: 5000, integer: true, nullable: true }),
-      userSilenceCutoffMs: num(patch, 'userSilenceCutoffMs', current.userSilenceCutoffMs, { min: 0, max: 5000, integer: true })!,
+      openaiVadSilenceMs: num(patch, 'openaiVadSilenceMs', current.openaiVadSilenceMs, { ...ms, nullable: true }),
+      userSilenceCutoffMs: num(patch, 'userSilenceCutoffMs', current.userSilenceCutoffMs, ms)!,
     };
   },
 
