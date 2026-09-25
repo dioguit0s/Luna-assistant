@@ -89,6 +89,42 @@ describe('RuntimeSettings', () => {
     assert.deepEqual(reopened.get('devices').aliases, { lampada: 'luz_sala' });
   });
 
+  it('voz e clima: semeados do .env e aplicados por cima do AppConfig', () => {
+    const settings = RuntimeSettings.open({ ...base, weatherLatitude: -23.55, weatherLongitude: -46.63 }, store, () => DEVICES, { WEATHER_CITY: 'São Paulo' });
+    assert.equal(settings.get('voice').userSilenceCutoffMs, 500);
+    assert.deepEqual(settings.get('weather'), { city: 'São Paulo', latitude: -23.55, longitude: -46.63 });
+
+    settings.update('voice', { geminiVadSilenceMs: 300, geminiThinkingBudget: null, userSilenceCutoffMs: 350 });
+    settings.update('weather', { city: 'Campinas', latitude: -22.9, longitude: -47.06 });
+    const cfg = settings.current();
+    assert.equal(cfg.geminiVadSilenceMs, 300);
+    assert.equal(cfg.geminiThinkingBudget, null);
+    assert.equal(cfg.userSilenceCutoffMs, 350);
+    assert.equal(cfg.weatherLatitude, -22.9);
+
+    settings.update('weather', { latitude: null, longitude: null });
+    assert.equal(settings.current().weatherLatitude, null, 'desligar tira a tool');
+    assert.equal(settings.get('weather').city, '', 'sem coordenada o rótulo não fica');
+  });
+
+  it('voz e clima recusam faixa, tipo e coordenada pela metade', () => {
+    const settings = RuntimeSettings.open(base, store, () => DEVICES, {});
+    const field = (fn: () => unknown): string => {
+      try {
+        fn();
+      } catch (err) {
+        return (err as SettingsValidationError).field;
+      }
+      return '(não lançou)';
+    };
+    assert.equal(field(() => settings.update('voice', { geminiVadSilenceMs: 10 })), 'geminiVadSilenceMs');
+    assert.equal(field(() => settings.update('voice', { geminiThinkingBudget: 1.5 })), 'geminiThinkingBudget');
+    assert.equal(field(() => settings.update('voice', { openaiVadType: 'vad_magico' })), 'openaiVadType');
+    assert.equal(field(() => settings.update('voice', { userSilenceCutoffMs: null })), 'userSilenceCutoffMs');
+    assert.equal(field(() => settings.update('weather', { latitude: -23.5 })), 'longitude');
+    assert.equal(field(() => settings.update('weather', { latitude: 91, longitude: 0 })), 'latitude');
+  });
+
   it('patch inválido lança SettingsValidationError e não grava nada', () => {
     const settings = RuntimeSettings.open(base, store, () => EMPTY_OVERRIDES, {});
     const before = store.get('ha');

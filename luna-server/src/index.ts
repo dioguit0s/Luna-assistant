@@ -107,17 +107,19 @@ async function main(): Promise<void> {
   // sobe com os overrides e o refresh por TTL recupera depois.
   await deviceRegistry.start();
 
-  // `null` nos dois — a validação cruzada em `loadConfig` garante que não vêm
-  // meio configurados — desliga a tool inteira: nem client nem cache nascem, e
-  // `RoomManager`/`Orchestrator` tratam `weatherSource: null` como "sem tempo".
-  let weatherSource: WeatherSource | null = null;
-  if (config.weatherLatitude !== null && config.weatherLongitude !== null) {
-    const openMeteoClient = new OpenMeteoClient(config.weatherLatitude, config.weatherLongitude);
-    weatherSource = new WeatherSource(openMeteoClient, config.weatherTtlMs, config.weatherMaxStaleMs);
-    // Mesma ordem do registro de dispositivos: busca antes de aceitar conexões,
-    // para que a primeira pergunta sobre o tempo não caia em cache frio.
-    await weatherSource.start();
-  }
+  // Localização vem do grupo `weather` do banco (painel v2). O source existe
+  // sempre, com client `null` quando não há coordenadas: trocar a cidade pelo
+  // painel troca o client na hora. Quem liga ou desliga a TOOL é o
+  // `RoomManager`, pela `settings.current()` de cada sessão nova.
+  const weatherClient = (): OpenMeteoClient | null => {
+    const { latitude, longitude } = settings.get('weather');
+    return latitude !== null && longitude !== null ? new OpenMeteoClient(latitude, longitude) : null;
+  };
+  const weatherSource = new WeatherSource(weatherClient(), config.weatherTtlMs, config.weatherMaxStaleMs);
+  // Mesma ordem do registro de dispositivos: busca antes de aceitar conexões,
+  // para que a primeira pergunta sobre o tempo não caia em cache frio.
+  await weatherSource.start();
+  settings.onChange('weather', () => weatherSource.setClient(weatherClient()));
 
   // O ReminderScheduler só pode nascer depois do WsServer estar construído: o
   // onFire precisa do ciclo de toque que vive no Orchestrator lá dentro, e o
@@ -158,6 +160,7 @@ async function main(): Promise<void> {
 
   wsServer.setReminderScheduler(reminderScheduler);
   wsServer.setProviderNameSource(() => settings.current().audioProvider);
+  wsServer.setRuntimeConfigSource(() => settings.current());
 
   // `shutdown` só existe mais abaixo; o reinício pelo painel chega por aqui.
   let requestRestart: () => void = () => {};
@@ -208,8 +211,8 @@ async function main(): Promise<void> {
       port: config.wsPort,
       devices: deviceRegistry.current().size,
       model: settings.current().geminiLiveModel,
-      vad_silence_ms: config.geminiVadSilenceMs,
-      thinking_budget: config.geminiThinkingBudget,
+      vad_silence_ms: settings.current().geminiVadSilenceMs,
+      thinking_budget: settings.current().geminiThinkingBudget,
       event: 'server_start',
     },
     'Luna Server iniciado',
@@ -240,7 +243,7 @@ async function main(): Promise<void> {
     diagnostics.stop();
     await wsServer.stop();
     deviceRegistry.stop();
-    weatherSource?.stop();
+    weatherSource.stop();
     reminderScheduler.stop();
     // Antes do `reminderStore.close()`, e depois do scheduler: fechar um ciclo
     // de toque ESCREVE no banco (devolve o lembrete a `armed` ou o marca

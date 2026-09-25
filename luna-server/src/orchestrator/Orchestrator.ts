@@ -456,7 +456,7 @@ export class Orchestrator implements AlarmAudioSink {
         setTimeout(() => {
           this.silenceTimerByRoom.delete(roomId);
           this.startSpeaking(roomId);
-        }, this.config.userSilenceCutoffMs),
+        }, this.runtimeConfig().userSilenceCutoffMs),
       );
     });
 
@@ -856,6 +856,17 @@ export class Orchestrator implements AlarmAudioSink {
     }
     this.endSpeaking(roomId);
     return delivered;
+  }
+
+  /**
+   * Config de runtime do painel (ADR 010), para o que é lido a cada turno e não
+   * só na criação da sessão — hoje, `userSilenceCutoffMs`. Sem fonte injetada
+   * (testes), vale a config do construtor.
+   */
+  private runtimeConfig: () => AppConfig = () => this.config;
+
+  setRuntimeConfigSource(source: () => AppConfig): void {
+    this.runtimeConfig = source;
   }
 
   /** O ciclo de toque por sala. Vive aqui porque o sink de áudio é este objeto. */

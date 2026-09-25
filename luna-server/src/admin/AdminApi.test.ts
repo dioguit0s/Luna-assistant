@@ -69,6 +69,7 @@ interface Harness {
   diagnostics: Diagnostics;
   cancelled: number[];
   saved: Array<{ id: number; labelChanged: boolean }>;
+  fetchCalls: string[];
   restarts: number;
   stop(): Promise<void>;
 }
@@ -108,6 +109,7 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
     diagnostics,
     cancelled: [],
     saved: [],
+    fetchCalls: [],
     restarts: 0,
     async stop() {
       await server.stop();
@@ -134,6 +136,17 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
       },
       weatherSource: null,
       diagnostics,
+      // Só o que o clima do painel chama: geocoding e previsão do Open-Meteo.
+      fetchImpl: (async (url: string) => {
+        harness.fetchCalls.push(String(url));
+        if (String(url).includes('geocoding-api')) {
+          return new Response(JSON.stringify({ results: [{ name: 'Santos', admin1: 'São Paulo', country: 'Brasil', latitude: -23.96, longitude: -46.33 }] }));
+        }
+        return new Response(JSON.stringify({
+          current: { temperature_2m: 24, apparent_temperature: 25, relative_humidity_2m: 60, wind_speed_10m: 5, weather_code: 1 },
+          daily: { time: ['2026-09-25'], weather_code: [1], temperature_2m_max: [28], temperature_2m_min: [18], precipitation_probability_max: [10] },
+        }));
+      }) as unknown as typeof fetch,
       onRestart: () => {
         harness.restarts += 1;
       },
@@ -239,6 +252,35 @@ describe('API admin', () => {
     const res = await call(h, 'POST', '/admin/v1/settings/calendar/test', {});
     assert.equal(res.body.ok, false);
     assert.match(res.body.error, /obrigatórios/);
+  });
+
+  it('voz avançada vale na próxima sessão; clima na hora', async () => {
+    const voice = await call(h, 'GET', '/admin/v1/settings/voice');
+    assert.equal(voice.status, 200);
+    assert.equal(voice.body.applies, 'next_session');
+    const saved = await call(h, 'PUT', '/admin/v1/settings/voice', { geminiVadSilenceMs: 400 });
+    assert.equal(saved.body.value.geminiVadSilenceMs, 400);
+    assert.equal(h.settings.current().geminiVadSilenceMs, 400);
+
+    const weather = await call(h, 'PUT', '/admin/v1/settings/weather', { city: 'Santos', latitude: -23.96, longitude: -46.33 });
+    assert.equal(weather.status, 200);
+    assert.equal(weather.body.applies, 'immediate');
+    assert.equal(h.settings.current().weatherLongitude, -46.33);
+  });
+
+  it('geocode e teste do clima usam o fetch injetado, sem gravar', async () => {
+    h.fetchCalls.length = 0;
+    const geo = await call(h, 'POST', '/admin/v1/settings/weather/geocode', { city: 'Santos' });
+    assert.equal(geo.status, 200);
+    assert.equal(geo.body.results[0].label, 'Santos, São Paulo, Brasil');
+    assert.match(h.fetchCalls[0]!, /geocoding-api\.open-meteo\.com.*name=Santos/);
+
+    const test = await call(h, 'POST', '/admin/v1/settings/weather/test', { latitude: -10, longitude: -50 });
+    assert.equal(test.body.ok, true);
+    assert.equal(test.body.now.temperature_c, 24);
+    assert.match(h.fetchCalls[1]!, /latitude=-10/);
+    assert.equal(h.settings.get('weather').latitude, -23.96, 'testar não grava');
+    assert.equal((await call(h, 'POST', '/admin/v1/settings/weather/geocode', { city: 'x' })).status, 422);
   });
 
   it('caminho com escape malformado é 400, não 500', async () => {

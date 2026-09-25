@@ -21,6 +21,9 @@ import { LEVEL_VALUES, type LogLevelName, type LogRecord } from '../logging/logT
 import type { Diagnostics, LogFilter } from '../diagnostics/Diagnostics.js';
 import { matchesFilter } from '../diagnostics/Diagnostics.js';
 import { MAX_ROWS } from '../diagnostics/DiagnosticsStore.js';
+import { geocodeCity } from '../weather/geocode.js';
+import { OpenMeteoClient } from '../weather/OpenMeteoClient.js';
+import { describeWeatherCode } from '../weather/wmo.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
 
 export interface AdminApiDeps {
@@ -69,7 +72,7 @@ const SSE_HEARTBEAT_MS = 15_000;
 const SSE_MAX_BUFFERED_BYTES = 256 * 1024;
 
 /** Grupos que o painel lê e grava inteiros pela rota genérica `settings/:grupo`. */
-const EDITABLE_GROUPS = new Set<GroupName>(['ha', 'provider', 'calendar']);
+const EDITABLE_GROUPS = new Set<GroupName>(['ha', 'provider', 'calendar', 'voice', 'weather']);
 
 class HttpError extends Error {
   constructor(
@@ -205,6 +208,7 @@ export class AdminApi {
         return { body: this.writeSettings(editableGroup(id!), await readJson(req)) };
       case 'POST settings/:id/:action':
         if (action === 'test') return { body: await this.testConnection(editableGroup(id!), await readJson(req)) };
+        if (action === 'geocode' && id === 'weather') return { body: await this.geocode(await readJson(req)) };
         break;
       case 'GET diagnostics/:id':
         if (id === 'latency') return { body: this.latency(query) };
@@ -257,9 +261,10 @@ export class AdminApi {
   }
 
   private weatherLight(): { light: Light; detail: string } {
-    if (!this.deps.weatherSource) return { light: 'off', detail: 'sem localização configurada' };
+    const { city, latitude } = this.deps.settings.get('weather');
+    if (!this.deps.weatherSource || latitude === null) return { light: 'off', detail: 'sem localização configurada' };
     return this.deps.weatherSource.current()
-      ? { light: 'ok', detail: 'previsão em dia' }
+      ? { light: 'ok', detail: city ? `previsão em dia · ${city}` : 'previsão em dia' }
       : { light: 'error', detail: 'sem previsão recente' };
   }
 
@@ -586,7 +591,7 @@ export class AdminApi {
       group,
       value: maskGroup(group, this.deps.settings.get(group)),
       updated_at: this.deps.settings.updatedAt(group),
-      applies: group === 'provider' ? 'next_session' : 'immediate',
+      applies: group === 'provider' || group === 'voice' ? 'next_session' : 'immediate',
     };
   }
 
@@ -605,6 +610,7 @@ export class AdminApi {
    * API jura nunca devolver (ADR 010, decisão 4).
    */
   private async testConnection(group: GroupName, body: unknown): Promise<unknown> {
+    if (group === 'weather') return this.testWeather(body);
     if (group !== 'ha' && group !== 'calendar') {
       throw new HttpError(404, `não há teste de conexão para "${group}"`);
     }
@@ -632,6 +638,40 @@ export class AdminApi {
       return { ok: result.ok, latency_ms: result.latencyMs, error: result.error ?? null };
     }
     return this.testCalendar(url, token);
+  }
+
+  /**
+   * Busca a previsão para as coordenadas do corpo (ou as gravadas), sem gravar
+   * nada: é o "testar" antes de salvar uma cidade nova.
+   */
+  private async testWeather(body: unknown): Promise<unknown> {
+    const patch = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+    const current = this.deps.settings.get('weather');
+    const lat = typeof patch.latitude === 'number' ? patch.latitude : current.latitude;
+    const lon = typeof patch.longitude === 'number' ? patch.longitude : current.longitude;
+    if (lat === null || lon === null || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return { ok: false, latency_ms: 0, error: 'coordenadas ausentes ou fora da faixa' };
+    }
+    const startedAt = Date.now();
+    const snapshot = await new OpenMeteoClient(lat, lon, this.fetchImpl).fetchForecast();
+    const latency = Date.now() - startedAt;
+    if (!snapshot) return { ok: false, latency_ms: latency, error: 'Open-Meteo não respondeu' };
+    return {
+      ok: true,
+      latency_ms: latency,
+      error: null,
+      now: { temperature_c: snapshot.current?.temperatureC ?? null, description: describeWeatherCode(snapshot.current?.weatherCode ?? null) },
+    };
+  }
+
+  private async geocode(body: unknown): Promise<unknown> {
+    const city = field(body, 'city');
+    if (typeof city !== 'string' || city.trim().length < 2 || city.length > 120) {
+      throw new HttpError(422, 'digite o nome da cidade', 'city');
+    }
+    const results = await geocodeCity(city.trim(), this.fetchImpl);
+    if (results === null) return { ok: false, error: 'serviço de geocoding não respondeu', results: [] };
+    return { ok: true, error: null, results };
   }
 
   /**

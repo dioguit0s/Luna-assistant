@@ -196,6 +196,11 @@ export class WsServer {
     return this.orchestrator.getAlarmRinger();
   }
 
+  /** Config de runtime lida a cada turno — ver `Orchestrator.setRuntimeConfigSource`. */
+  setRuntimeConfigSource(source: () => AppConfig): void {
+    this.orchestrator.setRuntimeConfigSource(source);
+  }
+
   /** Fala de um lembrete salvo pelo painel — ver `Orchestrator.requestReminderPrerender`. */
   requestReminderPrerender(roomId: string, reminderId: number, label: string): boolean {
     return this.orchestrator.requestReminderPrerender(roomId, reminderId, label);

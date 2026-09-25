@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6 Diagnóstico, M7 Lembretes e M8 Dispositivos feitos)
+**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6–M9 feitos: Diagnóstico, Lembretes, Dispositivos, Integrações avançadas)
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -83,8 +83,8 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | **Home Assistant**: URL, token, "testar conexão" | API + Persist | v1 |
 | **Agenda**: URL, credencial, "testar conexão", status | API + Persist | v1 (tela) — as tools dependem do [TODO da agenda](#todo-api-do-app-de-agendas) |
 | **Provedor de IA**: Gemini ou OpenAI, modelo, voz, chaves | API + Persist | v1 |
-| **Provedor de IA (avançado)**: VAD, silêncio, thinking | API + Persist | v2 |
-| **Clima**: cidade (vira lat/long), "testar" | API + Persist | v2 |
+| **Provedor de IA (avançado)**: VAD, silêncio, thinking | API + Persist | v2 ✔ |
+| **Clima**: cidade (vira lat/long), "testar" | API + Persist | v2 ✔ |
 
 ### 5. Lembretes e alarmes
 
@@ -167,13 +167,22 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `POST reminders` | Cria: `{ room_id, label, repeat, date, time }` — hora de parede de São Paulo (ADR 006), `repeat` `none`/`daily`/`weekdays`/`weekend`/`mon`…`sun`, `date` só no `none`. Mesmas regras de rótulo da voz (sem "Luna", até 200). 201 — v2 |
 | `PUT reminders/:id` | Edita um `armed` com o mesmo corpo; `ringing` é 409. Rótulo ou sala novos apagam a fala gravada e pedem outra — v2 |
 | `GET reminders/history?limit=50` | Criado, editado, tocou, dispensado, adiado, sem resposta, perdido, cancelado — com `via` (`admin`/`voice`) quando se sabe — v2 |
-| `GET settings/:grupo` | `ha`, `provider` ou `calendar`, com segredos como `{ set, last4 }` e `applies` (`immediate` / `next_session`) |
+| `GET settings/:grupo` | `ha`, `provider`, `calendar`, `voice` ou `weather` (os dois últimos na v2), com segredos como `{ set, last4 }` e `applies` (`immediate` / `next_session`) |
 | `PUT settings/:grupo` | Patch parcial; campo ausente = mantém. 422 com `field` quando inválido |
 | `POST settings/ha/test`, `POST settings/calendar/test` | Testa com o corpo completado pelo que está gravado — dá para testar sem gravar |
+| `POST settings/weather/test` | Busca a previsão para `{ latitude, longitude }` (ou as gravadas) sem gravar; devolve a temperatura atual — v2 |
+| `POST settings/weather/geocode` | `{ city }` → até 5 candidatos `{ label, latitude, longitude }` pelo geocoding do Open-Meteo — v2 |
 | `POST restart` | 202 e shutdown gracioso; o `Restart=always` traz de volta |
 | `GET diagnostics/latency?hours=24` | Série de TTFAB (até 2000 amostras, 1 h–30 d), meta de 800 ms e resumo por sala × provedor: `p50_ms`, `p90_ms`, `max_ms`, `over_target`, `cold` (sessões frias, fora dos percentis) — v2 |
 | `GET diagnostics/errors?limit=20` | Últimos erros: todo `error`/`fatal` e os `warn` de dependência externa (HA, clima, provider, lembrete perdido) — v2 |
 | `GET logs/stream?level=info&room=` | Log ao vivo em SSE: primeiro o buffer em memória (500 linhas) filtrado, depois cada linha nova; heartbeat a cada 15 s; até 4 streams (429) — v2 |
+
+Grupos novos da v2: `voice` (`geminiVadSilenceMs`, `geminiVadEndSensitivity`,
+`geminiThinkingBudget`, `openaiVadType`, `openaiVadSilenceMs`, `userSilenceCutoffMs`), semeado
+das variáveis de mesmo nome do `.env` e aplicado na próxima sessão — menos o
+`userSilenceCutoffMs`, que o `Orchestrator` lê a cada turno; e `weather` (`city`, `latitude`,
+`longitude`), semeado de `WEATHER_LATITUDE`/`WEATHER_LONGITUDE`/`WEATHER_CITY`. Trocar o clima
+troca a previsão na hora; a tool `get_weather` entra ou sai na próxima sessão.
 
 A fala de um lembrete criado pelo painel é pré-renderizada pelo mesmo gate de sala quieta
 da voz, mas só quando a sala já tem sessão de provider aberta; sem ela o lembrete toca só o

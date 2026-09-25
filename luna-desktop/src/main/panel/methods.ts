@@ -61,7 +61,7 @@ export type PanelResult = AdminResult;
 
 type Method = (...args: unknown[]) => Promise<PanelResult>;
 
-const SERVER_GROUPS = new Set(['ha', 'provider', 'calendar']);
+const SERVER_GROUPS = new Set(['ha', 'provider', 'calendar', 'voice', 'weather']);
 
 function str(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 256) {
@@ -149,6 +149,7 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
     'server.testConnection': (g, patch) =>
       admin.request('POST', `settings/${group(g)}/test`, obj(patch ?? {}, 'patch')),
     'server.restart': () => admin.request('POST', 'restart'),
+    'server.geocode': (city) => admin.request('POST', 'settings/weather/geocode', { city: str(city, 'cidade') }),
     'server.latency': (hours) => admin.request('GET', `diagnostics/latency?hours=${int(hours ?? 24, 'hours', 1, 720)}`),
     'server.errors': (limit) => admin.request('GET', `diagnostics/errors?limit=${int(limit ?? 20, 'limit', 1, 200)}`),
 

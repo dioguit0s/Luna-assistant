@@ -28,9 +28,12 @@ export class WeatherSource {
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
   /** Uma rajada de cache-miss não pode virar uma rajada de requisições. */
   private inFlight: Promise<void> | null = null;
+  /** Troca de localização invalida a busca em voo: ela é da casa antiga. */
+  private generation = 0;
 
   constructor(
-    private readonly client: OpenMeteoClient,
+    /** `null` = sem localização: `current()` é sempre `null` e nada é buscado. */
+    private client: OpenMeteoClient | null,
     private readonly ttlMs: number = DEFAULT_TTL_MS,
     private readonly maxStaleMs: number = DEFAULT_MAX_STALE_MS,
     private readonly now: NowFn = systemNow,
@@ -59,6 +62,22 @@ export class WeatherSource {
     return this.snapshot;
   }
 
+  /**
+   * Localização nova pelo painel (v2): descarta o snapshot da antiga na hora
+   * — melhor "não sei" do que a previsão de outra cidade — e busca de novo.
+   */
+  setClient(client: OpenMeteoClient | null): void {
+    this.client = client;
+    this.snapshot = null;
+    this.generation += 1;
+    this.inFlight = null;
+    if (client) void this.refresh();
+  }
+
+  get configured(): boolean {
+    return this.client !== null;
+  }
+
   stop(): void {
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer);
@@ -79,7 +98,11 @@ export class WeatherSource {
   }
 
   private async doRefresh(): Promise<void> {
-    const fetched = await this.client.fetchForecast();
+    const client = this.client;
+    if (!client) return;
+    const generation = this.generation;
+    const fetched = await client.fetchForecast();
+    if (generation !== this.generation) return;
 
     if (fetched === null) {
       getLogger().warn(

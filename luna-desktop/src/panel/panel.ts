@@ -1430,16 +1430,185 @@ function providerFrame(saved: any): HTMLElement {
   return container;
 }
 
+/** Campo numérico em ms; vazio = `null` (default do provedor) quando `nullable`. */
+function msInput(value: number | null, label: string, nullable: boolean): HTMLInputElement {
+  return lineInput(value === null ? '' : String(value), { type: 'number', min: '0', step: '10', 'aria-label': label, placeholder: nullable ? 'PADRÃO DO PROVEDOR' : '' });
+}
+
+function readMs(input: HTMLInputElement, nullable: boolean): number | null | 'invalid' {
+  const raw = input.value.trim();
+  if (raw === '') return nullable ? null : 'invalid';
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : 'invalid';
+}
+
+/**
+ * Os botões de latência (VAD, silêncio, thinking) que antes só o `.env`
+ * mexia. Mudar aqui é mudar o TTFAB: a tela Diagnóstico mostra o efeito.
+ */
+function voiceFrame(saved: any): HTMLElement {
+  const draft = {
+    geminiVadEndSensitivity: saved.geminiVadEndSensitivity as string | null,
+    geminiThinkingBudget: saved.geminiThinkingBudget as number | null,
+    openaiVadType: saved.openaiVadType as string,
+  };
+  const geminiSilence = msInput(saved.geminiVadSilenceMs, 'Silêncio do VAD do Gemini', true);
+  const openaiSilence = msInput(saved.openaiVadSilenceMs, 'Silêncio do VAD da OpenAI', true);
+  const cutoff = msInput(saved.userSilenceCutoffMs, 'Corte de silêncio do usuário', false);
+
+  const sensitivity = cycler(
+    [{ value: null as string | null, label: 'PADRÃO' }, { value: 'HIGH', label: 'ALTA' }, { value: 'LOW', label: 'BAIXA' }],
+    [null, 'HIGH', 'LOW'].indexOf(draft.geminiVadEndSensitivity),
+    (v) => (draft.geminiVadEndSensitivity = v),
+    'sensibilidade',
+  );
+  const thinkingOptions: Array<{ value: number | null; label: string }> = [
+    { value: 0, label: 'DESLIGADO (0)' },
+    { value: -1, label: 'AUTOMÁTICO (−1)' },
+    { value: 512, label: '512 TOKENS' },
+    { value: 1024, label: '1024 TOKENS' },
+    { value: null, label: 'OMITIR CAMPO' },
+  ];
+  if (!thinkingOptions.some((o) => o.value === draft.geminiThinkingBudget)) thinkingOptions.push({ value: draft.geminiThinkingBudget, label: `${draft.geminiThinkingBudget} TOKENS` });
+  const thinking = cycler(thinkingOptions, thinkingOptions.findIndex((o) => o.value === draft.geminiThinkingBudget), (v) => (draft.geminiThinkingBudget = v), 'thinking');
+  const vadType = cycler(
+    [{ value: 'server_vad', label: 'SERVER_VAD' }, { value: 'semantic_vad', label: 'SEMANTIC_VAD' }],
+    draft.openaiVadType === 'semantic_vad' ? 1 : 0,
+    (v) => (draft.openaiVadType = v),
+    'tipo de VAD',
+  );
+
+  const save = async (): Promise<void> => {
+    const values = {
+      geminiVadSilenceMs: readMs(geminiSilence, true),
+      openaiVadSilenceMs: readMs(openaiSilence, true),
+      userSilenceCutoffMs: readMs(cutoff, false),
+    };
+    const bad = Object.entries(values).find(([, v]) => v === 'invalid');
+    if (bad) {
+      say(`SALVAR AVANÇADO ... RECUSADO: ${bad[0]} PRECISA SER UM INTEIRO EM MS`, 'warn');
+      return;
+    }
+    if (await run('SALVAR PROVEDOR · AVANÇADO · PRÓXIMA SESSÃO', 'server.saveSettings', 'voice', { ...values, ...draft })) void renderCurrent();
+  };
+
+  return frame(
+    'PROVEDOR DE IA // AVANÇADO',
+    { style: 'gap:10px' },
+    h('div', { class: 'small', style: 'line-height:1.6' }, 'MEXE NO TTFAB. MEÇA NA TELA DIAGNÓSTICO ANTES E DEPOIS.'),
+    h('div', { class: 'small hi' }, '── GEMINI'),
+    field('SILÊNCIO VAD', geminiSilence, 'next_session', 130),
+    field('FIM DA FALA', sensitivity, 'next_session', 130),
+    field('THINKING', thinking, 'next_session', 130),
+    h('div', { class: 'small hi' }, '── OPENAI'),
+    field('TIPO DE VAD', vadType, 'next_session', 130),
+    field('SILÊNCIO VAD', openaiSilence, 'next_session', 130),
+    h('div', { class: 'small hi' }, '── TODOS'),
+    field('CORTE (MS)', cutoff, 'immediate', 130),
+    h('div', { class: 'row' }, cmd('SALVAR', () => void save(), { first: true })),
+  );
+}
+
+/** Estado do clima entre repinturas: busca e escolha ainda não gravadas. */
+let weatherDraft: { query: string; results: any[] | null; pick: { label: string; latitude: number; longitude: number } | null } = { query: '', results: null, pick: null };
+
+function weatherFrame(saved: any, light: { light: Light; detail: string } | undefined): HTMLElement {
+  const lightInfo = lightText(light?.light ?? 'unknown');
+  const search = lineInput(weatherDraft.query, { 'aria-label': 'Cidade', placeholder: 'NOME DA CIDADE · ENTER', maxLength: 120 });
+  search.addEventListener('input', () => (weatherDraft.query = search.value));
+  const find = async (): Promise<void> => {
+    const city = search.value.trim();
+    if (city.length < 2) return;
+    const body = await run(`BUSCAR "${city.toUpperCase()}"`, 'server.geocode', city);
+    if (!body) return;
+    if (!body.ok) say(`BUSCAR "${city.toUpperCase()}" ... ${String(body.error).toUpperCase()}`, 'warn');
+    weatherDraft.results = body.results ?? [];
+    void renderCurrent();
+  };
+  search.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void find();
+  });
+
+  const target = weatherDraft.pick ?? (saved.latitude !== null ? { label: saved.city || '—', latitude: saved.latitude, longitude: saved.longitude } : null);
+  const coords = target ? `${target.latitude.toFixed(4)}, ${target.longitude.toFixed(4)}` : '—';
+  const results = weatherDraft.results;
+
+  return frame(
+    'CLIMA',
+    { tone: light?.light === 'error' ? 'warn' : undefined, style: 'gap:10px' },
+    grid('78px minmax(0,1fr)', { class: 'grid' }, h('span', {}, 'ESTADO'), h('span', { class: lightInfo.cls }, `${lightInfo.text}${light?.detail ? ` — ${light.detail}` : ''}`)),
+    kv(weatherDraft.pick ? 'ESCOLHIDA' : 'CIDADE', target ? target.label : 'NENHUMA', weatherDraft.pick ? 'amber' : ''),
+    kv('COORDENADAS', h('span', { class: 'raw' }, coords)),
+    field('BUSCAR', h('div', { class: 'row', style: 'gap:6px' }, search, cmd('BUSCAR', () => void find(), { tone: 'quiet' })), 'immediate', 70),
+    results
+      ? h(
+          'div',
+          { style: 'display:flex;flex-direction:column;gap:2px' },
+          ...results.map((r) =>
+            grid(
+              'minmax(0,1fr) 150px 80px',
+              { class: 'tbl-row dotted', style: 'padding:3px 0' },
+              h('span', { class: 'ellipsis' }, r.label),
+              h('span', { class: 'raw small' }, `${r.latitude.toFixed(3)}, ${r.longitude.toFixed(3)}`),
+              cmd('USAR', () => {
+                weatherDraft.pick = r;
+                weatherDraft.results = null;
+                void renderCurrent();
+              }, { tone: 'quiet' }),
+            ),
+          ),
+          results.length === 0 ? h('div', { class: 'amber' }, '◈ NENHUMA CIDADE COM ESSE NOME.') : null,
+        )
+      : null,
+    h(
+      'div',
+      { class: 'row', style: 'gap:6px' },
+      cmd('TESTAR', async () => {
+        if (!target) return say('TESTAR CLIMA ... SEM CIDADE ESCOLHIDA', 'warn');
+        const result = await window.panel.call('server.testConnection', 'weather', { latitude: target.latitude, longitude: target.longitude });
+        const b = result.body ?? {};
+        if (result.ok && b.ok) say(`TESTAR CLIMA ... OK ${b.latency_ms}MS · ${b.now?.temperature_c ?? '--'}°C ${String(b.now?.description ?? '').toUpperCase()}`);
+        else say(`TESTAR CLIMA ... FALHA: ${result.ok ? b.error : errorOf(result)}`, 'warn');
+      }, { first: true, disabled: !target }),
+      cmd('SALVAR', async () => {
+        const pick = weatherDraft.pick;
+        if (!pick) return;
+        if (await run(`SALVAR CLIMA "${pick.label.toUpperCase()}" · APLICADO A QUENTE`, 'server.saveSettings', 'weather', { city: pick.label, latitude: pick.latitude, longitude: pick.longitude })) {
+          weatherDraft = { query: '', results: null, pick: null };
+          void renderCurrent();
+        }
+      }, { disabled: !weatherDraft.pick }),
+      weatherDraft.pick
+        ? cmd('DESCARTAR', () => {
+            weatherDraft = { query: '', results: null, pick: null };
+            void renderCurrent();
+          }, { tone: 'quiet' })
+        : null,
+      saved.latitude !== null && !weatherDraft.pick
+        ? cmd('DESLIGAR', async () => {
+            if (await run('DESLIGAR CLIMA · A LUNA PARA DE FALAR DO TEMPO', 'server.saveSettings', 'weather', { latitude: null, longitude: null })) void renderCurrent();
+          }, { tone: 'amber' })
+        : null,
+    ),
+    h('div', { class: 'small', style: 'line-height:1.6' }, 'A PREVISÃO TROCA NA HORA; A TOOL DE CLIMA APARECE OU SOME NA PRÓXIMA SESSÃO DE VOZ.'),
+  );
+}
+
 pages.push({
   id: 'integrations',
   nav: 'INTEGRAÇÕES',
   title: 'INTEGRAÇÕES EXTERNAS',
+  leave() {
+    weatherDraft = { query: '', results: null, pick: null };
+  },
   async render(root) {
-    const [ha, provider, calendar, status] = await Promise.all([
+    const [ha, provider, calendar, status, voice, weather] = await Promise.all([
       window.panel.call('server.settings', 'ha'),
       window.panel.call('server.settings', 'provider'),
       window.panel.call('server.settings', 'calendar'),
       window.panel.call('server.status'),
+      window.panel.call('server.settings', 'voice'),
+      window.panel.call('server.settings', 'weather'),
     ]);
     setMeta('CONFIGURAÇÃO GUARDADA NO SERVIDOR');
     if (!ha.ok) return serverUnavailable(root, ha);
@@ -1449,6 +1618,8 @@ pages.push({
       'div',
       { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' },
       connectionFrame({ group: 'ha', title: 'HOME ASSISTANT', secretLabel: 'TOKEN', value: ha.body.value, light: lights.ha }),
+      // Servidor antigo (sem os grupos da v2) só não mostra os quadros novos.
+      weather.ok ? weatherFrame(weather.body.value, lights.weather) : null,
       calendar.ok
         ? connectionFrame({
             group: 'calendar',
@@ -1460,7 +1631,13 @@ pages.push({
           })
         : null,
     );
-    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1fr)' }, left, provider.ok ? providerFrame(provider.body.value) : h('div')));
+    const right = h(
+      'div',
+      { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' },
+      provider.ok ? providerFrame(provider.body.value) : null,
+      voice.ok ? voiceFrame(voice.body.value) : null,
+    );
+    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1fr)' }, left, right));
   },
 });
 
