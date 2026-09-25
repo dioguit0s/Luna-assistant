@@ -23,7 +23,12 @@ src/
 ├── admin/                # API admin HTTP do painel (ADR 010)
 │   ├── AdminApi.ts       #   rotas /admin/v1/*, no mesmo servidor do /health
 │   └── auth.ts           #   token Bearer timing-safe + filtro de rede privada
-├── logging/logger.ts     # pino, timestamp em America/Sao_Paulo
+├── logging/
+│   ├── logger.ts         #   pino, timestamp em America/Sao_Paulo
+│   └── logTap.ts         #   cópia de cada linha para o diagnóstico, sem transcrição
+├── diagnostics/          # diagnóstico do painel (v2), alimentado só pelo log
+│   ├── Diagnostics.ts    #   ttfab → série, erros → error_log, buffer do log ao vivo
+│   └── DiagnosticsStore.ts#  tabelas latency_samples e error_log, poda 30 d / 10 mil
 ├── time/clock.ts         # relógio único do processo
 ├── ws/                   # camada de transporte
 │   ├── WsServer.ts       #   servidor WS + HTTP /health, auth, fan-out por sala
@@ -337,6 +342,11 @@ milissegundos enquanto o usuário espera segundos — era por isso que os logs m
 A âncora correta é o último instante em que sabemos que o usuário **ainda estava
 falando** (`markUserSpeech`, alimentado pela transcrição de entrada do provider). O
 primeiro chunk de áudio serve só como âncora de fallback.
+
+O painel lê a mesma linha `ttfab` do log: `diagnostics/Diagnostics.ts` a copia para a
+tabela `latency_samples` pelo `logTap`, sem nenhum ponto do `Orchestrator` saber disso.
+`GET /admin/v1/diagnostics/latency` devolve a série e p50/p90 por sala × provedor, com
+sessão fria fora dos percentis (ela entra em `cold`).
 
 ### A medição é um intervalo, não um número
 

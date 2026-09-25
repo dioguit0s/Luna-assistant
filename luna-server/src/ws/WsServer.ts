@@ -394,7 +394,11 @@ export class WsServer {
     const httpServer = this.httpServer;
     this.httpServer = null;
     if (httpServer) {
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      // Stream de log do painel (SSE) é conexão ativa: sem isto, `close()`
+      // esperaria o painel desistir sozinho.
+      httpServer.closeAllConnections();
+      await closed;
     }
   }
 

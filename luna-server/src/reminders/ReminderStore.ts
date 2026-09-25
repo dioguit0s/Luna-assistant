@@ -155,6 +155,39 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
       );
     `);
   },
+  /**
+   * Diagnóstico do painel (v2): série de TTFAB e últimos erros. Tabelas novas,
+   * sem tocar nas existentes; quem lê e grava é o `DiagnosticsStore`, que
+   * também poda (30 dias ou 10 mil linhas por tabela). Sem transcrição: só
+   * números, nomes de evento e a mensagem de log.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS latency_samples (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        at                  INTEGER NOT NULL,
+        room_id             TEXT    NOT NULL,
+        device_id           TEXT,
+        provider            TEXT    NOT NULL,
+        latency_ms          INTEGER NOT NULL,
+        since_turn_start_ms INTEGER,
+        provider_wait_ms    INTEGER,
+        session_cold        INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_latency_at ON latency_samples (at);
+
+      CREATE TABLE IF NOT EXISTS error_log (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        at      INTEGER NOT NULL,
+        level   TEXT    NOT NULL,
+        event   TEXT,
+        room_id TEXT,
+        msg     TEXT    NOT NULL,
+        detail  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_error_at ON error_log (at);
+    `);
+  },
 ];
 
 /**

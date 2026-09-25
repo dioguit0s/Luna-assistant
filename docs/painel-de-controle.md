@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 não iniciada
+**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6 Diagnóstico feito)
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -47,7 +47,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Semáforo por conexão: HA, provedor de IA, clima, agenda | API | v1 |
 | Satélites conectados agora | API | v1 |
 | Próximos lembretes e alarmes | API | v1 |
-| Últimos erros (HA falhou, provedor caiu) | API + Persist | v2 |
+| Últimos erros (HA falhou, provedor caiu) | API + Persist | v2 ✔ |
 
 ### 2. Satélites
 
@@ -109,8 +109,8 @@ atrito.
 
 | Função | Precisa de | Quando |
 |---|---|---|
-| TTFAB por satélite e por provedor, com gráfico e a meta de 800 ms | API + Persist | v2 |
-| Logs do servidor ao vivo, filtro por sala e nível (SSE) | API | v2 |
+| TTFAB por satélite e por provedor, com gráfico e a meta de 800 ms | API + Persist | v2 ✔ |
+| Logs do servidor ao vivo, filtro por sala e nível (SSE) | API | v2 ✔ |
 | Mudar o `LOG_LEVEL` sem reiniciar | API | depois |
 
 ### 8. Este computador (o satélite desktop)
@@ -166,6 +166,13 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `PUT settings/:grupo` | Patch parcial; campo ausente = mantém. 422 com `field` quando inválido |
 | `POST settings/ha/test`, `POST settings/calendar/test` | Testa com o corpo completado pelo que está gravado — dá para testar sem gravar |
 | `POST restart` | 202 e shutdown gracioso; o `Restart=always` traz de volta |
+| `GET diagnostics/latency?hours=24` | Série de TTFAB (até 2000 amostras, 1 h–30 d), meta de 800 ms e resumo por sala × provedor: `p50_ms`, `p90_ms`, `max_ms`, `over_target`, `cold` (sessões frias, fora dos percentis) — v2 |
+| `GET diagnostics/errors?limit=20` | Últimos erros: todo `error`/`fatal` e os `warn` de dependência externa (HA, clima, provider, lembrete perdido) — v2 |
+| `GET logs/stream?level=info&room=` | Log ao vivo em SSE: primeiro o buffer em memória (500 linhas) filtrado, depois cada linha nova; heartbeat a cada 15 s; até 4 streams (429) — v2 |
+
+O diagnóstico não sabe de conversa: `logTap` descarta toda chave de log que possa carregar
+fala (`raw`, `text`, `transcript`…) e guarda só escalares. Retenção no SQLite: 30 dias ou 10
+mil linhas por tabela (`latency_samples`, `error_log`, migração 4).
 
 Códigos: 404 em tudo sem `LUNA_ADMIN_TOKEN`; 403 fora de loopback/rede privada; 401
 token errado; 422 validação; 413 corpo acima de 64 KB.

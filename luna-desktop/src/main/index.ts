@@ -35,6 +35,7 @@ import { createCaptureWindow, type CaptureWindow } from './window.js';
 import { createMicDump, type MicDump } from './mic-dump.js';
 import { WakewordSidecar } from './wakeword/sidecar.js';
 import { AdminClient } from './admin/client.js';
+import { LogStream } from './admin/logStream.js';
 import { createPanelMethods, type LocalView } from './panel/methods.js';
 import { createPanelController, type PanelController } from './panel/window.js';
 
@@ -309,14 +310,17 @@ if (!gotLock) {
       console.log(`[luna-desktop] wakeword: reiniciando em ${Math.round(delayMs / 1000)}s`);
     });
 
-    const admin = new AdminClient(() => ({
+    const adminConnection = () => ({
       serverUrl: (local ?? readLocalSettings()).serverUrl,
       adminToken: (local ?? readLocalSettings()).adminToken,
-    }));
+    });
+    const admin = new AdminClient(adminConnection);
+    const logStream = new LogStream(adminConnection, (event) => panel?.send(event));
 
     panel = createPanelController(
       createPanelMethods({
         admin,
+        logs: logStream,
         local: {
           view: localView,
           async save(patch) {
@@ -373,6 +377,7 @@ if (!gotLock) {
           listAudioDevices: () => captureWindow?.listAudioDevices() ?? Promise.resolve([]),
         },
       }),
+      () => logStream.stop(false),
     );
 
     tray = createTray({

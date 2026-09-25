@@ -7,6 +7,7 @@
 // Módulo puro (sem `electron`), testável com `node --test`.
 
 import type { AdminClient, AdminResult } from '../admin/client.js';
+import { validFilter, type LogFilter } from '../admin/logStream.js';
 import type { LocalSettingsPatch } from '../local-settings.js';
 import type { AppState } from '../state.js';
 
@@ -44,9 +45,16 @@ export interface LocalControls {
   listAudioDevices(): Promise<AudioDeviceInfo[]>;
 }
 
+/** Log ao vivo do servidor; as linhas chegam ao painel como evento, não como resposta. */
+export interface LogControls {
+  start(filter: LogFilter): void;
+  stop(): void;
+}
+
 export interface PanelDeps {
   admin: AdminClient;
   local: LocalControls;
+  logs: LogControls;
 }
 
 export type PanelResult = AdminResult;
@@ -80,6 +88,13 @@ function bool(value: unknown, name: string): boolean {
   return value;
 }
 
+function int(value: unknown, name: string, min: number, max: number): number {
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+    throw new TypeError(`argumento "${name}" inválido`);
+  }
+  return value as number;
+}
+
 const seg = encodeURIComponent;
 
 function ok(body: unknown): PanelResult {
@@ -87,7 +102,7 @@ function ok(body: unknown): PanelResult {
 }
 
 export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
-  const { admin, local } = deps;
+  const { admin, local, logs } = deps;
   const methods: Record<string, (...args: unknown[]) => Promise<PanelResult> | PanelResult> = {
     // ─── servidor (API admin) ───
     'server.status': () => admin.request('GET', 'status'),
@@ -114,6 +129,18 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
     'server.testConnection': (g, patch) =>
       admin.request('POST', `settings/${group(g)}/test`, obj(patch ?? {}, 'patch')),
     'server.restart': () => admin.request('POST', 'restart'),
+    'server.latency': (hours) => admin.request('GET', `diagnostics/latency?hours=${int(hours ?? 24, 'hours', 1, 720)}`),
+    'server.errors': (limit) => admin.request('GET', `diagnostics/errors?limit=${int(limit ?? 20, 'limit', 1, 200)}`),
+
+    // ─── log ao vivo ───
+    'logs.start': (level, room) => {
+      logs.start(validFilter(level, room ?? null));
+      return ok(null);
+    },
+    'logs.stop': () => {
+      logs.stop();
+      return ok(null);
+    },
 
     // ─── este computador ───
     'local.get': () => ok(local.view()),

@@ -588,6 +588,8 @@ interface Page {
   render(root: HTMLElement): Promise<void>;
   /** Recarrega sozinho enquanto a página está aberta. */
   pollMs?: number;
+  /** Saindo da página: solta o que ela segura aberto (o stream de log). */
+  leave?(): void;
 }
 
 const pages: Page[] = [];
@@ -606,6 +608,7 @@ function setMeta(text: string, raw = false): void {
 async function show(id: string): Promise<void> {
   const page = pages.find((p) => p.id === id) ?? pages[0]!;
   const changed = page !== currentPage;
+  if (changed) currentPage?.leave?.();
   currentPage = page;
   if (location.hash !== `#${page.id}`) history.replaceState(null, '', `#${page.id}`);
   const index = pages.indexOf(page);
@@ -682,10 +685,11 @@ pages.push({
   title: 'VISÃO GERAL DO SISTEMA',
   pollMs: 5000,
   async render(root) {
-    const [statusRes, satsRes, providerRes] = await Promise.all([
+    const [statusRes, satsRes, providerRes, errorsRes] = await Promise.all([
       window.panel.call('server.status'),
       window.panel.call('server.satellites'),
       window.panel.call('server.settings', 'provider'),
+      window.panel.call('server.errors', 5),
     ]);
     setMeta('RESUMO DO NÚCLEO E ENLACES');
     if (!statusRes.ok) return serverUnavailable(root, statusRes);
@@ -778,7 +782,22 @@ pages.push({
       next.length === 0 ? h('div', {}, 'NENHUM EVENTO AGENDADO. A TRIPULAÇÃO ESTÁ LIVRE.') : null,
     );
 
-    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)' }, nucleus, links, satellites, events));
+    // Servidor antigo (sem a rota) não quebra a tela: o quadro só não aparece.
+    const recentErrors = errorsRes.ok ? (errorsRes.body.errors as any[]) : null;
+    const errCols = '100px 190px minmax(0,1fr)';
+    const errorsFrame = recentErrors
+      ? frame(
+          'ÚLTIMOS ERROS',
+          { tone: recentErrors.length ? 'warn' : undefined, style: 'grid-column:1 / -1;gap:0' },
+          ...recentErrors.map((e) =>
+            grid(errCols, { class: 'tbl-row' }, h('span', { class: 'amber' }, formatStamp(e.at)), h('span', { class: 'raw ellipsis' }, e.event ?? '—'), h('span', { class: 'raw ellipsis', title: e.msg }, `${e.room_id ? `${e.room_id} · ` : ''}${e.msg}`)),
+          ),
+          recentErrors.length === 0 ? h('div', {}, 'NENHUM ERRO REGISTRADO.') : null,
+          recentErrors.length ? h('div', { class: 'row', style: 'padding-top:6px' }, h('span', { class: 'spacer' }), cmd('ABRIR DIAGNÓSTICO', () => void show('diagnostics'), { tone: 'quiet' })) : null,
+        )
+      : null;
+
+    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)' }, nucleus, links, satellites, events, errorsFrame));
   },
 });
 
@@ -1751,37 +1770,280 @@ pages.push({
   },
 });
 
-// ─── 08 Diagnóstico (v2) ─────────────────────────────────────────────────
+// ─── 08 Diagnóstico ──────────────────────────────────────────────────────
+
+const DIAG_WINDOWS: Array<{ value: number; label: string }> = [
+  { value: 1, label: '1H' },
+  { value: 24, label: '24H' },
+  { value: 168, label: '7D' },
+  { value: 720, label: '30D' },
+];
+const LOG_LEVELS: Array<{ value: string; label: string }> = [
+  { value: 'debug', label: 'DEBUG+' },
+  { value: 'info', label: 'INFO+' },
+  { value: 'warn', label: 'WARN+' },
+  { value: 'error', label: 'ERROR+' },
+];
+const LOG_MAX_LINES = 300;
+const TTFAB_BAR = 40;
+
+const diag = {
+  hours: 24,
+  level: 'info',
+  room: null as string | null,
+  paused: false,
+  lines: [] as any[],
+  box: null as HTMLElement | null,
+  status: null as HTMLElement | null,
+  streamState: 'closed' as 'connecting' | 'open' | 'closed',
+  streamError: null as string | null,
+};
+
+const LEVEL_TAGS: Record<string, string> = { trace: 'TRC', debug: 'DBG', info: 'INF', warn: 'WRN', error: 'ERR', fatal: 'FTL' };
+
+function msOrDash(ms: number | null | undefined): string {
+  return typeof ms === 'number' ? `${String(ms).padStart(4)}MS` : '----MS';
+}
+
+/** `12:04:33` */
+function formatClock(ts: number): string {
+  const d = new Date(ts);
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+/** Barra de texto: █ até o p50, ▒ até o p90, ┊ na meta. Escala comum a todas as linhas. */
+function ttfabBar(p50: number | null, p90: number | null, target: number, scaleMs: number): string {
+  const col = (ms: number): number => Math.min(TTFAB_BAR - 1, Math.round((ms / scaleMs) * TTFAB_BAR));
+  const targetCol = col(target);
+  let s = '';
+  for (let i = 0; i < TTFAB_BAR; i++) {
+    if (p50 !== null && i < col(p50)) s += '█';
+    else if (p90 !== null && i < col(p90)) s += '▒';
+    else if (i === targetCol) s += '┊';
+    else s += '·';
+  }
+  return s;
+}
+
+function latencyChart(samples: any[], target: number, since: number, until: number): HTMLElement {
+  const W = 800;
+  const H = 140;
+  const warm = samples.filter((s) => !s.session_cold).map((s) => s.latency_ms as number);
+  const top = Math.max(target * 2, ...warm.map((v) => Math.min(v, target * 5)));
+  const y = (ms: number): number => H - 5 - (Math.min(ms, top) / top) * (H - 10);
+  const x = (at: number): number => ((at - since) / Math.max(1, until - since)) * W;
+  const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': `TTFAB de ${samples.length} turnos, meta ${target} ms` });
+  root.append(svg('line', { x1: 0, x2: W, y1: y(target), y2: y(target), stroke: '#39FF6A', 'stroke-width': 1, 'stroke-dasharray': '6 5', 'vector-effect': 'non-scaling-stroke' }));
+  for (const s of samples) {
+    const over = s.latency_ms > target;
+    root.append(
+      svg('rect', {
+        x: x(s.at) - 1.5,
+        y: y(s.latency_ms) - 1.5,
+        width: 3,
+        height: 3,
+        fill: s.session_cold ? '#0E5A26' : over ? '#FFB000' : '#39FF6A',
+      }),
+    );
+  }
+  return h(
+    'div',
+    { style: 'display:flex;flex-direction:column;gap:4px' },
+    grid(
+      'minmax(0,1fr) 78px',
+      { class: 'grid', style: 'align-items:stretch' },
+      h('div', { class: 'chart' }, root as unknown as Node),
+      h(
+        'div',
+        { class: 'chart-axis' },
+        h('span', { style: 'top:-4px' }, `${top}MS`),
+        h('span', { style: `top:${(y(target) / H) * 140 - 6}px` }, `${target}MS META`),
+        h('span', { style: 'bottom:-4px' }, '0MS'),
+      ),
+    ),
+    h('div', { class: 'row tiny' }, h('span', {}, formatStamp(since)), h('span', { class: 'spacer' }), h('span', {}, 'AGORA')),
+  );
+}
+
+function logLine(r: any): HTMLElement {
+  const tone = r.level === 'error' || r.level === 'fatal' || r.level === 'warn' ? 'amber' : r.level === 'debug' || r.level === 'trace' ? 'fg' : '';
+  return grid(
+    '64px 34px 190px 110px minmax(0,1fr)',
+    { class: `tbl-row log-line ${tone}` },
+    h('span', {}, formatClock(r.ts)),
+    h('span', {}, LEVEL_TAGS[r.level] ?? r.level),
+    h('span', { class: 'raw ellipsis' }, r.event ?? '—'),
+    h('span', { class: 'ellipsis' }, r.room_id ?? '—'),
+    h('span', { class: 'raw ellipsis', title: r.msg }, r.msg || '—'),
+  );
+}
+
+function paintLogStatus(): void {
+  if (!diag.status?.isConnected) return;
+  const text =
+    diag.paused
+      ? '‖ PAUSADO'
+      : diag.streamState === 'open'
+        ? '◉ AO VIVO'
+        : diag.streamState === 'connecting'
+          ? `░ CONECTANDO${diag.streamError ? ` · ${diag.streamError.toUpperCase()}` : ''}`
+          : `— PARADO${diag.streamError ? ` · ${diag.streamError.toUpperCase()}` : ''}`;
+  diag.status.textContent = text;
+  diag.status.className = diag.streamError && diag.streamState !== 'open' ? 'amber' : diag.streamState === 'open' && !diag.paused ? 'hi' : '';
+}
+
+function appendLogLine(record: any): void {
+  diag.lines.push(record);
+  if (diag.lines.length > LOG_MAX_LINES) diag.lines.shift();
+  const box = diag.box;
+  if (!box?.isConnected || diag.paused) return;
+  const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  box.append(logLine(record));
+  while (box.childElementCount > LOG_MAX_LINES) box.firstElementChild!.remove();
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+function restartLogStream(): void {
+  diag.lines = [];
+  diag.box?.replaceChildren();
+  void window.panel.call('logs.start', diag.level, diag.room);
+}
 
 pages.push({
   id: 'diagnostics',
   nav: 'DIAGNÓSTICO',
-  title: 'DIAGNÓSTICO // PRÉVIA v2',
-  soon: true,
+  title: 'DIAGNÓSTICO // LATÊNCIA E LOG',
+  pollMs: 30000,
+  leave() {
+    void window.panel.call('logs.stop');
+    diag.streamState = 'closed';
+  },
   async render(root) {
-    setMeta('MÓDULO NÃO INSTALADO');
-    // Esqueleto apagado do que a v2 vai mostrar — sem números inventados.
-    const bars = ['SALA', 'QUARTO', 'ESCRITÓRIO', 'COZINHA'].map((n) => h('div', { class: 'pre' }, `${n.padEnd(12)}${'·'.repeat(32)}┊${'·'.repeat(15)}  ----MS`));
-    const logs = Array.from({ length: 5 }, () => h('div', { class: 'pre' }, '--:--:--  ----   [----------]  ------------------------------'));
-    const skeleton = h(
-      'div',
-      { class: 'stack dim', 'aria-hidden': 'true', style: 'gap:24px' },
-      frame('TTFAB POR SATÉLITE // META 800MS', { tone: 'muted', style: 'gap:6px' }, ...bars, h('div', { class: 'pre' }, `${' '.repeat(44)}└ META 800MS`)),
-      frame('LOG AO VIVO', { tone: 'muted', style: 'gap:4px' }, h('div', { class: 'row', style: 'gap:18px;padding-bottom:6px' }, h('span', {}, 'SALA: [ TODAS ▾ ]'), h('span', {}, 'NÍVEL: [ INFO+ ▾ ]')), ...logs),
+    const [latRes, errRes, satsRes] = await Promise.all([
+      window.panel.call('server.latency', diag.hours),
+      window.panel.call('server.errors', 20),
+      window.panel.call('server.satellites'),
+    ]);
+    if (!latRes.ok) return serverUnavailable(root, latRes);
+    const lat = latRes.body;
+    const summary = lat.summary as any[];
+    const samples = lat.samples as any[];
+    const target: number = lat.target_ms;
+    setMeta(`${samples.length} TURNOS EM ${DIAG_WINDOWS.find((w) => w.value === diag.hours)?.label ?? `${diag.hours}H`} · META ${target}MS`);
+
+    const windowCycler = cycler(DIAG_WINDOWS, DIAG_WINDOWS.findIndex((w) => w.value === diag.hours), (value) => {
+      diag.hours = value;
+      void renderCurrent();
+    }, 'janela');
+
+    const scale = Math.max(target * 2, ...summary.map((g) => g.p90_ms ?? 0));
+    const cols = '150px 90px minmax(0,1fr) 76px 76px 56px 64px';
+    const ttfab = frame(
+      `TTFAB POR SALA // META ${target}MS`,
+      { style: 'gap:4px' },
+      h('div', { class: 'row', style: 'gap:12px;padding-bottom:6px' }, h('span', { class: 'small' }, 'JANELA'), windowCycler, h('span', { class: 'spacer' }), h('span', { class: 'small' }, '█ P50 · ▒ P90 · ┊ META')),
+      grid(cols, { class: 'tbl-head' }, h('span', {}, 'SALA'), h('span', {}, 'PROVEDOR'), h('span', {}, 'DISTRIBUIÇÃO'), h('span', {}, 'P50'), h('span', {}, 'P90'), h('span', {}, 'N'), h('span', {}, '>META')),
+      ...summary.map((g) =>
+        grid(
+          cols,
+          { class: 'tbl-row' },
+          h('span', { class: 'ellipsis' }, g.room_id),
+          h('span', {}, String(g.provider).toUpperCase()),
+          h('span', { class: `pre ${g.p90_ms !== null && g.p90_ms > target ? 'amber' : 'hi'}`, 'aria-label': `p50 ${g.p50_ms ?? 'sem dado'} ms, p90 ${g.p90_ms ?? 'sem dado'} ms` }, ttfabBar(g.p50_ms, g.p90_ms, target, scale)),
+          h('span', { class: g.p50_ms !== null && g.p50_ms > target ? 'amber' : 'hi' }, msOrDash(g.p50_ms)),
+          h('span', { class: g.p90_ms !== null && g.p90_ms > target ? 'amber' : 'hi' }, msOrDash(g.p90_ms)),
+          h('span', {}, String(g.count)),
+          h('span', { class: g.over_target ? 'amber' : '' }, String(g.over_target)),
+        ),
+      ),
+      summary.length === 0 ? h('div', { style: 'padding:10px 0 4px' }, 'NENHUM TURNO MEDIDO NESTA JANELA. FALE COM A LUNA E VOLTE AQUI.') : null,
+      summary.some((g) => g.cold) ? h('div', { class: 'small', style: 'padding-top:6px' }, `SESSÕES FRIAS FORA DOS PERCENTIS: ${summary.reduce((n, g) => n + g.cold, 0)} (CUSTO DE CONEXÃO, NÃO DE TURNO)`) : null,
     );
-    skeleton.querySelectorAll('.frame-title').forEach((t) => ((t as HTMLElement).style.color = 'var(--dim)'));
-    const lock = h(
-      'div',
-      { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center' },
+
+    const series = frame(
+      'SÉRIE // LIMITE INFERIOR',
+      { style: 'gap:6px' },
+      samples.length ? latencyChart(samples, target, lat.since, Date.now()) : h('div', {}, 'SEM AMOSTRAS.'),
+      h('div', { class: 'small' }, '▪ VERDE: DENTRO DA META · ▪ ÂMBAR: ACIMA · ▪ APAGADO: SESSÃO FRIA'),
+    );
+
+    const errors = (errRes.ok ? errRes.body.errors : []) as any[];
+    const errCols = '100px 190px 110px minmax(0,1fr)';
+    const errFrame = frame(
+      'ÚLTIMOS ERROS',
+      { tone: errors.length ? 'warn' : undefined, style: 'gap:0' },
+      grid(errCols, { class: 'tbl-head' }, h('span', {}, 'QUANDO'), h('span', {}, 'EVENTO'), h('span', {}, 'SALA'), h('span', {}, 'MENSAGEM')),
+      ...errors.map((e) =>
+        grid(errCols, { class: 'tbl-row dotted' }, h('span', { class: 'amber' }, formatStamp(e.at)), h('span', { class: 'raw ellipsis' }, e.event ?? '—'), h('span', { class: 'ellipsis' }, e.room_id ?? '—'), h('span', { class: 'raw ellipsis', title: e.msg }, e.msg)),
+      ),
+      errors.length === 0 ? h('div', { style: 'padding:10px 0 4px' }, errRes.ok ? 'NENHUM ERRO REGISTRADO. SISTEMAS NOMINAIS.' : `◈ ${errorOf(errRes)}`) : null,
+    );
+
+    // Log ao vivo: filtros no servidor; as linhas chegam como evento e
+    // entram direto na caixa, sem repintar a página.
+    const rooms = [...new Set(((satsRes.ok ? satsRes.body.satellites : []) as any[]).map((s) => s.room_id).filter(Boolean))].sort() as string[];
+    if (diag.room && !rooms.includes(diag.room)) rooms.push(diag.room);
+    const roomOptions = [{ value: null as string | null, label: 'TODAS' }, ...rooms.map((r) => ({ value: r as string | null, label: r }))];
+    const roomCycler = cycler(roomOptions, roomOptions.findIndex((o) => o.value === diag.room), (value) => {
+      diag.room = value;
+      restartLogStream();
+    }, 'sala');
+    const levelCycler = cycler(LOG_LEVELS, LOG_LEVELS.findIndex((o) => o.value === diag.level), (value) => {
+      diag.level = value;
+      restartLogStream();
+    }, 'nível');
+
+    diag.status = h('span');
+    diag.box = h('div', { class: 'log-box', role: 'log', 'aria-live': 'off' });
+    diag.box.append(...diag.lines.map(logLine));
+    const pauseBtn = cmd(diag.paused ? 'RETOMAR' : 'PAUSAR', () => {
+      diag.paused = !diag.paused;
+      pauseBtn.textContent = `[ ${diag.paused ? 'RETOMAR' : 'PAUSAR'} ]`;
+      if (!diag.paused) {
+        diag.box!.replaceChildren(...diag.lines.map(logLine));
+        diag.box!.scrollTop = diag.box!.scrollHeight;
+      }
+      paintLogStatus();
+    });
+    const live = frame(
+      'LOG AO VIVO // SEM TRANSCRIÇÃO',
+      { style: 'gap:6px' },
       h(
         'div',
-        { class: 'frame lock', style: 'background:var(--bg);padding:26px 40px;align-items:center;gap:12px;text-align:center' },
-        h('span', { class: 'small', style: 'letter-spacing:.3em' }, 'MÓDULO 08 // DIAGNÓSTICO'),
-        typed('span', { class: 'display', style: 'font-size:38px;letter-spacing:.06em' }, 'ACESSO RESTRITO — MÓDULO NÃO INSTALADO', { cps: 40, delayMs: 300, cursor: 'hi', keepCursor: true }),
-        h('span', { style: 'font-size:12px;line-height:1.7' }, 'PREVISÃO DE INSTALAÇÃO: v2.', h('br'), 'NENHUMA AÇÃO É REQUERIDA DA TRIPULAÇÃO.'),
+        { class: 'row', style: 'gap:16px;flex-wrap:wrap' },
+        h('span', { class: 'small' }, 'SALA'),
+        roomCycler,
+        h('span', { class: 'small' }, 'NÍVEL'),
+        levelCycler,
+        h('span', { class: 'spacer' }),
+        diag.status,
+        pauseBtn,
+        cmd('LIMPAR', () => {
+          diag.lines = [];
+          diag.box!.replaceChildren();
+        }, { tone: 'quiet' }),
+      ),
+      diag.box,
+    );
+
+    root.append(
+      h(
+        'div',
+        { class: 'stack', style: 'gap:22px' },
+        ttfab,
+        series,
+        errFrame,
+        live,
       ),
     );
-    root.append(h('div', { style: 'position:relative;flex:1;min-height:420px' }, skeleton, lock));
+    paintLogStatus();
+    queueMicrotask(() => {
+      if (diag.box) diag.box.scrollTop = diag.box.scrollHeight;
+    });
+    if (diag.streamState === 'closed') {
+      diag.streamState = 'connecting';
+      restartLogStream();
+    }
   },
 });
 
@@ -1808,6 +2070,14 @@ window.panel.onEvent((event) => {
     case 'wake':
       meter.wakeAt = Date.now();
       paintMeter();
+      break;
+    case 'log':
+      appendLogLine(event.record);
+      break;
+    case 'log-status':
+      diag.streamState = event.state;
+      diag.streamError = event.error;
+      paintLogStatus();
       break;
   }
 });

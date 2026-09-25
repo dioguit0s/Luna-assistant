@@ -16,6 +16,9 @@ import {
 import type { SatelliteInfo } from '../ws/WsServer.js';
 import { SERVER_VERSION } from '../ws/WsServer.js';
 import { getLogger } from '../logging/logger.js';
+import { LEVEL_VALUES, type LogLevelName, type LogRecord } from '../logging/logTap.js';
+import type { Diagnostics, LogFilter } from '../diagnostics/Diagnostics.js';
+import { matchesFilter } from '../diagnostics/Diagnostics.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
 
 export interface AdminApiDeps {
@@ -30,6 +33,8 @@ export interface AdminApiDeps {
   /** Cancela no banco, para o toque se estiver tocando e rearma o scheduler. */
   cancelReminder: (reminder: Reminder) => void;
   weatherSource: WeatherSource | null;
+  /** Série de TTFAB, últimos erros e log ao vivo (v2). */
+  diagnostics: Diagnostics;
   /** Shutdown gracioso; o `Restart=always` da unit traz o processo de volta. */
   onRestart: () => void;
   fetchImpl?: typeof fetch;
@@ -42,6 +47,12 @@ export type Light = 'ok' | 'error' | 'unknown' | 'off';
 const PREFIX = '/admin/v1/';
 const MAX_BODY_BYTES = 64 * 1024;
 const CALENDAR_TEST_TIMEOUT_MS = 3000;
+/** Meta de TTFAB do projeto; o gráfico do painel traça a linha aqui. */
+export const TTFAB_TARGET_MS = 800;
+const MAX_LATENCY_SAMPLES = 2000;
+/** Cada stream segura um socket aberto; o painel usa um só. */
+const MAX_LOG_STREAMS = 4;
+const SSE_HEARTBEAT_MS = 15_000;
 
 /** Grupos que o painel lê e grava inteiros pela rota genérica `settings/:grupo`. */
 const EDITABLE_GROUPS = new Set<GroupName>(['ha', 'provider', 'calendar']);
@@ -97,6 +108,11 @@ export class AdminApi {
       return true;
     }
 
+    if (req.method === 'GET' && url.split('?')[0] === `${PREFIX}logs/stream`) {
+      this.streamLogs(req, res, url);
+      return true;
+    }
+
     this.route(req, url)
       .then((result) => send(res, result.status ?? 200, result.body))
       .catch((err: unknown) => {
@@ -135,6 +151,7 @@ export class AdminApi {
     }
     const method = req.method ?? 'GET';
     const [head, id, action] = segments;
+    const query = new URL(url, 'http://admin.local').searchParams;
 
     switch (`${method} ${head}${id !== undefined ? '/:id' : ''}${action !== undefined ? '/:action' : ''}`) {
       case 'GET status':
@@ -163,6 +180,10 @@ export class AdminApi {
         return { body: this.writeSettings(editableGroup(id!), await readJson(req)) };
       case 'POST settings/:id/:action':
         if (action === 'test') return { body: await this.testConnection(editableGroup(id!), await readJson(req)) };
+        break;
+      case 'GET diagnostics/:id':
+        if (id === 'latency') return { body: this.latency(query) };
+        if (id === 'errors') return { body: this.errors(query) };
         break;
       case 'POST restart':
         return { status: 202, body: this.restart() };
@@ -449,6 +470,126 @@ export class AdminApi {
     }
   }
 
+  // ─── Diagnóstico ───────────────────────────────────────────────────────
+
+  /**
+   * Série de TTFAB das últimas `hours` horas (padrão 24, até 30 dias) e o
+   * resumo por sala × provedor. `latency_ms` é o limite inferior do intervalo
+   * documentado em `metrics/ttfab.ts`; `since_turn_start_ms`, o superior.
+   * Sessão fria entra na série, mas fica fora dos percentis — o custo dela é
+   * de connect, não de turno, e aparece à parte em `cold`.
+   */
+  private latency(query: URLSearchParams): unknown {
+    const hours = intParam(query, 'hours', 24, 1, 24 * 30);
+    const since = this.now() - hours * 3600_000;
+    const samples = this.deps.diagnostics.store.latencySince(since, MAX_LATENCY_SAMPLES);
+
+    const groups = new Map<string, { roomId: string; provider: string; warm: number[]; cold: number }>();
+    for (const s of samples) {
+      const key = `${s.roomId}|${s.provider}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { roomId: s.roomId, provider: s.provider, warm: [], cold: 0 };
+        groups.set(key, g);
+      }
+      if (s.sessionCold) g.cold += 1;
+      else g.warm.push(s.latencyMs);
+    }
+
+    return {
+      target_ms: TTFAB_TARGET_MS,
+      since,
+      hours,
+      samples: samples.map((s) => ({
+        at: s.at,
+        room_id: s.roomId,
+        device_id: s.deviceId,
+        provider: s.provider,
+        latency_ms: s.latencyMs,
+        since_turn_start_ms: s.sinceTurnStartMs,
+        provider_wait_ms: s.providerWaitMs,
+        session_cold: s.sessionCold,
+      })),
+      summary: [...groups.values()]
+        .sort((a, b) => a.roomId.localeCompare(b.roomId) || a.provider.localeCompare(b.provider))
+        .map((g) => {
+          const sorted = [...g.warm].sort((a, b) => a - b);
+          return {
+            room_id: g.roomId,
+            provider: g.provider,
+            count: sorted.length,
+            cold: g.cold,
+            p50_ms: percentile(sorted, 0.5),
+            p90_ms: percentile(sorted, 0.9),
+            max_ms: sorted.length ? sorted[sorted.length - 1]! : null,
+            over_target: sorted.filter((v) => v > TTFAB_TARGET_MS).length,
+          };
+        }),
+    };
+  }
+
+  private errors(query: URLSearchParams): unknown {
+    const limit = intParam(query, 'limit', 20, 1, 200);
+    return {
+      errors: this.deps.diagnostics.store.recentErrors(limit).map((e) => ({
+        id: e.id,
+        at: e.at,
+        level: e.level,
+        event: e.event,
+        room_id: e.roomId,
+        msg: e.msg,
+        detail: e.detail,
+      })),
+    };
+  }
+
+  /**
+   * Log ao vivo em Server-Sent Events: primeiro o que o buffer em memória tem
+   * e passa no filtro, depois cada linha nova. `?level=` (padrão `info`) e
+   * `?room=` filtram no servidor. Sem transcrição — ver `logTap.ts`.
+   */
+  private streamLogs(req: IncomingMessage, res: ServerResponse, url: string): void {
+    const query = new URL(url, 'http://admin.local').searchParams;
+    const level = query.get('level') ?? 'info';
+    if (!Object.hasOwn(LEVEL_VALUES, level)) {
+      send(res, 422, { error: 'nível desconhecido', field: 'level' });
+      return;
+    }
+    const room = query.get('room');
+    if (room !== null && room !== '' && !ROOM_ID_PATTERN.test(room)) {
+      send(res, 422, { error: 'room_id fora do formato', field: 'room' });
+      return;
+    }
+    if (this.deps.diagnostics.streamCount >= MAX_LOG_STREAMS) {
+      send(res, 429, { error: 'streams de log demais abertos' });
+      return;
+    }
+    const filter: LogFilter = { minLevel: level as LogLevelName, roomId: room || null };
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+    });
+    const write = (record: LogRecord): void => {
+      res.write(`id: ${record.seq}\ndata: ${JSON.stringify(logWire(record))}\n\n`);
+    };
+    for (const record of this.deps.diagnostics.recent(filter)) write(record);
+    res.write(': ok\n\n');
+
+    const unsubscribe = this.deps.diagnostics.onRecord((record) => {
+      if (matchesFilter(record, filter)) write(record);
+    });
+    const heartbeat = setInterval(() => res.write(': ping\n\n'), SSE_HEARTBEAT_MS);
+    heartbeat.unref();
+    const close = (): void => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    req.on('close', close);
+    res.on('close', close);
+  }
+
   // ─── Servidor ──────────────────────────────────────────────────────────
 
   private bootstrap(): unknown {
@@ -471,6 +612,35 @@ export class AdminApi {
     setTimeout(() => this.deps.onRestart(), 200).unref();
     return { restarting: true };
   }
+}
+
+function logWire(record: LogRecord): unknown {
+  return {
+    seq: record.seq,
+    ts: record.ts,
+    level: record.level,
+    event: record.event,
+    room_id: record.roomId,
+    msg: record.msg,
+    fields: record.fields,
+  };
+}
+
+/** Percentil por posição, sobre uma lista já ordenada. `null` para lista vazia. */
+function percentile(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  const index = Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1);
+  return sorted[Math.max(0, index)]!;
+}
+
+function intParam(query: URLSearchParams, name: string, fallback: number, min: number, max: number): number {
+  const raw = query.get(name);
+  if (raw === null || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new HttpError(422, `"${name}" deve ser inteiro entre ${min} e ${max}`, name);
+  }
+  return value;
 }
 
 function sameOrigin(a: string, b: string): boolean {

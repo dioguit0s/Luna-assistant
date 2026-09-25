@@ -1,6 +1,7 @@
 import pino from 'pino';
 import type { AppConfig } from '../config/env.js';
 import { formatLocalTimestamp } from '../time/clock.js';
+import { emitLog } from './logTap.js';
 
 let loggerInstance: pino.Logger | null = null;
 
@@ -16,6 +17,14 @@ export function createLogger(config: AppConfig): pino.Logger {
   loggerInstance = pino({
     level: config.logLevel,
     timestamp: saoPauloTimestamp,
+    // Cópia para o diagnóstico do painel (`logTap.ts`). Só roda para níveis
+    // habilitados: o pino troca os métodos abaixo do `level` por no-op.
+    hooks: {
+      logMethod(args, method, level) {
+        emitLog(level, args);
+        return method.apply(this, args);
+      },
+    },
     ...(isDev && {
       transport: {
         target: 'pino-pretty',

@@ -134,7 +134,7 @@ Cada componente tem uma fábrica em `panel.ts`; use a fábrica em vez de montar 
    respondem confirmações.
 8. **Efeitos CRT são decorativos:** `pointer-events: none`, `aria-hidden`, nunca carregam
    informação.
-9. **Nada de número inventado.** A tela Diagnóstico (v2) mostra o esqueleto apagado do que
+9. **Nada de número inventado.** Sem amostra, o valor é `----MS`, nunca zero nem estimativa. Na v1 a tela Diagnóstico mostrava o esqueleto apagado do que
    virá, com `----` no lugar dos valores — o design tinha dados de exemplo, a
    implementação não.
 

@@ -16,6 +16,8 @@ import { nextDueAfter } from './reminders/recurrence.js';
 import { SettingsStore } from './settings/SettingsStore.js';
 import { RuntimeSettings } from './settings/RuntimeSettings.js';
 import { AdminApi } from './admin/AdminApi.js';
+import { DiagnosticsStore } from './diagnostics/DiagnosticsStore.js';
+import { Diagnostics } from './diagnostics/Diagnostics.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -73,6 +75,11 @@ async function main(): Promise<void> {
     new SettingsStore(reminderStore.sharedDatabase()),
     () => loadDeviceOverrides(config.devicesConfigPath),
   );
+
+  // Diagnóstico do painel: ouve o log a partir daqui, então o que foi logado
+  // antes (abertura do banco) fica só no journal.
+  const diagnostics = new Diagnostics(new DiagnosticsStore(reminderStore.sharedDatabase()));
+  diagnostics.start();
 
   const ringBuffer = new ConversationRingBuffer();
   // Função, não o objeto: cada sessão nova lê o provider/modelo/voz do
@@ -170,6 +177,7 @@ async function main(): Promise<void> {
         reminderScheduler.reschedule();
       },
       weatherSource,
+      diagnostics,
       onRestart: () => requestRestart(),
     }).handle,
   );
@@ -223,6 +231,7 @@ async function main(): Promise<void> {
     }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
+    diagnostics.stop();
     await wsServer.stop();
     deviceRegistry.stop();
     weatherSource?.stop();

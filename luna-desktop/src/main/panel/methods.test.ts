@@ -47,7 +47,11 @@ function setup(status = 200, body: unknown = { ok: true }, token = 'tok') {
     () => ({ serverUrl: 'ws://192.168.0.20:8080', adminToken: token }),
     fakeFetch(status, body, recorded),
   );
-  return { methods: createPanelMethods({ admin, local: localStub(calls) }), recorded, calls };
+  const logs = {
+    start: (f: { level: string; room: string | null }) => calls.push(`logs:${f.level}:${f.room}`),
+    stop: () => calls.push('logs:stop'),
+  };
+  return { methods: createPanelMethods({ admin, local: localStub(calls), logs }), recorded, calls };
 }
 
 describe('métodos do painel', () => {
@@ -109,7 +113,7 @@ describe('métodos do painel', () => {
         throw new Error('ECONNREFUSED');
       }) as unknown as typeof fetch,
     );
-    const methods = createPanelMethods({ admin, local: localStub([]) });
+    const methods = createPanelMethods({ admin, local: localStub([]), logs: { start() {}, stop() {} } });
     const result = await methods['server.status']!();
     assert.equal(result.ok, false);
     assert.match((result.body as { error: string }).error, /inacessível/);
@@ -118,6 +122,24 @@ describe('métodos do painel', () => {
   it('não há método genérico: só a whitelist existe', () => {
     const { methods } = setup();
     assert.equal(Object.hasOwn(methods, 'require'), false);
-    assert.ok(Object.keys(methods).every((name) => /^(server|local)\./.test(name)));
+    assert.ok(Object.keys(methods).every((name) => /^(server|local|logs)\./.test(name)));
+  });
+
+  it('diagnóstico valida a janela antes de ir à rede', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.latency']!(168);
+    assert.equal(recorded[0]!.url, 'http://192.168.0.20:8080/admin/v1/diagnostics/latency?hours=168');
+    const bad = await methods['server.latency']!('24; drop');
+    assert.equal(bad.ok, false);
+    assert.equal(recorded.length, 1);
+  });
+
+  it('log ao vivo: filtro validado no processo principal', async () => {
+    const { methods, calls } = setup();
+    assert.equal((await methods['logs.start']!('warn', 'quarto')).ok, true);
+    assert.equal((await methods['logs.start']!('warn', '../x')).ok, false);
+    assert.equal((await methods['logs.start']!('barulho', null)).ok, false);
+    await methods['logs.stop']!();
+    assert.deepEqual(calls, ['logs:warn:quarto', 'logs:stop']);
   });
 });

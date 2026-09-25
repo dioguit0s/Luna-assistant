@@ -11,6 +11,9 @@ import { SettingsStore } from '../settings/SettingsStore.js';
 import { RuntimeSettings } from '../settings/RuntimeSettings.js';
 import { WsServer } from '../ws/WsServer.js';
 import { AdminApi } from './AdminApi.js';
+import { Diagnostics } from '../diagnostics/Diagnostics.js';
+import { DiagnosticsStore } from '../diagnostics/DiagnosticsStore.js';
+import type { LogRecord } from '../logging/logTap.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
 
 const TOKEN = 'token-admin-de-teste';
@@ -63,6 +66,7 @@ interface Harness {
   settings: RuntimeSettings;
   reminderStore: ReminderStore;
   registry: DeviceRegistrySource;
+  diagnostics: Diagnostics;
   cancelled: number[];
   restarts: number;
   stop(): Promise<void>;
@@ -92,11 +96,15 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
   settings.onChange('devices', (overrides) => registry.setOverrides(overrides));
 
   const server = new WsServer(cfg, roomManager, haClient, registry, reminderStore, null);
+  // Sem `start()`: o LOG_LEVEL dos testes é `silent`, então o tap não vê
+  // nada — os casos alimentam o diagnóstico com `ingest` direto.
+  const diagnostics = new Diagnostics(new DiagnosticsStore(reminderStore.sharedDatabase()));
   const harness: Harness = {
     baseUrl: '',
     settings,
     reminderStore,
     registry,
+    diagnostics,
     cancelled: [],
     restarts: 0,
     async stop() {
@@ -120,6 +128,7 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
         harness.cancelled.push(r.id);
       },
       weatherSource: null,
+      diagnostics,
       onRestart: () => {
         harness.restarts += 1;
       },
@@ -289,6 +298,82 @@ describe('API admin', () => {
     assert.ok(!JSON.stringify(res.body).includes('test-secret'));
   });
 
+  it('latência: série, meta e percentis por sala × provedor, sem sessão fria', async () => {
+    const now = Date.now();
+    for (const [i, ms] of [300, 500, 700, 900, 1200].entries()) {
+      h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', ts: now - 60_000 + i, fields: { latency_ms: ms, provider: 'gemini', device_id: 'esp32-aa', session_cold: false } }));
+    }
+    h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', ts: now, fields: { latency_ms: 4000, provider: 'gemini', session_cold: true } }));
+    // Amostra de três dias atrás fica fora da janela padrão de 24h.
+    h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', ts: now - 3 * 86_400_000, fields: { latency_ms: 50, provider: 'gemini' } }));
+
+    const res = await call(h, 'GET', '/admin/v1/diagnostics/latency');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.target_ms, 800);
+    assert.equal(res.body.samples.length, 6);
+    const [quarto] = res.body.summary;
+    assert.equal(quarto.room_id, 'quarto');
+    assert.equal(quarto.count, 5);
+    assert.equal(quarto.cold, 1);
+    assert.equal(quarto.p50_ms, 700);
+    assert.equal(quarto.p90_ms, 1200);
+    assert.equal(quarto.over_target, 2);
+
+    const semana = await call(h, 'GET', '/admin/v1/diagnostics/latency?hours=168');
+    assert.equal(semana.body.samples.length, 7);
+    assert.equal((await call(h, 'GET', '/admin/v1/diagnostics/latency?hours=0')).status, 422);
+  });
+
+  it('erros: error sempre, warn só de dependência externa, mais recente primeiro', async () => {
+    h.diagnostics.ingest(record({ level: 'warn', levelValue: 40, event: 'invalid_message', msg: 'ruído' }));
+    h.diagnostics.ingest(record({ level: 'warn', levelValue: 40, event: 'ha_get_state', msg: 'HA não respondeu' }));
+    h.diagnostics.ingest(record({ level: 'error', levelValue: 50, event: 'provider_connect_timeout', roomId: 'quarto', msg: 'provider caiu', fields: { timeout_ms: 5000 } }));
+
+    const res = await call(h, 'GET', '/admin/v1/diagnostics/errors?limit=5');
+    assert.equal(res.status, 200);
+    const events = res.body.errors.map((e: { event: string }) => e.event);
+    assert.deepEqual(events.slice(0, 2), ['provider_connect_timeout', 'ha_get_state']);
+    assert.ok(!events.includes('invalid_message'));
+    assert.deepEqual(res.body.errors[0].detail, { timeout_ms: 5000 });
+  });
+
+  it('log ao vivo em SSE: passado filtrado, depois linha nova', async () => {
+    h.diagnostics.ingest(record({ event: 'room_created', roomId: 'sala', msg: 'sala antiga' }));
+    h.diagnostics.ingest(record({ event: 'room_created', roomId: 'quarto', msg: 'quarto antigo' }));
+
+    const controller = new AbortController();
+    const res = await fetch(`${h.baseUrl}/admin/v1/logs/stream?room=quarto&level=info`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      signal: controller.signal,
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    const readUntil = async (needle: string): Promise<void> => {
+      while (!text.includes(needle)) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error('stream fechou antes de chegar ' + needle);
+        text += decoder.decode(value, { stream: true });
+      }
+    };
+    await readUntil(': ok');
+    assert.ok(text.includes('quarto antigo'));
+    assert.ok(!text.includes('sala antiga'), 'filtro de sala vale para o passado');
+
+    h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', msg: 'linha nova', fields: { latency_ms: 10, provider: 'gemini' } }));
+    h.diagnostics.ingest(record({ level: 'debug', levelValue: 20, roomId: 'quarto', msg: 'debug escondido' }));
+    await readUntil('linha nova');
+    controller.abort();
+    assert.ok(!text.includes('debug escondido'));
+  });
+
+  it('log ao vivo recusa nível desconhecido', async () => {
+    assert.equal((await call(h, 'GET', '/admin/v1/logs/stream?level=barulho')).status, 422);
+  });
+
   it('reiniciar responde 202 e só depois chama o shutdown', async () => {
     const res = await call(h, 'POST', '/admin/v1/restart');
     assert.equal(res.status, 202);
@@ -296,6 +381,21 @@ describe('API admin', () => {
     assert.equal(h.restarts, 1);
   });
 });
+
+let recordSeq = 1_000_000;
+function record(partial: Partial<LogRecord>): LogRecord {
+  return {
+    seq: ++recordSeq,
+    ts: Date.now(),
+    level: 'info',
+    levelValue: 30,
+    event: null,
+    roomId: null,
+    msg: '',
+    fields: {},
+    ...partial,
+  };
+}
 
 describe('API admin sem LUNA_ADMIN_TOKEN', () => {
   it('não existe: 404 em tudo, com ou sem token', async () => {
