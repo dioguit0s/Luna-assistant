@@ -67,7 +67,7 @@ Portar (não reescrever) a lógica de `luna-client-test/src/config.ts` e `src/pr
 ### 6. Tray UX
 
 - Ícone muda com o estado (idle/ouvindo/pensando/falando) — reaproveitar o mesmo conceito de LED do firmware (`StatusLed.cpp`), agora com mais granularidade.
-- Menu: **Mutar microfone** (para o sidecar de escutar sem fechar o app), **Forçar escuta agora** (bypassa o wake word manualmente — fallback caso o wake falhe, útil pra debug), **Configurações** (abre `.env`/pasta de config — sem UI dedicada em v1), **Sair**.
+- Menu: **Mutar microfone** (para o sidecar de escutar sem fechar o app), **Forçar escuta agora** (bypassa o wake word manualmente — fallback caso o wake falhe, útil pra debug), **Configurações** (abria o `.env` na v1; hoje abre o [painel de controle](painel-de-controle.md)), **Sair**.
 - `app.requestSingleInstanceLock()` — evita duas instâncias brigando pelo mic/WS.
 - Autostart no login do Windows via `app.setLoginItemSettings({ openAtLogin: true })`, mas **desligado por padrão** — usuário liga pelo menu depois de validar que funciona.
 

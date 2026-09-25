@@ -33,6 +33,7 @@ tudo em um clique. O front door do repositório é o [README da raiz](../README.
 - [Alarmes e lembretes](alarmes-e-lembretes.md) — plano e decisões; marcos 0 a 11 entregues
 - [luna-desktop](luna-desktop.md) — satélite para Windows
 - [Painel de controle](painel-de-controle.md) — o desktop como painel: inventário de funções e marcos
+- [Design system do painel](design-system-painel.md) — "LUNA 6000": tokens, tipografia, componentes e regras visuais
 
 ## READMEs por componente
 

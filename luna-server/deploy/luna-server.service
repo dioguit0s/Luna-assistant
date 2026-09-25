@@ -43,6 +43,11 @@ SyslogIdentifier=luna-server
 # release a cada deploy e poda as antigas -- o alarme das 7h sumiria no deploy
 # das 3h.
 StateDirectory=luna-server
+# 0700, nao o 0755 default: desde o ADR 010 o banco guarda tambem o token do
+# Home Assistant e as chaves dos providers (configuracao de runtime do painel).
+# Mudar esta linha exige o `sudo cp` + `daemon-reload` manuais -- o deploy nao
+# reinstala a unit (ver deploy/README.md).
+StateDirectoryMode=0700
 
 # Hardening. Fora do StateDirectory acima, o processo nao escreve em disco.
 NoNewPrivileges=true

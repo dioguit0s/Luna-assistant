@@ -86,6 +86,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stdin", action="store_true", help="lê PCM16LE 16kHz mono cru do stdin (modo M4)")
     parser.add_argument("--trace", action="store_true", help="stderr: probabilidade de cada inferência")
     parser.add_argument(
+        "--score-interval-ms",
+        type=int,
+        default=0,
+        help="no --stdin, emite um evento `score` (máximo da média no intervalo) a cada N ms de áudio; "
+        "0 desliga (default). Usado pelo teste de microfone do painel do luna-desktop",
+    )
+    parser.add_argument(
         "--feature-stats",
         action="store_true",
         help="stderr: min/max/média das features cruas do frontend (calibração de FEATURE_SCALE)",
@@ -242,6 +249,12 @@ def cmd_stdin(args: argparse.Namespace) -> int:
     ms_per_byte = 1000.0 / (2 * 16000)
     last_frame_at = time.monotonic()
     gap_s = args.rearm_gap_ms / 1000.0
+    # Máximo da janela, não a última média: um pico de 30 ms entre dois eventos
+    # sumiria do medidor do painel, e é justamente o pico que diz se o "Hey
+    # Luna" chegou perto do threshold.
+    score_every = args.score_interval_ms
+    score_next_at = float(score_every)
+    score_max = 0.0
 
     while True:
         chunk = stdin.read(CHUNK_BYTES)
@@ -258,6 +271,8 @@ def cmd_stdin(args: argparse.Namespace) -> int:
         for feature_slice in features.push_pcm(chunk):
             inferences_before = detector.inferences
             detection = detector.push_feature(feature_slice)
+            if score_every > 0 and detector.inferences != inferences_before:
+                score_max = max(score_max, detector.mean_prob)
             if args.trace and detector.inferences != inferences_before:
                 log(
                     f"inf={detector.inferences:05d} audio_ms={audio_ms:8.1f} "
@@ -274,6 +289,11 @@ def cmd_stdin(args: argparse.Namespace) -> int:
                     }
                 )
                 log(f"DETECTADO em audio_ms={audio_ms:.1f} (média {detection.mean_prob:.3f})")
+
+        if score_every > 0 and audio_ms >= score_next_at:
+            emit({"event": "score", "audio_ms": round(audio_ms, 1), "mean_prob": round(score_max, 4)})
+            score_max = 0.0
+            score_next_at = audio_ms + score_every
 
     emit({"event": "eof", "audio_ms": round(audio_ms, 1), "inferences": detector.inferences})
     return 0

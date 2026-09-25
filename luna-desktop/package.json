@@ -11,7 +11,7 @@
     "dev": "tsc && node scripts/copy-renderer.mjs && electron .",
     "start": "electron .",
     "package:win": "npm run build && electron-builder --win nsis",
-    "test": "node --import tsx --test src/main/state.test.ts src/main/menu.test.ts src/main/session.test.ts src/main/mic-dump.test.ts src/main/ws/protocol.test.ts src/main/wakeword/protocol.test.ts src/shared/pcm.test.ts src/shared/wav.test.ts",
+    "test": "node --import tsx --test src/main/state.test.ts src/main/menu.test.ts src/main/session.test.ts src/main/mic-dump.test.ts src/main/ws/protocol.test.ts src/main/wakeword/protocol.test.ts src/main/local-settings.test.ts src/main/panel/methods.test.ts src/shared/pcm.test.ts src/shared/wav.test.ts",
     "test:wakeword": "wakeword-sidecar\\.venv\\Scripts\\python.exe -m unittest discover -s wakeword-sidecar -t wakeword-sidecar -p \"*_test.py\""
   },
   "engines": {
@@ -22,6 +22,8 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@fontsource/vt323": "^5.3.0",
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
     "electron": "^43.4.0",

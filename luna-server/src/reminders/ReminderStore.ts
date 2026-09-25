@@ -122,8 +122,10 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
    * versão anterior **não** consegue abrir um banco com `user_version` maior
    * que o número de migrações que ela conhece (ver `migrate`), então esta é a
    * primeira migração que torna o rollback do `activate.sh` letal se o banco
-   * não tiver backup. O `activate.sh` copia o `.db` antes de trocar o symlink
-   * justamente por isso.
+   * não tiver backup. Quem copia é o próprio processo, antes de migrar
+   * (`backupBeforeMigrating`, `luna.db.pre-v<N>-*`) — o `activate.sh` não
+   * restaura banco nenhum; voltar para trás de uma migração é restaurar essa
+   * cópia à mão (ver "Rollback manual" em `deploy/README.md`).
    */
   (db) => {
     db.exec(`
@@ -131,6 +133,25 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
         reminder_id INTEGER PRIMARY KEY REFERENCES reminders(id) ON DELETE CASCADE,
         pcm16_16k   BLOB    NOT NULL,
         rendered_at INTEGER NOT NULL
+      );
+    `);
+  },
+  /**
+   * Configuração de runtime editada pelo painel (ADR 010, decisão 3): um
+   * documento JSON por grupo (`ha`, `provider`, `devices`...). Mora aqui, e
+   * não numa lista de migrações própria do `SettingsStore`, porque o banco é
+   * um só e `user_version` também: duas listas contando a mesma versão
+   * pisariam uma na outra.
+   *
+   * Como toda migração, torna o rollback para a release anterior (que conhece
+   * só 2) impossível sem restaurar `luna.db.pre-v2-*` — ver `deploy/README.md`.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS settings (
+        grp        TEXT    PRIMARY KEY,
+        value      TEXT    NOT NULL,
+        updated_at INTEGER NOT NULL
       );
     `);
   },
@@ -280,6 +301,26 @@ export class ReminderStore {
   close(): void {
     this.statements.clear();
     this.db.close();
+  }
+
+  /**
+   * Handle do mesmo banco para o `SettingsStore`. Só existe porque o schema
+   * dos dois vive numa lista de migrações só (ver `MIGRATIONS`): abrir um
+   * segundo `DatabaseSync` duplicaria pragmas e o controle de versão.
+   */
+  sharedDatabase(): DatabaseSync {
+    return this.db;
+  }
+
+  /** Tudo que está vivo, de todas as salas, na ordem em que vai tocar. Para o painel. */
+  listLive(): Reminder[] {
+    return this.stmt(
+      `SELECT ${REMINDER_COLUMNS} FROM reminders
+        WHERE status IN ${LIVE_STATUSES}
+        ORDER BY next_due_utc`,
+    )
+      .all()
+      .map(toReminder);
   }
 
   /** Prepara sob demanda e reaproveita: o scheduler chama o mesmo SQL a cada acordada. */

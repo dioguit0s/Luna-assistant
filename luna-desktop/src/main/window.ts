@@ -11,7 +11,9 @@ import {
   IPC_FLUSH_PLAYBACK,
   IPC_MIC_FRAME,
   IPC_PLAY_PCM,
+  IPC_SET_AUDIO_DEVICES,
 } from './ipc.js';
+import type { AudioDeviceInfo } from './panel/methods.js';
 
 // De dist/main/ sobe um nível até dist/ — preload.js e renderer/ vivem lá.
 const DIST_DIR = fileURLToPath(new URL('..', import.meta.url));
@@ -27,6 +29,10 @@ export interface CaptureWindowDeps {
 export interface CaptureWindow {
   playPcm(pcm: Buffer): void;
   flushPlayback(): void;
+  /** Troca mic/alto-falante a quente. Vazio = padrão do sistema. */
+  setAudioDevices(micDeviceId: string, speakerDeviceId: string): void;
+  /** Enumerado aqui, e não na janela do painel: só esta sessão tem permissão de mídia, e sem ela os rótulos vêm vazios. */
+  listAudioDevices(): Promise<AudioDeviceInfo[]>;
   destroy(): void;
 }
 
@@ -100,6 +106,22 @@ export function createCaptureWindow(deps: CaptureWindowDeps): CaptureWindow {
     flushPlayback(): void {
       if (win.isDestroyed()) return;
       win.webContents.send(IPC_FLUSH_PLAYBACK);
+    },
+    setAudioDevices(micDeviceId: string, speakerDeviceId: string): void {
+      if (win.isDestroyed()) return;
+      win.webContents.send(IPC_SET_AUDIO_DEVICES, { micDeviceId, speakerDeviceId });
+    },
+    async listAudioDevices(): Promise<AudioDeviceInfo[]> {
+      if (win.isDestroyed()) return [];
+      // Código fixo, sem nada vindo do painel interpolado: é só leitura.
+      const devices = (await win.webContents.executeJavaScript(
+        `navigator.mediaDevices.enumerateDevices().then((list) => list
+          .filter((d) => d.kind === 'audioinput' || d.kind === 'audiooutput')
+          .map((d) => ({ deviceId: d.deviceId, kind: d.kind, label: d.label })))`,
+      )) as AudioDeviceInfo[];
+      // "default"/"communications" são aliases do Windows para um aparelho que
+      // já aparece na lista — o painel oferece "Padrão do sistema" no lugar.
+      return devices.filter((d) => d.deviceId !== 'default' && d.deviceId !== 'communications');
     },
     destroy(): void {
       ipcMain.off(IPC_MIC_FRAME, onMicFrame);

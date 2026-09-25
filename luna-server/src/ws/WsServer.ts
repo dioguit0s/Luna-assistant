@@ -1,4 +1,10 @@
-import { createServer, type Server as HttpServer } from 'node:http';
+import {
+  createServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
+} from 'node:http';
+import { readFileSync } from 'node:fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AppConfig } from '../config/env.js';
 import type { RoomManager } from '../rooms/RoomManager.js';
@@ -23,7 +29,40 @@ interface ClientState {
   deviceId: string;
   authenticated: boolean;
   lastSeenAt: number;
+  connectedAt: number;
 }
+
+/** Um satélite como o painel o vê: conectado agora ou visto desde o boot. */
+export interface SatelliteInfo {
+  deviceId: string;
+  roomId: string;
+  online: boolean;
+  /** Início da conexão atual; `null` offline. */
+  connectedSince: number | null;
+  /** Último sinal de vida (ping, áudio, auth). */
+  lastSeenAt: number;
+}
+
+/**
+ * Rota HTTP extra no mesmo servidor do `/health` — a API admin (ADR 010,
+ * decisão 1). Devolve `true` quando tratou a requisição.
+ */
+export type HttpRouteHandler = (req: IncomingMessage, res: ServerResponse) => boolean;
+
+/**
+ * Versão da release, lida do `package.json` que o deploy copia junto do
+ * `dist/` (ver `deploy.yml`). Best-effort: sem o arquivo, `unknown`.
+ */
+export const SERVER_VERSION: string = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')) as {
+      version?: string;
+    };
+    return pkg.version ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+})();
 
 // O satélite manda um "ping" de aplicação a cada 10s (PING_INTERVAL_MS no
 // firmware) enquanto autenticado. Uma queda abrupta — energia ou cabo USB
@@ -63,6 +102,14 @@ export class WsServer {
   private readonly clientsByRoom = new Map<string, Set<WebSocket>>();
   private readonly pendingAuthTimers = new Map<WebSocket, NodeJS.Timeout>();
   private readonly orchestrator: Orchestrator;
+  /**
+   * Satélites que já autenticaram desde o boot, por `device_id` — é o que deixa
+   * o painel mostrar "offline" para um aparelho que caiu. Em memória de
+   * propósito: sem histórico persistido, some no restart.
+   */
+  private readonly seenSatellites = new Map<string, { roomId: string; lastSeenAt: number }>();
+  private adminHandler: HttpRouteHandler | null = null;
+  private providerName: () => string;
 
   constructor(
     private readonly config: AppConfig,
@@ -72,6 +119,7 @@ export class WsServer {
     reminderStore: ReminderStore,
     weatherSource: WeatherSource | null,
   ) {
+    this.providerName = () => config.audioProvider;
     // O client do HA e o registro são construídos em `index.ts`: o registro tem
     // ciclo de vida próprio (start/stop) e ambos compartilham o mesmo client.
     this.orchestrator = new Orchestrator(
@@ -83,6 +131,41 @@ export class WsServer {
       reminderStore,
       weatherSource,
     );
+  }
+
+  /** Liga a API admin. Chamado antes de `start()`. */
+  setAdminHandler(handler: HttpRouteHandler): void {
+    this.adminHandler = handler;
+  }
+
+  /** O `/health` mostra o provider efetivo, que o painel pode trocar a quente. */
+  setProviderNameSource(source: () => string): void {
+    this.providerName = source;
+  }
+
+  /** Conectados agora + vistos desde o boot, um por `device_id`. */
+  listSatellites(): SatelliteInfo[] {
+    const byDevice = new Map<string, SatelliteInfo>();
+    for (const [deviceId, seen] of this.seenSatellites) {
+      byDevice.set(deviceId, {
+        deviceId,
+        roomId: seen.roomId,
+        online: false,
+        connectedSince: null,
+        lastSeenAt: seen.lastSeenAt,
+      });
+    }
+    for (const state of this.clients.values()) {
+      if (!state.authenticated) continue;
+      byDevice.set(state.deviceId, {
+        deviceId: state.deviceId,
+        roomId: state.roomId,
+        online: true,
+        connectedSince: state.connectedAt,
+        lastSeenAt: state.lastSeenAt,
+      });
+    }
+    return [...byDevice.values()].sort((a, b) => a.roomId.localeCompare(b.roomId));
   }
 
   /**
@@ -183,13 +266,15 @@ export class WsServer {
         res.end(
           JSON.stringify({
             status: 'ok',
-            provider: this.config.audioProvider,
+            provider: this.providerName(),
             clients: this.clients.size,
             uptime_s: Math.floor(process.uptime()),
+            version: SERVER_VERSION,
           }),
         );
         return;
       }
+      if (this.adminHandler?.(req, res)) return;
       res.writeHead(404).end();
     });
 
@@ -319,7 +404,11 @@ export class WsServer {
     isBinary: boolean,
   ): Promise<void> {
     const state = this.clients.get(ws);
-    if (state) state.lastSeenAt = Date.now();
+    if (state) {
+      state.lastSeenAt = Date.now();
+      const seen = this.seenSatellites.get(state.deviceId);
+      if (seen) seen.lastSeenAt = state.lastSeenAt;
+    }
     const buf = Buffer.from(data as Buffer);
 
     if (state?.authenticated && isBinary) {
@@ -430,12 +519,15 @@ export class WsServer {
         });
     }
 
+    const now = Date.now();
     this.clients.set(ws, {
       roomId: room_id,
       deviceId: device_id,
       authenticated: true,
-      lastSeenAt: Date.now(),
+      lastSeenAt: now,
+      connectedAt: now,
     });
+    this.seenSatellites.set(device_id, { roomId: room_id, lastSeenAt: now });
     this.indexClient(ws, room_id);
     this.roomManager.registerClient(room_id);
 

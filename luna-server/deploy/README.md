@@ -150,6 +150,25 @@ O serviço grava um banco SQLite com os lembretes e alarmes. A unit declara
 dono `luna:luna` e libera escrita mesmo sob `ProtectSystem=strict` — não é
 preciso criar o diretório nem ajustar permissão à mão.
 
+Desde o [ADR 010](../../docs/adr/010-painel-de-controle-e-api-admin.md) o
+banco guarda também a **configuração de runtime** — HA (`HA_URL`/`HA_TOKEN`),
+provider (chaves, modelos, voz), conexão da agenda, apelidos de dispositivos,
+mapeamento sala ↔ área e nomes de satélites:
+
+- **`/etc/luna-server.env` e `config/devices.json` só semeiam o banco**, no
+  primeiro boot em que cada grupo ainda não existe nele. Daí em diante a edição
+  é pelo painel do `luna-desktop`. Mudar esses valores no `.env` depois disso
+  **não tem efeito** — o servidor loga `config_env_ignored` com o nome da
+  variável (nunca o valor).
+- Continuam no `.env` só os de bootstrap: `WS_PORT`, `WS_AUTH_SECRET`,
+  `LUNA_ADMIN_TOKEN`, `LUNA_DB_PATH`, `LOG_LEVEL` e os knobs de latência/alarme.
+- Com segredos no banco, a unit declara `StateDirectoryMode=0700`. **Ao
+  atualizar para esta versão, reinstale a unit** (ver [4. Serviço
+  systemd](#4-serviço-systemd)): `sudo cp` + `sudo systemctl daemon-reload`. O
+  `activate.sh` recusa o deploy enquanto a unit instalada divergir. As cópias
+  `luna.db.pre-v*` feitas antes de migrar também carregam os segredos e ficam
+  no mesmo diretório protegido.
+
 O banco **não** fica junto da release: o `activate.sh` troca o symlink de
 `/opt/luna/current` a cada deploy e poda as antigas, então um alarme marcado
 para as 7h não sobreviveria a um deploy às 3h. Para apontar para outro caminho,
@@ -177,8 +196,15 @@ ls -l /opt/luna/current
 # Health check
 curl -s "http://127.0.0.1:$WS_PORT/health"
 
-# Trocar segredos (exige restart manual — deploy não recarrega o env sozinho)
+# Trocar segredos de BOOTSTRAP (WS_AUTH_SECRET, LUNA_ADMIN_TOKEN) — exige
+# restart manual. Token do HA e chaves de provider: pelo painel, não aqui.
 sudo nano /etc/luna-server.env && sudo systemctl restart luna-server
+
+# API admin (da própria máquina ou da LAN, nunca de fora). O filtro de rede
+# aceita loopback: um proxy ou túnel NO MESMO HOST (ex.: Cloudflare Tunnel)
+# apontado para esta porta faria toda requisição de fora chegar como
+# 127.0.0.1, e só o token protegeria. Não exponha esta porta por túnel.
+curl -s -H "Authorization: Bearer $LUNA_ADMIN_TOKEN" "http://127.0.0.1:$WS_PORT/admin/v1/status"
 ```
 
 ### Rollback manual
@@ -192,3 +218,27 @@ sudo systemctl restart luna-server
 
 Reverter no Git (`git revert` + push na `main`) também funciona e é preferível,
 já que mantém o servidor e o repositório em sincronia.
+
+**Rollback para trás de uma migração do banco não funciona só com o symlink.**
+O código recusa abrir um banco com `user_version` maior do que as migrações que
+conhece (é de propósito: ler um schema desconhecido é pior que parar). Então,
+se a release nova migrou o banco (ex.: a v3, tabela `settings`, do painel de
+controle) e é preciso voltar para uma anterior — por symlink **ou** por `git
+revert` —, o serviço antigo morre no boot com `Banco de lembretes na versão 3,
+mais nova que este código (2)`, e o rollback automático do `activate.sh` também
+falha. O `activate.sh` não restaura banco nenhum. Para voltar:
+
+```bash
+sudo systemctl stop luna-server
+# Sem glob: com StateDirectoryMode=0700 só o usuário luna lista o diretório,
+# e um `ls ...pre-v*` do seu shell diria "No such file" mesmo com backup lá.
+sudo -u luna ls -1t /var/lib/luna-server/        # procure luna.db.pre-v2-<carimbo>
+sudo -u luna cp /var/lib/luna-server/luna.db /var/lib/luna-server/luna.db.descartado-$(date +%s)
+sudo -u luna cp /var/lib/luna-server/luna.db.pre-v2-<carimbo> /var/lib/luna-server/luna.db
+sudo -u luna rm -f /var/lib/luna-server/luna.db-wal /var/lib/luna-server/luna.db-shm
+# troque o symlink como acima e:
+sudo systemctl start luna-server
+```
+
+Isso **perde** o que mudou depois da cópia: lembretes criados e toda a
+configuração feita pelo painel (que volta a vir do `.env`/`devices.json`).

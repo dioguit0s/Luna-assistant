@@ -32,12 +32,10 @@ files:
 # instalado fora do checkout. src/main/wakeword/sidecar.ts resolve esses
 # caminhos via process.resourcesPath quando app.isPackaged.
 #
-# .env.example também vai — src/main/config.ts usa esse arquivo pra semear o
-# .env em userData na primeira execução empacotada (não tem monorepo por perto
-# pra copiar à mão).
+# O .env.example não vai mais: desde o painel de controle (ADR 010) a
+# primeira execução empacotada abre Configurações → Este computador em vez de
+# semear um .env para o usuário editar à mão.
 extraResources:
-  - from: .env.example
-    to: .env.example
   - from: wakeword-sidecar
     to: wakeword-sidecar
     filter:

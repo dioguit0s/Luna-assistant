@@ -58,11 +58,14 @@ export interface WakewordSidecarOptions {
   model?: string;
   /** --threshold — omitido usa o default do próprio wake_sidecar.py (0.97) */
   threshold?: number;
+  /** --score-interval-ms — eventos `score` para o teste de mic do painel. Omitido desliga. */
+  scoreIntervalMs?: number;
 }
 
 export interface WakewordSidecarEvents {
   ready: (info: Extract<WakewordEvent, { event: 'ready' }>) => void;
   wake: (info: Extract<WakewordEvent, { event: 'wake' }>) => void;
+  score: (info: Extract<WakewordEvent, { event: 'score' }>) => void;
   crashed: (info: { code: number | null; signal: NodeJS.Signals | null }) => void;
   restartScheduled: (delayMs: number) => void;
   fatalError: (message: string) => void;
@@ -119,6 +122,7 @@ export class WakewordSidecar extends EventEmitter {
     const args = ['wake_sidecar.py', '--stdin'];
     if (model) args.push('--model', model);
     if (this.opts.threshold !== undefined) args.push('--threshold', String(this.opts.threshold));
+    if (this.opts.scoreIntervalMs) args.push('--score-interval-ms', String(this.opts.scoreIntervalMs));
 
     // windowsHide: sem isso, cada (re)início do sidecar pisca uma janela de
     // console preta — python.exe é um console app, e o app de bandeja não tem
@@ -172,6 +176,9 @@ export class WakewordSidecar extends EventEmitter {
         break;
       case 'wake':
         this.emit('wake', event);
+        break;
+      case 'score':
+        this.emit('score', event);
         break;
       case 'error':
         // Pode chegar como a própria primeira linha (modelo ausente/geometria

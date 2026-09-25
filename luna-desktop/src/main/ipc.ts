@@ -17,3 +17,6 @@ export const IPC_CAPTURE_ERROR = 'luna:capture-error';
 
 /** renderer → main: captura inicializada com sucesso (mic + worklet prontos). */
 export const IPC_CAPTURE_READY = 'luna:capture-ready';
+
+/** main → renderer: `{ micDeviceId, speakerDeviceId }` (vazio = padrão do sistema). Troca a quente, pela tela "Este computador" do painel. */
+export const IPC_SET_AUDIO_DEVICES = 'luna:set-audio-devices';

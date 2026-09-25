@@ -18,6 +18,9 @@ declare global {
     sendCaptureReady(): void;
     onPlayPcm(callback: (buf: ArrayBuffer) => void): void;
     onFlushPlayback(callback: () => void): void;
+    onSetAudioDevices(
+      callback: (devices: { micDeviceId: string; speakerDeviceId: string }) => void,
+    ): void;
   }
 
   interface Window {
@@ -45,19 +48,72 @@ async function main(): Promise<void> {
 
   await audioCtx.audioWorklet.addModule('./capture-worklet.js');
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
+  const captureNode = new AudioWorkletNode(audioCtx, 'luna-capture-processor');
+
+  // O mic escolhido no painel ("Este computador"). Vazio = padrão do sistema.
+  // Trocar de mic é trocar só o source: o worklet e o playback continuam, e o
+  // stream antigo é encerrado para o Windows apagar o indicador de mic em uso.
+  let currentMicId = '';
+  let stream: MediaStream | null = null;
+  let source: MediaStreamAudioSourceNode | null = null;
+
+  async function openMic(deviceId: string): Promise<void> {
+    const constraints: MediaTrackConstraints = {
       channelCount: 1,
       // echoCancellation é a principal defesa contra a Luna se ouvir com o
       // uplink reaberto durante o barge-in manual (forceListen).
       echoCancellation: true,
       noiseSuppression: true,
       autoGainControl: true,
-    },
-  });
+      ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
+    };
+    let next: MediaStream;
+    let opened = deviceId;
+    try {
+      next = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+    } catch (err) {
+      if (!deviceId) throw err;
+      // Em uso fica o padrão: escolher o mesmo mic de novo depois de replugar
+      // tem que tentar abrir, não parecer "já é esse".
+      opened = '';
+      // Mic escolhido sumiu (USB desplugado): cai para o padrão em vez de
+      // deixar a Luna surda, e avisa — o main mostra no tray.
+      window.luna.sendCaptureError(
+        `microfone escolhido indisponível, usando o padrão (${err instanceof Error ? err.message : String(err)})`,
+      );
+      next = await navigator.mediaDevices.getUserMedia({ audio: { ...constraints, deviceId: undefined } });
+    }
+    source?.disconnect();
+    stream?.getTracks().forEach((track) => track.stop());
+    stream = next;
+    source = audioCtx.createMediaStreamSource(next);
+    source.connect(captureNode);
+    currentMicId = opened;
+  }
 
-  const source = audioCtx.createMediaStreamSource(stream);
-  const captureNode = new AudioWorkletNode(audioCtx, 'luna-capture-processor');
+  await openMic('');
+
+  // Trocas em fila: duas escolhas rápidas no painel não podem terminar com o
+  // `getUserMedia` da primeira resolvendo por último e vencendo.
+  let micSwitch: Promise<void> = Promise.resolve();
+
+  window.luna.onSetAudioDevices(({ micDeviceId, speakerDeviceId }) => {
+    micSwitch = micSwitch.then(async () => {
+      if (micDeviceId === currentMicId) return;
+      try {
+        await openMic(micDeviceId);
+      } catch (err) {
+        window.luna.sendCaptureError(`falha ao trocar de microfone: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    });
+    // `setSinkId` no AudioContext (Chromium 110+) — ainda fora do lib.dom do TS.
+    const ctx = audioCtx as AudioContext & { setSinkId?: (id: string) => Promise<void> };
+    ctx.setSinkId?.(speakerDeviceId).catch((err: unknown) => {
+      window.luna.sendCaptureError(
+        `alto-falante escolhido indisponível: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  });
 
   let frameCount = 0;
   captureNode.port.onmessage = (event: MessageEvent<ArrayBuffer>): void => {
@@ -75,7 +131,6 @@ async function main(): Promise<void> {
     }
   };
 
-  source.connect(captureNode);
   // Não conectar captureNode a audioCtx.destination — senão o próprio mic
   // ecoaria de volta pelo alto-falante.
 

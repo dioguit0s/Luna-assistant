@@ -32,6 +32,11 @@ export interface DeviceRegistryOptions {
   aliases?: Record<string, string>;
   /** `entity_id`s que a IA não pode acionar, mesmo estando em uma área. */
   exclude?: string[];
+  /**
+   * Sala da Luna → área do HA, para satélites cujo `room_id` não é um
+   * `area_id` (o `desktop_diogo` do luna-desktop). Editado pelo painel.
+   */
+  roomAreas?: Record<string, string>;
 }
 
 /**
@@ -46,6 +51,7 @@ export class DeviceRegistry {
   /** Todo `device` conhecido, em qualquer cômodo — separa os dois tipos de falha. */
   private readonly knownDevices = new Set<string>();
   private readonly aliases: Map<string, string>;
+  private readonly roomAreas: Map<string, string>;
 
   private constructor(entries: DeviceEntry[], options: DeviceRegistryOptions) {
     const excluded = new Set((options.exclude ?? []).map(normalize));
@@ -73,6 +79,19 @@ export class DeviceRegistry {
         normalize(to),
       ]),
     );
+
+    this.roomAreas = new Map(
+      Object.entries(options.roomAreas ?? {}).map(([room, area]) => [
+        normalize(room),
+        normalize(area),
+      ]),
+    );
+  }
+
+  /** A área do HA que responde por esta sala: a mapeada, ou a própria sala. */
+  areaFor(roomId: string): string {
+    const room = normalize(roomId);
+    return this.roomAreas.get(room) ?? room;
   }
 
   static fromEntries(
@@ -91,7 +110,7 @@ export class DeviceRegistry {
   resolve(device: string, roomId: string): DeviceResolution {
     const requested = normalize(device);
     const resolvedDevice = this.aliases.get(requested) ?? requested;
-    const room = normalize(roomId);
+    const room = this.areaFor(roomId);
 
     const entry = this.byDeviceAndRoom.get(key(resolvedDevice, room));
     if (entry) {
@@ -115,7 +134,12 @@ export class DeviceRegistry {
     };
   }
 
-  /** Dispositivos de um cômodo, para log e diagnóstico. */
+  /**
+   * Dispositivos de uma **área** do HA. Não aplica o mapeamento sala → área:
+   * quem chama com a sala da sessão passa `areaFor(sala)` antes. Aplicar aqui
+   * desviaria também uma área real pedida pelo nome ("o que tem no
+   * escritório?") para a área mapeada a ela.
+   */
   devicesInRoom(roomId: string): DeviceEntry[] {
     const room = normalize(roomId);
     return this.distinctEntries().filter((entry) => normalize(entry.roomId) === room);

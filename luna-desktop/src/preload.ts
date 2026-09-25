@@ -1,5 +1,5 @@
 // Ponte de contexto isolado entre a janela oculta e o processo principal.
-// Só expõe exatamente as 5 operações do protocolo de captura/playback —
+// Só expõe exatamente as 6 operações do protocolo de captura/playback —
 // nada de nodeIntegration, nada de acesso genérico a ipcRenderer no renderer.
 
 import { contextBridge, ipcRenderer } from 'electron';
@@ -9,6 +9,7 @@ import {
   IPC_FLUSH_PLAYBACK,
   IPC_MIC_FRAME,
   IPC_PLAY_PCM,
+  IPC_SET_AUDIO_DEVICES,
 } from './main/ipc.js';
 
 contextBridge.exposeInMainWorld('luna', {
@@ -26,5 +27,10 @@ contextBridge.exposeInMainWorld('luna', {
   },
   onFlushPlayback: (callback: () => void): void => {
     ipcRenderer.on(IPC_FLUSH_PLAYBACK, () => callback());
+  },
+  onSetAudioDevices: (
+    callback: (devices: { micDeviceId: string; speakerDeviceId: string }) => void,
+  ): void => {
+    ipcRenderer.on(IPC_SET_AUDIO_DEVICES, (_event, devices) => callback(devices));
   },
 });

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      CSP restritiva (ADR 010, decisão 6): o painel exibe dado vindo de fora
+      (nomes do HA, rótulos de lembrete) e não precisa de rede nenhuma — toda
+      chamada passa pelo processo principal via IPC. Nada inline, nada remoto:
+      as fontes vêm empacotadas em fonts/ (docs/design-system-painel.md).
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'"
+    />
+    <title>LUNA 6000 — Painel de controle</title>
+    <link rel="stylesheet" href="./panel.css" />
+  </head>
+  <body>
+    <div class="screen">
+      <header class="topbar">
+        <div class="brand">INTERFACE 2037 // LUNA 6000</div>
+        <div class="spacer"></div>
+        <div class="topbar-item"><span id="date"></span><span class="hi" id="clock"></span></div>
+        <div class="topbar-item"><span>UPTIME</span><span class="hi" id="uptime">— — — —</span></div>
+        <div class="status-badge" id="status-badge">░ STATUS: CONSULTANDO</div>
+      </header>
+
+      <div class="workspace" id="workspace">
+        <nav class="sidebar" aria-label="Menu principal">
+          <div class="sidebar-head">┌ MENU PRINCIPAL</div>
+          <div id="nav" class="nav-list"></div>
+          <div class="spacer"></div>
+          <div class="sidebar-foot">└ TECLAS 1–8 NAVEGAM<br />&nbsp;&nbsp;ESC CANCELA</div>
+        </nav>
+        <main class="main">
+          <div class="screen-head">
+            <span id="screen-num"></span>
+            <h1 id="screen-title"></h1>
+            <span class="spacer"></span>
+            <span class="screen-meta" id="screen-meta"></span>
+          </div>
+          <section id="page" class="page"></section>
+        </main>
+      </div>
+
+      <div class="nosignal" id="nosignal" hidden></div>
+
+      <div class="cmdline">
+        <span id="cmd" class="cmd-text"></span>
+        <span class="spacer"></span>
+        <span class="cmd-meta" id="cmd-meta">OPERADOR ÚNICO</span>
+      </div>
+
+      <div class="voicebar idle" id="voicebar-root">
+        <span class="voice-label" id="voice-label">— EM ESPERA</span>
+        <span class="voice-wave" id="voice-wave" aria-hidden="true"></span>
+        <span class="voice-room" id="voice-room"></span>
+      </div>
+
+      <div class="boot" id="boot" hidden></div>
+
+      <div class="fx fx-scan" aria-hidden="true"></div>
+      <div class="fx fx-noise" aria-hidden="true"></div>
+      <div class="fx fx-flicker" aria-hidden="true"></div>
+      <div class="fx fx-glass" aria-hidden="true"></div>
+    </div>
+    <script src="./panel.js"></script>
+  </body>
+</html>

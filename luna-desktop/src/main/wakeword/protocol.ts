@@ -16,10 +16,11 @@ export type WakewordEvent =
       input_zero_point: number;
     }
   | { event: 'wake'; audio_ms: number; prob: number; mean_prob: number; inference: number }
+  | { event: 'score'; audio_ms: number; mean_prob: number }
   | { event: 'eof'; audio_ms: number; inferences: number }
   | { event: 'error'; message: string };
 
-const KNOWN_EVENTS = new Set(['ready', 'wake', 'eof', 'error']);
+const KNOWN_EVENTS = new Set(['ready', 'wake', 'score', 'eof', 'error']);
 
 /**
  * Parseia uma linha de stdout do sidecar. Nunca lança — linha vazia, JSON

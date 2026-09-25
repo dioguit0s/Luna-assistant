@@ -138,4 +138,28 @@ describe('createListDevicesHandler', () => {
     await handler({}, ctx());
     assert.equal(source.calls, 2);
   });
+
+  describe('mapeamento sala → área do painel (ADR 010)', () => {
+    const MAPPED = DeviceRegistry.fromEntries(
+      [
+        toDeviceEntry({ device: 'luz_bancada', roomId: 'sala_de_estar', entityId: 'switch.luz_bancada' }),
+        toDeviceEntry({ device: 'luz_cozinha', roomId: 'cozinha', entityId: 'light.luz_cozinha' }),
+      ],
+      { roomAreas: { desktop_diogo: 'sala_de_estar', cozinha: 'sala_de_estar' } },
+    );
+
+    it('sem room_id, a sala da sessão lista os aparelhos da área mapeada', async () => {
+      const handler = createListDevicesHandler({ deviceRegistry: fakeSource(MAPPED) });
+      const result = (await handler({}, ctx('desktop_diogo'))) as { devices: string[] };
+      assert.deepEqual(result.devices, ['luz bancada']);
+    });
+
+    it('uma área real pedida pelo nome não é desviada pelo mapeamento dela', async () => {
+      // `cozinha` também está mapeada para a sala de estar — mas quem pergunta
+      // "o que tem na cozinha?" de outro cômodo quer a cozinha de verdade.
+      const handler = createListDevicesHandler({ deviceRegistry: fakeSource(MAPPED) });
+      const result = (await handler({ room_id: 'cozinha' }, ctx('desktop_diogo'))) as { devices: string[] };
+      assert.deepEqual(result.devices, ['luz cozinha']);
+    });
+  });
 });

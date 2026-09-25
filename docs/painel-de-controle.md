@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** Planejado — inventário fechado, nenhum marco iniciado
+**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 não iniciada
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -146,6 +146,33 @@ O "não perturbe" precisa decidir o que acontece com um alarme marcado dentro da
 janela — segurar até o fim dela, tocar assim mesmo ou tocar só em sala escolhida.
 Decisão para quando o item entrar, não agora.
 
+## API admin v1
+
+Implementada em `luna-server/src/admin/AdminApi.ts`. Base `http://<servidor>:<WS_PORT>/admin/v1/`,
+header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
+
+| Rota | O que faz |
+|---|---|
+| `GET status` | Versão, uptime, satélites online, semáforo por conexão (`ha`, `provider`, `weather`, `calendar`: `ok`/`error`/`unknown`/`off`) e os 5 próximos lembretes |
+| `GET bootstrap` | Porta, caminho do banco, nível de log — só leitura, sem segredo |
+| `GET satellites` | Conectados agora + vistos desde o boot + nomeados; `online`, `connected_since`, `last_seen_at` |
+| `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove |
+| `GET rooms` | Salas (de satélite, áreas do HA, mapeadas), área efetiva e o que o `list_devices` veria nelas |
+| `PUT rooms/:room_id` | `{ "area": "escritorio" }` — `null` remove o mapeamento |
+| `GET devices` / `PUT devices` | Overrides; v1 grava só `{ "aliases": {...} }` |
+| `GET reminders` | Lembretes vivos de todas as salas, com a frase falada |
+| `DELETE reminders/:id` | Cancela: banco, toque em curso e scheduler |
+| `GET settings/:grupo` | `ha`, `provider` ou `calendar`, com segredos como `{ set, last4 }` e `applies` (`immediate` / `next_session`) |
+| `PUT settings/:grupo` | Patch parcial; campo ausente = mantém. 422 com `field` quando inválido |
+| `POST settings/ha/test`, `POST settings/calendar/test` | Testa com o corpo completado pelo que está gravado — dá para testar sem gravar |
+| `POST restart` | 202 e shutdown gracioso; o `Restart=always` traz de volta |
+
+Códigos: 404 em tudo sem `LUNA_ADMIN_TOKEN`; 403 fora de loopback/rede privada; 401
+token errado; 422 validação; 413 corpo acima de 64 KB.
+
+O teste de conexão da agenda é **provisório**: só prova que a URL responde e aceita a
+credencial, até a API do app existir (TODO abaixo).
+
 ## TODO: API do app de agendas
 
 A API REST do app ainda não está definida. O que se sabe do uso:
@@ -197,6 +224,40 @@ separados dos eventos da agenda.
 
 Tudo marcado **depois** fica fora destes marcos: exige protocolo e/ou firmware e
 merece plano próprio.
+
+### O que a v1 entregou
+
+- **Servidor:** `settings/` (SQLite, semeadura, `config_env_ignored`, aplicação a quente por
+  grupo) e `admin/` (API da seção acima). Unit com `StateDirectoryMode=0700`.
+- **Desktop:** janela `panel/` isolada (sandbox, partição própria, CSP), cliente admin e
+  whitelist de métodos em `src/main/admin/` e `src/main/panel/`, configuração local em
+  `userData/settings.json` com segredos no `safeStorage`. O item "Configurações" da bandeja
+  abre o painel; sem segredo configurado, o app abre o painel sozinho.
+- **Sidecar:** evento `score` (`--score-interval-ms`) para o medidor de wake word ao vivo.
+- **Visual:** sistema "LUNA 6000" (terminal de fósforo verde), vindo do Claude Design —
+  tokens, componentes e regras em [design-system-painel.md](design-system-painel.md).
+
+Diferenças em relação ao inventário:
+
+- O item "Mutar, forçar escuta, autostart" ganhou tela, mas continua também na bandeja.
+- "Configuração de bootstrap, só leitura" e "Reiniciar o servidor" ficaram numa tela
+  **Servidor** própria.
+- A tela de salas lista as áreas do HA que têm ao menos um dispositivo acionável
+  (`switch`/`light`/`fan`) — área vazia não aparece, porque o registro só conhece o que
+  descobriu.
+- O semáforo do provider reflete a **última sessão aberta**, não uma sonda: até alguém
+  falar com a Luna depois do boot, fica amarelo ("nenhuma sessão aberta").
+
+### Verificação manual pendente
+
+1. No servidor: reinstalar a unit (`sudo cp` + `daemon-reload`, ver `deploy/README.md`) e
+   definir `LUNA_ADMIN_TOKEN` em `/etc/luna-server.env` **antes** do deploy — o
+   `activate.sh` recusa o deploy enquanto a unit divergir.
+2. No desktop: token admin em Este computador; Início com semáforos verdes.
+3. Marco 3: painel aberto e fechado com a voz funcionando o tempo todo.
+4. Marco 4: trocar o token do HA pelo painel e acender uma luz sem restart; trocar a voz e
+   ouvir a nova na conversa seguinte.
+5. Marco 5: mapear `desktop_diogo → <área>` e "acende a luz" a partir do desktop.
 
 ## Pegadinhas conhecidas antes de começar
 
