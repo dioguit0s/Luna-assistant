@@ -176,7 +176,7 @@ function criarRecorrente(
   };
 }
 
-function sanitizeLabel(raw: string | undefined): { ok: true; value: string | null } | { ok: false; error: string } {
+export function sanitizeLabel(raw: string | undefined): { ok: true; value: string | null } | { ok: false; error: string } {
   if (raw === undefined) return { ok: true, value: null };
 
   const trimmed = raw.trim();

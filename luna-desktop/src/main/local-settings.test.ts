@@ -22,6 +22,37 @@ const codec: SecretCodec = {
   },
 };
 
+describe('preferências do painel v2', () => {
+  const codec = { available: () => true, encrypt: (s: string) => s, decrypt: (s: string) => s };
+
+  it('limiar na faixa, null volta ao default', () => {
+    let stored = applyLocalPatch({}, { wakeThreshold: 0.9 }, codec);
+    assert.equal(resolveLocalSettings({}, stored, codec).wakeThreshold, 0.9);
+    assert.throws(() => applyLocalPatch({}, { wakeThreshold: 0.2 }, codec), LocalSettingsError);
+    stored = applyLocalPatch(stored, { wakeThreshold: null }, codec);
+    assert.equal(resolveLocalSettings({}, stored, codec).wakeThreshold, null);
+  });
+
+  it('atalho exige modificador; vazio desliga', () => {
+    let stored = applyLocalPatch({}, { talkShortcut: 'Control+Shift+Space' }, codec);
+    assert.equal(stored.talkShortcut, 'Control+Shift+Space');
+    stored = applyLocalPatch(stored, { talkShortcut: 'F9' }, codec);
+    assert.equal(stored.talkShortcut, 'F9');
+    assert.throws(() => applyLocalPatch({}, { talkShortcut: 'A' }, codec), LocalSettingsError);
+    assert.throws(() => applyLocalPatch({}, { talkShortcut: 'Shift+!' }, codec), LocalSettingsError);
+    assert.throws(() => applyLocalPatch({}, { talkShortcut: 'Control+Alt+AltRight' }, codec), LocalSettingsError);
+    assert.equal(applyLocalPatch({}, { talkShortcut: 'Control+Up' }, codec).talkShortcut, 'Control+Up');
+    stored = applyLocalPatch(stored, { talkShortcut: '' }, codec);
+    assert.equal(resolveLocalSettings({}, stored, codec).talkShortcut, '');
+  });
+
+  it('notificações ligadas por padrão', () => {
+    assert.equal(resolveLocalSettings({}, {}, codec).reminderNotifications, true);
+    const off = applyLocalPatch({}, { reminderNotifications: false }, codec);
+    assert.equal(resolveLocalSettings({}, off, codec).reminderNotifications, false);
+  });
+});
+
 describe('resolveLocalSettings', () => {
   it('sem nada configurado usa os defaults e diz que não há segredo', () => {
     const r = resolveLocalSettings({}, {}, codec);

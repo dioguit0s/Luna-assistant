@@ -40,6 +40,16 @@ function localStub(calls: string[]): LocalControls {
   };
 }
 
+const saved: Array<{ name: string; data: unknown }> = [];
+let toOpen: unknown | null = null;
+const filesStub = {
+  saveJson: async (name: string, data: unknown) => {
+    saved.push({ name, data });
+    return `C:/tmp/${name}`;
+  },
+  openJson: async () => toOpen,
+};
+
 function setup(status = 200, body: unknown = { ok: true }, token = 'tok') {
   const recorded: Recorded[] = [];
   const calls: string[] = [];
@@ -47,7 +57,11 @@ function setup(status = 200, body: unknown = { ok: true }, token = 'tok') {
     () => ({ serverUrl: 'ws://192.168.0.20:8080', adminToken: token }),
     fakeFetch(status, body, recorded),
   );
-  return { methods: createPanelMethods({ admin, local: localStub(calls) }), recorded, calls };
+  const logs = {
+    start: (f: { level: string; room: string | null }) => calls.push(`logs:${f.level}:${f.room}`),
+    stop: () => calls.push('logs:stop'),
+  };
+  return { methods: createPanelMethods({ admin, local: localStub(calls), logs, files: filesStub }), recorded, calls };
 }
 
 describe('métodos do painel', () => {
@@ -109,7 +123,7 @@ describe('métodos do painel', () => {
         throw new Error('ECONNREFUSED');
       }) as unknown as typeof fetch,
     );
-    const methods = createPanelMethods({ admin, local: localStub([]) });
+    const methods = createPanelMethods({ admin, local: localStub([]), logs: { start() {}, stop() {} }, files: filesStub });
     const result = await methods['server.status']!();
     assert.equal(result.ok, false);
     assert.match((result.body as { error: string }).error, /inacessível/);
@@ -118,6 +132,64 @@ describe('métodos do painel', () => {
   it('não há método genérico: só a whitelist existe', () => {
     const { methods } = setup();
     assert.equal(Object.hasOwn(methods, 'require'), false);
-    assert.ok(Object.keys(methods).every((name) => /^(server|local)\./.test(name)));
+    assert.ok(Object.keys(methods).every((name) => /^(server|local|logs)\./.test(name)));
+  });
+
+  it('diagnóstico valida a janela antes de ir à rede', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.latency']!(168);
+    assert.equal(recorded[0]!.url, 'http://192.168.0.20:8080/admin/v1/diagnostics/latency?hours=168');
+    const bad = await methods['server.latency']!('24; drop');
+    assert.equal(bad.ok, false);
+    assert.equal(recorded.length, 1);
+  });
+
+  it('lembretes: criar vai por POST com o corpo, editar exige id inteiro', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.createReminder']!({ room_id: 'quarto', time: '07:00' });
+    assert.equal(recorded[0]!.method, 'POST');
+    assert.equal(recorded[0]!.url, 'http://192.168.0.20:8080/admin/v1/reminders');
+    assert.deepEqual(recorded[0]!.body, { room_id: 'quarto', time: '07:00' });
+    await methods['server.editReminder']!(7, { room_id: 'quarto', time: '08:00' });
+    assert.equal(recorded[1]!.url, 'http://192.168.0.20:8080/admin/v1/reminders/7');
+    assert.equal((await methods['server.editReminder']!('7/../restart', {})).ok, false);
+    assert.equal(recorded.length, 2);
+  });
+
+  it('dispositivos: patch só com as chaves conhecidas; testar exige on/off', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.saveDevices']!({ exclude: ['switch.x'], outra: 1 });
+    assert.deepEqual(recorded[0]!.body, { exclude: ['switch.x'] });
+    assert.equal((await methods['server.saveDevices']!({ exclude: 'switch.x' })).ok, false);
+    await methods['server.testDevice']!('light.abajur', 'on');
+    assert.deepEqual(recorded[1]!.body, { entity_id: 'light.abajur', action: 'on' });
+    assert.equal((await methods['server.testDevice']!('light.abajur', 'toggle')).ok, false);
+    assert.equal(recorded.length, 2);
+  });
+
+  it('backup: o corpo do servidor vai para o arquivo; restaurar cancelado não chama o servidor', async () => {
+    const { methods, recorded } = setup(200, { format: 'luna-backup' });
+    const res = await methods['server.saveBackup']!();
+    assert.equal(res.ok, true);
+    assert.deepEqual(saved.at(-1)!.data, { format: 'luna-backup' });
+    assert.match(saved.at(-1)!.name, /^luna-backup-\d{4}-\d{2}-\d{2}\.json$/);
+
+    toOpen = null;
+    assert.deepEqual((await methods['server.restoreBackup']!('keep')).body, { cancelled: true });
+    assert.equal(recorded.length, 1, 'só o GET do backup');
+
+    toOpen = { format: 'luna-backup' };
+    await methods['server.restoreBackup']!('replace');
+    assert.deepEqual(recorded[1]!.body, { backup: { format: 'luna-backup' }, reminders: 'replace' });
+    assert.equal((await methods['server.restoreBackup']!('tudo')).ok, false);
+  });
+
+  it('log ao vivo: filtro validado no processo principal', async () => {
+    const { methods, calls } = setup();
+    assert.equal((await methods['logs.start']!('warn', 'quarto')).ok, true);
+    assert.equal((await methods['logs.start']!('warn', '../x')).ok, false);
+    assert.equal((await methods['logs.start']!('barulho', null)).ok, false);
+    await methods['logs.stop']!();
+    assert.deepEqual(calls, ['logs:warn:quarto', 'logs:stop']);
   });
 });

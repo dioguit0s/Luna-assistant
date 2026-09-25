@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 não iniciada
+**Status:** v1 e v2 implementadas (marcos 1–11) — falta validação manual no app instalado e no servidor de produção; fora da v2 ficaram a agenda (depende do TODO da API) e o "não perturbe"
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -47,7 +47,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Semáforo por conexão: HA, provedor de IA, clima, agenda | API | v1 |
 | Satélites conectados agora | API | v1 |
 | Próximos lembretes e alarmes | API | v1 |
-| Últimos erros (HA falhou, provedor caiu) | API + Persist | v2 |
+| Últimos erros (HA falhou, provedor caiu) | API + Persist | v2 ✔ |
 
 ### 2. Satélites
 
@@ -55,7 +55,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 |---|---|---|
 | Lista: `device_id`, sala, online/offline, conectado desde, último ping | API | v1 |
 | Nome amigável por satélite | API + Persist | v1 |
-| Desconectar ou bloquear um satélite (aparelho perdido) | API + Persist | v2 |
+| Desconectar ou bloquear um satélite (aparelho perdido) | API + Persist | v2 ✔ |
 | "Tocar som / piscar LED" para identificar | Proto + FW | depois |
 | Versão do firmware, IP, sinal do Wi-Fi | Proto + FW | depois |
 | Trocar a sala sem recompilar (hoje `ROOM_ID` é compilado) | Proto + FW | depois |
@@ -72,9 +72,9 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Mapear sala da Luna ↔ área do HA (resolve o `desktop_diogo`) | API + Persist | v1 |
 | O que a Luna "enxerga" em cada sala (mesma saída do `list_devices`, [ADR 009](adr/009-inventario-por-comodo.md)) | API | v1 |
 | Editar apelidos (`aliases`) | API + Persist | v1 |
-| Editar exclusões (`exclude`) e dispositivos manuais | API + Persist | v2 |
-| "Testar": ligar/desligar um dispositivo pelo painel | API | v2 |
-| Forçar refresh do registro de dispositivos do HA | API | v2 |
+| Editar exclusões (`exclude`) e dispositivos manuais | API + Persist | v2 ✔ |
+| "Testar": ligar/desligar um dispositivo pelo painel | API | v2 ✔ |
+| Forçar refresh do registro de dispositivos do HA | API | v2 ✔ |
 
 ### 4. Integrações
 
@@ -83,8 +83,8 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | **Home Assistant**: URL, token, "testar conexão" | API + Persist | v1 |
 | **Agenda**: URL, credencial, "testar conexão", status | API + Persist | v1 (tela) — as tools dependem do [TODO da agenda](#todo-api-do-app-de-agendas) |
 | **Provedor de IA**: Gemini ou OpenAI, modelo, voz, chaves | API + Persist | v1 |
-| **Provedor de IA (avançado)**: VAD, silêncio, thinking | API + Persist | v2 |
-| **Clima**: cidade (vira lat/long), "testar" | API + Persist | v2 |
+| **Provedor de IA (avançado)**: VAD, silêncio, thinking | API + Persist | v2 ✔ |
+| **Clima**: cidade (vira lat/long), "testar" | API + Persist | v2 ✔ |
 
 ### 5. Lembretes e alarmes
 
@@ -92,8 +92,8 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 |---|---|---|
 | Listar ativos: rótulo, sala, horário, recorrência | API | v1 |
 | Cancelar | API | v1 |
-| Criar e editar pelo painel | API | v2 |
-| Histórico: tocou, perdido, adiado | API (parte já está no banco) | v2 |
+| Criar e editar pelo painel | API | v2 ✔ |
+| Histórico: tocou, perdido, adiado | API (parte já está no banco) | v2 ✔ |
 
 ### 6. Agenda
 
@@ -109,8 +109,8 @@ atrito.
 
 | Função | Precisa de | Quando |
 |---|---|---|
-| TTFAB por satélite e por provedor, com gráfico e a meta de 800 ms | API + Persist | v2 |
-| Logs do servidor ao vivo, filtro por sala e nível (SSE) | API | v2 |
+| TTFAB por satélite e por provedor, com gráfico e a meta de 800 ms | API + Persist | v2 ✔ |
+| Logs do servidor ao vivo, filtro por sala e nível (SSE) | API | v2 ✔ |
 | Mudar o `LOG_LEVEL` sem reiniciar | API | depois |
 
 ### 8. Este computador (o satélite desktop)
@@ -121,9 +121,9 @@ atrito.
 | Escolher microfone e alto-falante | Tela | v1 |
 | Teste de mic: nível e score da wake word ao vivo | Tela | v1 |
 | Mutar, forçar escuta, autostart (hoje só na bandeja) | Tela | v1 |
-| Sensibilidade da wake word | Tela + sidecar | v2 |
-| Atalho global de push-to-talk | Tela | v2 |
-| Notificação do Windows quando um lembrete tocar | Tela | v2 |
+| Sensibilidade da wake word | Tela + sidecar | v2 ✔ |
+| Atalho global de push-to-talk | Tela | v2 ✔ ("falar agora": o `globalShortcut` só vê o aperto) |
+| Notificação do Windows quando um lembrete tocar | Tela | v2 ✔ |
 | Digitar para a Luna em vez de falar | Proto | depois |
 
 ### 9. Servidor
@@ -132,8 +132,8 @@ atrito.
 |---|---|---|
 | Configuração de bootstrap (porta, caminho do banco), só leitura | API | v1 |
 | Reiniciar o servidor (saída de emergência) | API | v1 |
-| Backup e restauração do banco, **sem segredos** | API | v2 |
-| Versão implantada e data do último deploy | API | v2 |
+| Backup e restauração do banco, **sem segredos** | API | v2 ✔ |
+| Versão implantada e data do último deploy | API | v2 ✔ |
 
 ### 10. Comportamento da Luna
 
@@ -153,19 +153,49 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 
 | Rota | O que faz |
 |---|---|
-| `GET status` | Versão, uptime, satélites online, semáforo por conexão (`ha`, `provider`, `weather`, `calendar`: `ok`/`error`/`unknown`/`off`) e os 5 próximos lembretes |
+| `GET status` | Versão, `release` (`{ sha, deployed_at }` do `release.json` que o CI grava, ou `null`), uptime, satélites online, semáforo por conexão (`ha`, `provider`, `weather`, `calendar`: `ok`/`error`/`unknown`/`off`) e os 5 próximos lembretes |
 | `GET bootstrap` | Porta, caminho do banco, nível de log — só leitura, sem segredo |
 | `GET satellites` | Conectados agora + vistos desde o boot + nomeados; `online`, `connected_since`, `last_seen_at` |
-| `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove |
+| `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove; `{ "blocked": true }` recusa o satélite no handshake e derruba a conexão aberta (v2) |
+| `POST satellites/:device_id/disconnect` | Fecha as conexões do satélite; ele reconecta sozinho — v2 |
+| `GET backup` | Configuração de runtime (sem nenhum campo de segredo) e lembretes vivos, `format: "luna-backup"`, `version: 1` — v2 |
+| `POST restore` | `{ backup, reminders: "keep" \| "replace" }`, até 1 MB. Valida todos os grupos antes de gravar; cada um entra como patch (segredo ausente mantém o gravado). `replace` cancela os lembretes vivos e recria os do arquivo, pulando único que já passou — v2 |
 | `GET rooms` | Salas (de satélite, áreas do HA, mapeadas), área efetiva e o que o `list_devices` veria nelas |
 | `PUT rooms/:room_id` | `{ "area": "escritorio" }` — `null` remove o mapeamento |
-| `GET devices` / `PUT devices` | Overrides; v1 grava só `{ "aliases": {...} }` |
+| `GET devices` / `PUT devices` | Overrides. `PUT` é patch de `aliases`, `exclude` e `devices` (entradas manuais no formato do `devices.json`); campo ausente mantém. `GET` traz também `ha_entities` (o que o HA descobriu, com `excluded`) e o estado do último refresh — v2 |
+| `POST devices/test` | `{ entity_id, action: "on" \| "off" }` pelo HA, sem a IA. Só entidade que o registro conhece e só `switch`/`light`/`fan` — v2 |
+| `POST devices/refresh` | Redescobre no HA agora, sem esperar o TTL — v2 |
 | `GET reminders` | Lembretes vivos de todas as salas, com a frase falada |
 | `DELETE reminders/:id` | Cancela: banco, toque em curso e scheduler |
-| `GET settings/:grupo` | `ha`, `provider` ou `calendar`, com segredos como `{ set, last4 }` e `applies` (`immediate` / `next_session`) |
+| `POST reminders` | Cria: `{ room_id, label, repeat, date, time }` — hora de parede de São Paulo (ADR 006), `repeat` `none`/`daily`/`weekdays`/`weekend`/`mon`…`sun`, `date` só no `none`. Mesmas regras de rótulo da voz (sem "Luna", até 200). 201 — v2 |
+| `PUT reminders/:id` | Edita um `armed` com o mesmo corpo; `ringing` é 409. Rótulo ou sala novos apagam a fala gravada e pedem outra — v2 |
+| `GET reminders/history?limit=50` | Criado, editado, tocou, dispensado, adiado, sem resposta, perdido, cancelado — com `via` (`admin`/`voice`) quando se sabe — v2 |
+| `GET settings/:grupo` | `ha`, `provider`, `calendar`, `voice` ou `weather` (os dois últimos na v2), com segredos como `{ set, last4 }` e `applies` (`immediate` / `next_session`) |
 | `PUT settings/:grupo` | Patch parcial; campo ausente = mantém. 422 com `field` quando inválido |
 | `POST settings/ha/test`, `POST settings/calendar/test` | Testa com o corpo completado pelo que está gravado — dá para testar sem gravar |
+| `POST settings/weather/test` | Busca a previsão para `{ latitude, longitude }` (ou as gravadas) sem gravar; devolve a temperatura atual — v2 |
+| `POST settings/weather/geocode` | `{ city }` → até 5 candidatos `{ label, latitude, longitude }` pelo geocoding do Open-Meteo — v2 |
 | `POST restart` | 202 e shutdown gracioso; o `Restart=always` traz de volta |
+| `GET diagnostics/latency?hours=24` | Série de TTFAB (até 2000 amostras, 1 h–30 d), meta de 800 ms e resumo por sala × provedor: `p50_ms`, `p90_ms`, `max_ms`, `over_target`, `cold` (sessões frias, fora dos percentis) — v2 |
+| `GET diagnostics/errors?limit=20` | Últimos erros: todo `error`/`fatal` e os `warn` de dependência externa (HA, clima, provider, lembrete perdido) — v2 |
+| `GET logs/stream?level=info&room=` | Log ao vivo em SSE: primeiro o buffer em memória (500 linhas) filtrado, depois cada linha nova; heartbeat a cada 15 s; até 4 streams (429) — v2 |
+
+Grupos novos da v2: `voice` (`geminiVadSilenceMs`, `geminiVadEndSensitivity`,
+`geminiThinkingBudget`, `openaiVadType`, `openaiVadSilenceMs`, `userSilenceCutoffMs`), semeado
+das variáveis de mesmo nome do `.env` e aplicado na próxima sessão — menos o
+`userSilenceCutoffMs`, que o `Orchestrator` lê a cada turno; e `weather` (`city`, `latitude`,
+`longitude`), semeado de `WEATHER_LATITUDE`/`WEATHER_LONGITUDE`/`WEATHER_CITY`. Trocar o clima
+troca a previsão na hora; a tool `get_weather` entra ou sai na próxima sessão.
+
+A fala de um lembrete criado pelo painel é pré-renderizada pelo mesmo gate de sala quieta
+da voz, mas só quando a sala já tem sessão de provider aberta; sem ela o lembrete toca só o
+bipe (`has_audio: false` na listagem) até ser editado com a sala ativa. O histórico vem das
+linhas de log dos eventos de lembrete (`reminder_events`), então para de crescer com
+`LOG_LEVEL` acima de `info`.
+
+O diagnóstico não sabe de conversa: `logTap` descarta toda chave de log que possa carregar
+fala (`raw`, `text`, `transcript`…) e guarda só escalares. Retenção no SQLite: 30 dias ou 10
+mil linhas por tabela (`latency_samples`, `error_log`, `reminder_events`, migração 4).
 
 Códigos: 404 em tudo sem `LUNA_ADMIN_TOKEN`; 403 fora de loopback/rede privada; 401
 token errado; 422 validação; 413 corpo acima de 64 KB.
@@ -247,6 +277,26 @@ Diferenças em relação ao inventário:
   descobriu.
 - O semáforo do provider reflete a **última sessão aberta**, não uma sonda: até alguém
   falar com a Luna depois do boot, fica amarelo ("nenhuma sessão aberta").
+
+### O que a v2 entregou
+
+Marcos 6 a 11, cada um com commit próprio e passado pelo `luna-code-reviewer`:
+
+- **M6 Diagnóstico:** `logging/logTap.ts` + `diagnostics/` (TTFAB, últimos erros, log ao vivo por
+  SSE, sem transcrição); tela Diagnóstico e quadro de erros no Início.
+- **M7 Lembretes:** criar/editar pelo painel (hora de parede de São Paulo, mesmas regras da voz),
+  histórico, fala pré-renderizada por fila própria do painel.
+- **M8 Dispositivos:** exclusões, manuais (só `switch`/`light`/`fan` novos), testar e refresh.
+- **M9 Integrações:** grupos `voice` e `weather`, clima trocável a quente com geocoding.
+- **M10 Satélites e servidor:** bloquear/desconectar, backup sem segredos e restauração,
+  release implantada (`release.json` do CI).
+- **M11 Este computador:** sensibilidade da wake word (reinicia o sidecar com `--threshold`, o
+  `frontend.py` não muda), atalho global "falar agora", notificação do Windows quando um lembrete
+  toca na sala do desktop (o processo principal consulta `GET reminders` a cada 10 s — o
+  protocolo WS não ganhou evento).
+
+A migração 4 do banco (tabelas do diagnóstico) torna o deploy de mão única — ver
+`luna-server/deploy/README.md`.
 
 ### Verificação manual pendente
 

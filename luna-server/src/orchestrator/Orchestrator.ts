@@ -54,6 +54,14 @@ const PRERENDER_QUIET_MS = 1_500;
 const PRERENDER_GATE_RETRY_MS = 500;
 /** ~7,5s de espera no total. Passou disso, a sala não vai silenciar tão cedo. */
 const PRERENDER_GATE_MAX_ATTEMPTS = 15;
+/**
+ * Pedido do painel espera bem mais que o da voz: não há confirmação falada
+ * para esperar acabar, mas a sala pode estar em uso por outra conversa — e
+ * esperar é sempre melhor que gravar a fala errada. 2 min em passos de 500 ms.
+ */
+const PANEL_PRERENDER_MAX_ATTEMPTS = 240;
+/** Turno aberto sem `turnComplete` há mais que isto é considerado órfão. */
+const STALE_OPEN_TURN_MS = 30_000;
 
 /**
  * A instrução vira um turno de usuário no Gemini, então o modelo parafraseia em
@@ -175,6 +183,16 @@ export class Orchestrator implements AlarmAudioSink {
   // speaking_start antes do primeiro áudio de resposta, para o LED apagar
   // assim que o comando é capturado, não só quando a resposta começa a sair.
   private readonly silenceTimerByRoom = new Map<string, NodeJS.Timeout>();
+  /**
+   * Salas com turno aberto: o usuário falou e o `turnComplete` ainda não veio.
+   * É o intervalo entre o fim da fala e o primeiro áudio da resposta, que o
+   * gate de sala quieta sozinho não enxerga — só o painel precisa disto (ver
+   * `isRoomFreeForPanelPrerender`).
+   */
+  private readonly turnOpenByRoom = new Set<string>();
+  /** Pedidos de fala do painel, por lembrete: o último rótulo salvo vence. */
+  private readonly panelPrerenderByReminder = new Map<number, { roomId: string; label: string; attempts: number }>();
+  private panelPrerenderTimer: NodeJS.Timeout | null = null;
   // Watchdog do SPEAKING_WATCHDOG_MS acima: rearmado a cada audio_response
   // (resposta longa não dispara), forçado quando o áudio para de chegar.
   private readonly speakingWatchdogByRoom = new Map<string, NodeJS.Timeout>();
@@ -444,6 +462,7 @@ export class Orchestrator implements AlarmAudioSink {
 
     provider.onUserSpeech(() => {
       tracker.markUserSpeech();
+      this.turnOpenByRoom.add(roomId);
       this.lastUserSpeechAtByRoom.set(roomId, Date.now());
 
       // Reagenda a cada fragmento: só assume "parou de falar" depois de
@@ -456,7 +475,7 @@ export class Orchestrator implements AlarmAudioSink {
         setTimeout(() => {
           this.silenceTimerByRoom.delete(roomId);
           this.startSpeaking(roomId);
-        }, this.config.userSilenceCutoffMs),
+        }, this.runtimeConfig().userSilenceCutoffMs),
       );
     });
 
@@ -525,6 +544,7 @@ export class Orchestrator implements AlarmAudioSink {
       // Fim da pré-renderização: resolve o PCM e sai sem tocar em nada do
       // turno normal — nem ring buffer, nem `speaking_end`, nem dispensa de
       // alarme.
+      this.turnOpenByRoom.delete(roomId);
       const capture = this.captureByRoom.get(roomId);
       if (capture) {
         this.captureByRoom.delete(roomId);
@@ -858,9 +878,95 @@ export class Orchestrator implements AlarmAudioSink {
     return delivered;
   }
 
+  /**
+   * Config de runtime do painel (ADR 010), para o que é lido a cada turno e não
+   * só na criação da sessão — hoje, `userSilenceCutoffMs`. Sem fonte injetada
+   * (testes), vale a config do construtor.
+   */
+  private runtimeConfig: () => AppConfig = () => this.config;
+
+  setRuntimeConfigSource(source: () => AppConfig): void {
+    this.runtimeConfig = source;
+  }
+
   /** O ciclo de toque por sala. Vive aqui porque o sink de áudio é este objeto. */
   getAlarmRinger(): AlarmRinger {
     return this.alarmRinger;
+  }
+
+  /**
+   * Pré-renderização pedida pelo painel (lembrete criado ou editado lá).
+   *
+   * Fila própria, por lembrete, e não o `pendingPrerenderByRoom` da voz: lá é
+   * um pedido por sala, e dividir a vaga fazia um lado apagar o do outro em
+   * silêncio. Aqui o último rótulo salvo de cada lembrete vence, e a voz tem
+   * precedência na sala (`isRoomFreeForPanelPrerender`).
+   *
+   * O gate é mais rígido que o da voz: a voz renderiza logo depois da própria
+   * confirmação, o painel pode cair no meio de outra conversa. Sem sessão de
+   * provider aberta, espera até `PANEL_PRERENDER_MAX_ATTEMPTS` e desiste — o
+   * toque fica só-bipe, com log.
+   */
+  requestReminderPrerender(roomId: string, reminderId: number, label: string): void {
+    this.panelPrerenderByReminder.set(reminderId, { roomId, label, attempts: 0 });
+    this.schedulePanelPrerender();
+  }
+
+  /** O painel apagou ou trocou o rótulo para `null`: nada a renderizar. */
+  cancelReminderPrerender(reminderId: number): void {
+    this.panelPrerenderByReminder.delete(reminderId);
+  }
+
+  private schedulePanelPrerender(): void {
+    if (this.panelPrerenderTimer || this.panelPrerenderByReminder.size === 0) return;
+    this.panelPrerenderTimer = setTimeout(() => {
+      this.panelPrerenderTimer = null;
+      this.drainPanelPrerender();
+    }, PRERENDER_GATE_RETRY_MS);
+    this.panelPrerenderTimer.unref();
+  }
+
+  private drainPanelPrerender(): void {
+    const started = new Set<string>();
+    for (const [reminderId, pedido] of this.panelPrerenderByReminder) {
+      // Uma captura por sala de cada vez.
+      if (started.has(pedido.roomId)) continue;
+      if (this.isRoomFreeForPanelPrerender(pedido.roomId)) {
+        this.panelPrerenderByReminder.delete(reminderId);
+        started.add(pedido.roomId);
+        void this.prerenderReminderSpeech(pedido.roomId, reminderId, pedido.label);
+        continue;
+      }
+      pedido.attempts += 1;
+      if (pedido.attempts >= PANEL_PRERENDER_MAX_ATTEMPTS) {
+        this.panelPrerenderByReminder.delete(reminderId);
+        getLogger().warn(
+          { event: 'reminder_prerender_gate_timeout', room_id: pedido.roomId, reminder_id: reminderId, via: 'admin' },
+          'Sala nunca ficou livre (ou sem sessão aberta) para gravar a fala: o lembrete vai tocar só o bipe',
+        );
+      }
+    }
+    this.schedulePanelPrerender();
+  }
+
+  /**
+   * Livre de verdade: sessão aberta, nenhum pedido da voz na fila, sala quieta
+   * (o gate da voz), e além disso nenhum turno em curso, ninguém falando e
+   * nenhum alarme tocando — a captura aberta num desses momentos engoliria a
+   * resposta de outra conversa, ou a dispensa do alarme.
+   */
+  private isRoomFreeForPanelPrerender(roomId: string): boolean {
+    if (!this.roomManager.getExistingProvider(roomId)) return false;
+    if (this.pendingPrerenderByRoom.has(roomId) || this.prerenderGateTimerByRoom.has(roomId)) return false;
+    if (!this.isRoomQuietForPrerender(roomId)) return false;
+    if (this.silenceTimerByRoom.has(roomId) || this.isUserLikelySpeaking(roomId)) return false;
+    if (this.turnOpenByRoom.has(roomId)) {
+      const since = this.msSinceUserSpeech(roomId);
+      if (since === null || since < STALE_OPEN_TURN_MS) return false;
+      this.turnOpenByRoom.delete(roomId);
+    }
+    if (this.alarmRinger.isRinging(roomId)) return false;
+    return true;
   }
 
   /**
@@ -1057,7 +1163,15 @@ export class Orchestrator implements AlarmAudioSink {
     }
 
     const inicio = Date.now();
-    this.reminderStore.putAudio(reminderId, pcm);
+    // O rótulo pode ter mudado (ou o lembrete acabado) durante a captura: a
+    // fala do rótulo antigo não pode ficar gravada como se valesse.
+    if (!this.reminderStore.putAudioIfCurrent(reminderId, label, pcm)) {
+      getLogger().info(
+        { event: 'reminder_prerender_stale', room_id: roomId, reminder_id: reminderId },
+        'Fala renderizada descartada: o lembrete mudou durante a captura',
+      );
+      return false;
+    }
     getLogger().info(
       {
         event: 'reminder_prerendered',
@@ -1116,6 +1230,7 @@ export class Orchestrator implements AlarmAudioSink {
       capture.settle(null);
     }
     this.pendingPrerenderByRoom.delete(roomId);
+    this.turnOpenByRoom.delete(roomId);
     this.lastResponseAudioAtByRoom.delete(roomId);
     const gateTimer = this.prerenderGateTimerByRoom.get(roomId);
     if (gateTimer) {

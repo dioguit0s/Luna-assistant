@@ -64,6 +64,24 @@ export const SERVER_VERSION: string = (() => {
   }
 })();
 
+/**
+ * Release implantada, gravada pelo CI em `release.json` ao lado do `dist/`
+ * (ver `deploy.yml`). `null` em dev ou numa release anterior a isto.
+ */
+export const SERVER_RELEASE: { sha: string; deployedAt: string } | null = (() => {
+  try {
+    const raw = JSON.parse(readFileSync(new URL('../../release.json', import.meta.url), 'utf8')) as {
+      sha?: unknown;
+      deployed_at?: unknown;
+    };
+    return typeof raw.sha === 'string' && typeof raw.deployed_at === 'string'
+      ? { sha: raw.sha, deployedAt: raw.deployed_at }
+      : null;
+  } catch {
+    return null;
+  }
+})();
+
 // O satélite manda um "ping" de aplicação a cada 10s (PING_INTERVAL_MS no
 // firmware) enquanto autenticado. Uma queda abrupta — energia ou cabo USB
 // arrancado — não manda close frame nenhum; sem isso, `ws` nunca dispara
@@ -73,6 +91,9 @@ export const SERVER_VERSION: string = (() => {
 // `sendToClient` da conexão morta — o satélite novo, reconectado, nunca ouve
 // nada. 2.5x o intervalo de ping tolera um ciclo perdido sem falso positivo.
 const STALE_CONNECTION_TIMEOUT_MS = 25_000;
+
+/** Um `ws_auth_blocked` por aparelho a cada tanto — ver `blockedLoggedAt`. */
+const BLOCKED_LOG_INTERVAL_MS = 10 * 60_000;
 const STALE_CHECK_INTERVAL_MS = 5_000;
 
 // Teto para o handshake de auth: sem isto, um socket que conecta e nunca
@@ -138,6 +159,42 @@ export class WsServer {
     this.adminHandler = handler;
   }
 
+  /** `device_id`s bloqueados pelo painel — lido a cada handshake. */
+  private isBlocked: (deviceId: string) => boolean = () => false;
+  /**
+   * Último `ws_auth_blocked` logado por aparelho. O firmware reconecta a cada
+   * 2 s sem backoff depois de `auth_error`: sem limite, um satélite bloqueado
+   * vira 43 mil warns por dia no journal e no log ao vivo do painel.
+   */
+  private readonly blockedLoggedAt = new Map<string, number>();
+
+  setBlockedSource(source: (deviceId: string) => boolean): void {
+    this.isBlocked = source;
+  }
+
+  /**
+   * Fecha toda conexão deste `device_id` (painel: "desconectar", ou o
+   * bloqueio recém-gravado valendo na hora). O satélite reconecta sozinho —
+   * e, se bloqueado, é recusado no handshake.
+   *
+   * @returns quantas conexões foram fechadas.
+   */
+  disconnectDevice(deviceId: string, reason: string): number {
+    let closed = 0;
+    for (const [ws, state] of this.clients) {
+      if (state.deviceId !== deviceId) continue;
+      ws.close(1000, reason.slice(0, 120));
+      closed += 1;
+    }
+    if (closed > 0) {
+      getLogger().info(
+        { event: 'ws_admin_disconnect', device_id: deviceId, connections: closed },
+        `Satélite ${deviceId} desconectado pelo painel`,
+      );
+    }
+    return closed;
+  }
+
   /** O `/health` mostra o provider efetivo, que o painel pode trocar a quente. */
   setProviderNameSource(source: () => string): void {
     this.providerName = source;
@@ -194,6 +251,20 @@ export class WsServer {
    */
   getAlarmRinger(): AlarmRinger {
     return this.orchestrator.getAlarmRinger();
+  }
+
+  /** Config de runtime lida a cada turno — ver `Orchestrator.setRuntimeConfigSource`. */
+  setRuntimeConfigSource(source: () => AppConfig): void {
+    this.orchestrator.setRuntimeConfigSource(source);
+  }
+
+  /** Fala de um lembrete salvo pelo painel — ver `Orchestrator.requestReminderPrerender`. */
+  requestReminderPrerender(roomId: string, reminderId: number, label: string): void {
+    this.orchestrator.requestReminderPrerender(roomId, reminderId, label);
+  }
+
+  cancelReminderPrerender(reminderId: number): void {
+    this.orchestrator.cancelReminderPrerender(reminderId);
   }
 
   /**
@@ -394,7 +465,11 @@ export class WsServer {
     const httpServer = this.httpServer;
     this.httpServer = null;
     if (httpServer) {
-      await new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      const closed = new Promise<void>((resolve) => httpServer.close(() => resolve()));
+      // Stream de log do painel (SSE) é conexão ativa: sem isto, `close()`
+      // esperaria o painel desistir sozinho.
+      httpServer.closeAllConnections();
+      await closed;
     }
   }
 
@@ -487,6 +562,28 @@ export class WsServer {
       ws.send(
         serializeControlMessage(
           createEnvelope('auth_error', room_id, { reason: 'token inválido' }),
+        ),
+      );
+      ws.close(4001, 'Auth inválida');
+      return;
+    }
+
+    // Depois do token: bloquear não pode virar oráculo de quais `device_id`s
+    // existem para quem nem tem o segredo. Mesma mensagem e código de close de
+    // qualquer auth recusada — o contrato WS (quatro cópias) não muda.
+    if (this.isBlocked(device_id)) {
+      const now = Date.now();
+      const last = this.blockedLoggedAt.get(device_id) ?? 0;
+      if (now - last >= BLOCKED_LOG_INTERVAL_MS) {
+        this.blockedLoggedAt.set(device_id, now);
+        getLogger().warn(
+          { event: 'ws_auth_blocked', room_id, device_id },
+          `Satélite bloqueado tentou conectar: ${device_id} (próximo aviso em ${BLOCKED_LOG_INTERVAL_MS / 60_000} min)`,
+        );
+      }
+      ws.send(
+        serializeControlMessage(
+          createEnvelope('auth_error', room_id, { reason: 'satélite bloqueado' }),
         ),
       );
       ws.close(4001, 'Auth inválida');

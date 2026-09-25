@@ -990,3 +990,16 @@ body {
 .boot .boot-ready.red {
   color: var(--red);
 }
+
+/* Diagnóstico: caixa do log ao vivo */
+.log-box {
+  height: 260px;
+  overflow-y: auto;
+  border-top: 1px dashed var(--dim);
+  padding-top: 4px;
+  font-size: 12px;
+}
+.log-line {
+  padding: 1px 0;
+  gap: 8px;
+}

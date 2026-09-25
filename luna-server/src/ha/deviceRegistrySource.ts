@@ -208,6 +208,20 @@ export class DeviceRegistrySource {
     this.registry = this.build(this.discovered);
   }
 
+  /**
+   * O que o HA devolveu na última descoberta bem-sucedida, **antes** de
+   * exclusões e entradas manuais — o painel precisa ver o excluído para poder
+   * incluí-lo de volta.
+   */
+  discoveredEntities(): readonly DiscoveredEntity[] {
+    return this.discovered;
+  }
+
+  /** Overrides em vigor (os do banco, depois do `setOverrides`). */
+  currentOverrides(): DeviceOverrides {
+    return this.overrides;
+  }
+
   /** Resultado do último refresh contra o HA, para o semáforo do painel. */
   refreshStatus(): RegistryRefreshStatus {
     return { ...this.lastRefresh };

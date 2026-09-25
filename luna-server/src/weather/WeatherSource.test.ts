@@ -76,6 +76,32 @@ describe('WeatherSource', () => {
     source.stop();
   });
 
+  it('setClient descarta a busca em voo da casa antiga e zera o snapshot na hora', async () => {
+    let releaseOld!: (s: WeatherSnapshot) => void;
+    const old = fakeClient(() => new Promise((r) => (releaseOld = r)));
+    const source = new WeatherSource(old);
+    const oldFlight = source.refresh();
+
+    let calls = 0;
+    const fresh = snapshotAt(Date.now());
+    source.setClient(fakeClient(async () => {
+      calls += 1;
+      return fresh;
+    }));
+    assert.equal(source.current(), null, 'sem previsão de outra cidade');
+    // Com a busca nova em voo, um cache miss reaproveita ela em vez de abrir outra.
+    const concurrent = source.refresh();
+    releaseOld(snapshotAt(Date.now()));
+    await oldFlight;
+    await concurrent;
+    assert.equal(source.current(), fresh, 'o resultado da busca velha não ganhou');
+    assert.equal(calls, 1, 'a busca nova não foi duplicada');
+
+    source.setClient(null);
+    assert.equal(source.current(), null);
+    assert.equal(source.configured, false);
+  });
+
   it('stop() limpa o intervalo de refresh', async () => {
     const source = new WeatherSource(fakeClient(async () => snapshotAt(Date.now())), 50);
     await source.start();

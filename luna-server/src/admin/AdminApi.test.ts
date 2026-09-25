@@ -11,7 +11,13 @@ import { SettingsStore } from '../settings/SettingsStore.js';
 import { RuntimeSettings } from '../settings/RuntimeSettings.js';
 import { WsServer } from '../ws/WsServer.js';
 import { AdminApi } from './AdminApi.js';
+import { Diagnostics } from '../diagnostics/Diagnostics.js';
+import { DiagnosticsStore } from '../diagnostics/DiagnosticsStore.js';
+import type { LogRecord } from '../logging/logTap.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
+import WebSocket from 'ws';
+import { computeAuthToken } from '../ws/auth.js';
+import { createEnvelope, serializeControlMessage } from '../ws/protocol.js';
 
 const TOKEN = 'token-admin-de-teste';
 
@@ -63,7 +69,10 @@ interface Harness {
   settings: RuntimeSettings;
   reminderStore: ReminderStore;
   registry: DeviceRegistrySource;
+  diagnostics: Diagnostics;
   cancelled: number[];
+  saved: Array<{ id: number; labelChanged: boolean }>;
+  fetchCalls: string[];
   restarts: number;
   stop(): Promise<void>;
 }
@@ -92,12 +101,18 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
   settings.onChange('devices', (overrides) => registry.setOverrides(overrides));
 
   const server = new WsServer(cfg, roomManager, haClient, registry, reminderStore, null);
+  // Sem `start()`: o LOG_LEVEL dos testes é `silent`, então o tap não vê
+  // nada — os casos alimentam o diagnóstico com `ingest` direto.
+  const diagnostics = new Diagnostics(new DiagnosticsStore(reminderStore.sharedDatabase()));
   const harness: Harness = {
     baseUrl: '',
     settings,
     reminderStore,
     registry,
+    diagnostics,
     cancelled: [],
+    saved: [],
+    fetchCalls: [],
     restarts: 0,
     async stop() {
       await server.stop();
@@ -119,12 +134,29 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
         reminderStore.markStatus(r.id, 'cancelled');
         harness.cancelled.push(r.id);
       },
+      onReminderSaved: (r, labelChanged) => {
+        harness.saved.push({ id: r.id, labelChanged });
+      },
       weatherSource: null,
+      diagnostics,
+      // Só o que o clima do painel chama: geocoding e previsão do Open-Meteo.
+      fetchImpl: (async (url: string) => {
+        harness.fetchCalls.push(String(url));
+        if (String(url).includes('geocoding-api')) {
+          return new Response(JSON.stringify({ results: [{ name: 'Santos', admin1: 'São Paulo', country: 'Brasil', latitude: -23.96, longitude: -46.33 }] }));
+        }
+        return new Response(JSON.stringify({
+          current: { temperature_2m: 24, apparent_temperature: 25, relative_humidity_2m: 60, wind_speed_10m: 5, weather_code: 1 },
+          daily: { time: ['2026-09-25'], weather_code: [1], temperature_2m_max: [28], temperature_2m_min: [18], precipitation_probability_max: [10] },
+        }));
+      }) as unknown as typeof fetch,
+      disconnectSatellite: (deviceId) => server.disconnectDevice(deviceId, 'desconectado pelo painel'),
       onRestart: () => {
         harness.restarts += 1;
       },
     }).handle,
   );
+  server.setBlockedSource((deviceId) => settings.get('satellites').blocked.includes(deviceId));
   server.start();
   while (server.port === null) await new Promise((r) => setTimeout(r, 10));
   harness.baseUrl = `http://127.0.0.1:${server.port}`;
@@ -227,6 +259,35 @@ describe('API admin', () => {
     assert.match(res.body.error, /obrigatórios/);
   });
 
+  it('voz avançada vale na próxima sessão; clima na hora', async () => {
+    const voice = await call(h, 'GET', '/admin/v1/settings/voice');
+    assert.equal(voice.status, 200);
+    assert.equal(voice.body.applies, 'next_session');
+    const saved = await call(h, 'PUT', '/admin/v1/settings/voice', { geminiVadSilenceMs: 400 });
+    assert.equal(saved.body.value.geminiVadSilenceMs, 400);
+    assert.equal(h.settings.current().geminiVadSilenceMs, 400);
+
+    const weather = await call(h, 'PUT', '/admin/v1/settings/weather', { city: 'Santos', latitude: -23.96, longitude: -46.33 });
+    assert.equal(weather.status, 200);
+    assert.equal(weather.body.applies, 'immediate');
+    assert.equal(h.settings.current().weatherLongitude, -46.33);
+  });
+
+  it('geocode e teste do clima usam o fetch injetado, sem gravar', async () => {
+    h.fetchCalls.length = 0;
+    const geo = await call(h, 'POST', '/admin/v1/settings/weather/geocode', { city: 'Santos' });
+    assert.equal(geo.status, 200);
+    assert.equal(geo.body.results[0].label, 'Santos, São Paulo, Brasil');
+    assert.match(h.fetchCalls[0]!, /geocoding-api\.open-meteo\.com.*name=Santos/);
+
+    const test = await call(h, 'POST', '/admin/v1/settings/weather/test', { latitude: -10, longitude: -50 });
+    assert.equal(test.body.ok, true);
+    assert.equal(test.body.now.temperature_c, 24);
+    assert.match(h.fetchCalls[1]!, /latitude=-10/);
+    assert.equal(h.settings.get('weather').latitude, -23.96, 'testar não grava');
+    assert.equal((await call(h, 'POST', '/admin/v1/settings/weather/geocode', { city: 'x' })).status, 422);
+  });
+
   it('caminho com escape malformado é 400, não 500', async () => {
     assert.equal((await call(h, 'PUT', '/admin/v1/satellites/%E0', { name: 'x' })).status, 400);
   });
@@ -260,6 +321,52 @@ describe('API admin', () => {
     assert.equal(h.registry.current().resolve('bancada', 'escritorio').ok, true);
   });
 
+  it('exclusões e dispositivos manuais pelo painel valem na hora', async () => {
+    let res = await call(h, 'PUT', '/admin/v1/devices', { exclude: ['switch.luz_bancada'] });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.exclude, ['switch.luz_bancada']);
+    assert.equal(h.registry.current().resolve('luz_bancada', 'escritorio').ok, false, 'excluída');
+    assert.deepEqual(res.body.aliases, { bancada: 'luz_bancada' }, 'campo ausente mantém');
+
+    res = await call(h, 'PUT', '/admin/v1/devices', {
+      exclude: [],
+      devices: [{ device: 'abajur', room_id: 'quarto', entity_id: 'light.abajur' }],
+    });
+    assert.equal(res.status, 200);
+    assert.equal(h.registry.current().resolve('abajur', 'quarto').ok, true);
+
+    res = await call(h, 'PUT', '/admin/v1/devices', { devices: [{ device: 'x', room_id: 'quarto', entity_id: 'sem-ponto' }] });
+    assert.equal(res.status, 422);
+    assert.equal((await call(h, 'PUT', '/admin/v1/devices', {})).status, 422);
+  });
+
+  it('manual novo fora de switch/light/fan é recusado; o que já estava fica', async () => {
+    const res = await call(h, 'PUT', '/admin/v1/devices', {
+      devices: [
+        { device: 'abajur', room_id: 'quarto', entity_id: 'light.abajur' },
+        { device: 'portao', room_id: 'garagem', entity_id: 'script.abrir_portao' },
+      ],
+    });
+    assert.equal(res.status, 422);
+    assert.equal(res.body.field, 'devices');
+    assert.equal(h.registry.current().resolve('portao', 'garagem').ok, false);
+  });
+
+  it('testar: só entidade conhecida e domínio acionável', async () => {
+    assert.equal((await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'lock.porta', action: 'off' })).status, 404);
+    assert.equal((await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'light.abajur', action: 'abrir' })).status, 422);
+    // HA sem URL neste harness: a chamada vai, e a falha volta como resultado, não como 500.
+    const res = await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'light.abajur', action: 'on' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, false);
+  });
+
+  it('forçar refresh responde com o estado da descoberta', async () => {
+    const res = await call(h, 'POST', '/admin/v1/devices/refresh');
+    assert.equal(res.status, 200);
+    assert.equal(typeof res.body.count, 'number');
+  });
+
   it('nome de satélite aparece na lista mesmo offline', async () => {
     await call(h, 'PUT', '/admin/v1/satellites/esp32-aa', { name: 'Quarto' });
     const res = await call(h, 'GET', '/admin/v1/satellites');
@@ -282,11 +389,282 @@ describe('API admin', () => {
     assert.equal(res.status, 404, 'cancelar de novo não finge sucesso');
   });
 
+  it('cria lembrete pelo painel com hora de parede de São Paulo', async () => {
+    const amanha = new Date(Date.now() + 86_400_000 - 3 * 3_600_000);
+    const date = amanha.toISOString().slice(0, 10);
+    const res = await call(h, 'POST', '/admin/v1/reminders', { room_id: 'quarto', label: 'remédio', repeat: 'none', date, time: '07:30' });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.kind, 'once');
+    // 07:30 em São Paulo = 10:30 UTC.
+    assert.equal(new Date(res.body.next_due_utc).toISOString().slice(11, 16), '10:30');
+    assert.equal(res.body.has_audio, false);
+    assert.deepEqual(h.saved.at(-1), { id: res.body.id, labelChanged: true });
+  });
+
+  it('criação recusa o nome da Luna, horário passado e data inexistente', async () => {
+    const base = { room_id: 'quarto', repeat: 'none', time: '07:30' };
+    let res = await call(h, 'POST', '/admin/v1/reminders', { ...base, label: 'falar com a Luna', date: '2099-01-01' });
+    assert.equal(res.status, 422);
+    assert.equal(res.body.field, 'label');
+    res = await call(h, 'POST', '/admin/v1/reminders', { ...base, date: '2020-01-01' });
+    assert.equal(res.body.field, 'date');
+    res = await call(h, 'POST', '/admin/v1/reminders', { ...base, date: '2026-02-31' });
+    assert.equal(res.body.field, 'date');
+    res = await call(h, 'POST', '/admin/v1/reminders', { ...base, repeat: 'toda_hora' });
+    assert.equal(res.body.field, 'repeat');
+  });
+
+  it('recorrente: próxima ocorrência calculada no servidor', async () => {
+    const res = await call(h, 'POST', '/admin/v1/reminders', { room_id: 'sala', label: null, repeat: 'weekdays', time: '06:30' });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.repeat_rule, 'weekdays');
+    assert.equal(res.body.local_hour, 6);
+    assert.equal(res.body.has_audio, null, 'alarme sem rótulo não tem fala');
+    assert.ok(res.body.next_due_utc > Date.now());
+  });
+
+  it('editar troca horário e rótulo; rótulo novo apaga a fala gravada', async () => {
+    const created = await call(h, 'POST', '/admin/v1/reminders', { room_id: 'quarto', label: 'água', repeat: 'daily', time: '09:00' });
+    h.reminderStore.putAudio(created.body.id, Buffer.alloc(32));
+    let res = await call(h, 'PUT', `/admin/v1/reminders/${created.body.id}`, { room_id: 'quarto', label: 'água', repeat: 'daily', time: '10:00' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.local_hour, 10);
+    assert.equal(res.body.has_audio, true, 'só o horário mudou: fala continua valendo');
+
+    res = await call(h, 'PUT', `/admin/v1/reminders/${created.body.id}`, { room_id: 'escritorio', label: 'beber água', repeat: 'daily', time: '10:00' });
+    assert.equal(res.body.room_id, 'escritorio');
+    assert.equal(res.body.has_audio, false);
+    assert.deepEqual(h.saved.at(-1), { id: created.body.id, labelChanged: true });
+  });
+
+  it('editar só o rótulo com keep_schedule não mexe no horário (nem nos segundos)', async () => {
+    const due = Date.now() + 95_000;
+    const r = h.reminderStore.insertOnce({ roomId: 'quarto', label: 'forno', dueAtUtc: due });
+    const res = await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, { room_id: 'quarto', label: 'tirar do forno', keep_schedule: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.next_due_utc, due);
+    assert.equal(res.body.label, 'tirar do forno');
+    assert.match(res.body.local_time, /^\d{2}:\d{2}$/);
+    assert.equal((await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, { room_id: 'quarto', label: 'Luna', keep_schedule: true })).body.field, 'label');
+  });
+
+  it('não edita o que está tocando nem o que já acabou', async () => {
+    const r = h.reminderStore.insertOnce({ roomId: 'quarto', label: null, dueAtUtc: Date.now() + 3_600_000 });
+    const body = { room_id: 'quarto', repeat: 'daily', time: '08:00' };
+    h.reminderStore.markRinging(r.id, r.nextDueUtc);
+    assert.equal((await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, body)).status, 409);
+    h.reminderStore.markStatus(r.id, 'done');
+    assert.equal((await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, body)).status, 404);
+  });
+
+  it('histórico: eventos do log viram linha, com rótulo atual', async () => {
+    const r = h.reminderStore.insertOnce({ roomId: 'quarto', label: 'pão', dueAtUtc: Date.now() + 3_600_000 });
+    h.diagnostics.ingest(record({ event: 'reminder_fired', roomId: 'quarto', fields: { reminder_id: r.id } }));
+    h.diagnostics.ingest(record({ event: 'alarm_snoozed', roomId: 'quarto', fields: { reminder_id: r.id, minutes: 5 } }));
+    h.diagnostics.ingest(record({ event: 'alarm_missed', roomId: 'quarto', fields: {} }));
+    const res = await call(h, 'GET', '/admin/v1/reminders/history?limit=2');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.events.map((e: { kind: string }) => e.kind), ['snoozed', 'fired']);
+    assert.equal(res.body.complete, false, 'LOG_LEVEL silent: histórico não cresce e o painel precisa saber');
+    assert.equal(res.body.events[0].label, 'pão');
+  });
+
   it('bootstrap é só leitura e sem segredo', async () => {
     const res = await call(h, 'GET', '/admin/v1/bootstrap');
     assert.equal(res.body.admin_token.set, true);
     assert.ok(!JSON.stringify(res.body).includes(TOKEN));
     assert.ok(!JSON.stringify(res.body).includes('test-secret'));
+  });
+
+  it('latência: série, meta e percentis por sala × provedor, sem sessão fria', async () => {
+    const now = Date.now();
+    for (const [i, ms] of [300, 500, 700, 900, 1200].entries()) {
+      h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', ts: now - 60_000 + i, fields: { latency_ms: ms, provider: 'gemini', device_id: 'esp32-aa', session_cold: false } }));
+    }
+    h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', ts: now, fields: { latency_ms: 4000, provider: 'gemini', session_cold: true } }));
+    // Amostra de três dias atrás fica fora da janela padrão de 24h.
+    h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', ts: now - 3 * 86_400_000, fields: { latency_ms: 50, provider: 'gemini' } }));
+
+    const res = await call(h, 'GET', '/admin/v1/diagnostics/latency');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.target_ms, 800);
+    assert.equal(res.body.samples.length, 6);
+    const [quarto] = res.body.summary;
+    assert.equal(quarto.room_id, 'quarto');
+    assert.equal(quarto.count, 5);
+    assert.equal(quarto.cold, 1);
+    assert.equal(quarto.p50_ms, 700);
+    assert.equal(quarto.p90_ms, 1200);
+    assert.equal(quarto.over_target, 2);
+
+    const semana = await call(h, 'GET', '/admin/v1/diagnostics/latency?hours=168');
+    assert.equal(semana.body.samples.length, 7);
+    assert.equal((await call(h, 'GET', '/admin/v1/diagnostics/latency?hours=0')).status, 422);
+  });
+
+  it('erros: error sempre, warn só de dependência externa, mais recente primeiro', async () => {
+    h.diagnostics.ingest(record({ level: 'warn', levelValue: 40, event: 'invalid_message', msg: 'ruído' }));
+    h.diagnostics.ingest(record({ level: 'warn', levelValue: 40, event: 'ha_get_state', msg: 'HA não respondeu' }));
+    h.diagnostics.ingest(record({ level: 'error', levelValue: 50, event: 'provider_connect_timeout', roomId: 'quarto', msg: 'provider caiu', fields: { timeout_ms: 5000 } }));
+
+    const res = await call(h, 'GET', '/admin/v1/diagnostics/errors?limit=5');
+    assert.equal(res.status, 200);
+    const events = res.body.errors.map((e: { event: string }) => e.event);
+    assert.deepEqual(events.slice(0, 2), ['provider_connect_timeout', 'ha_get_state']);
+    assert.ok(!events.includes('invalid_message'));
+    assert.deepEqual(res.body.errors[0].detail, { timeout_ms: 5000 });
+  });
+
+  it('log ao vivo em SSE: passado filtrado, depois linha nova', async () => {
+    h.diagnostics.ingest(record({ event: 'room_created', roomId: 'sala', msg: 'sala antiga' }));
+    h.diagnostics.ingest(record({ event: 'room_created', roomId: 'quarto', msg: 'quarto antigo' }));
+
+    const controller = new AbortController();
+    const res = await fetch(`${h.baseUrl}/admin/v1/logs/stream?room=quarto&level=info`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      signal: controller.signal,
+    });
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('content-type') ?? '', /text\/event-stream/);
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = '';
+    const readUntil = async (needle: string): Promise<void> => {
+      while (!text.includes(needle)) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error('stream fechou antes de chegar ' + needle);
+        text += decoder.decode(value, { stream: true });
+      }
+    };
+    await readUntil(': ok');
+    assert.ok(text.includes('quarto antigo'));
+    assert.ok(!text.includes('sala antiga'), 'filtro de sala vale para o passado');
+
+    h.diagnostics.ingest(record({ event: 'ttfab', roomId: 'quarto', msg: 'linha nova', fields: { latency_ms: 10, provider: 'gemini' } }));
+    h.diagnostics.ingest(record({ level: 'debug', levelValue: 20, roomId: 'quarto', msg: 'debug escondido' }));
+    await readUntil('linha nova');
+    controller.abort();
+    assert.ok(!text.includes('debug escondido'));
+  });
+
+  it('log ao vivo recusa nível desconhecido', async () => {
+    assert.equal((await call(h, 'GET', '/admin/v1/logs/stream?level=barulho')).status, 422);
+  });
+
+  it('bloquear derruba a conexão aberta e recusa a reconexão no handshake', async () => {
+    const deviceId = 'esp32-perdido';
+    const open = await authenticate(h, deviceId);
+    assert.equal(open.reply.type, 'auth_ok');
+
+    const closed = new Promise<number>((r) => open.ws.once('close', (code) => r(code)));
+    const res = await call(h, 'PUT', `/admin/v1/satellites/${deviceId}`, { blocked: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.blocked, true);
+    assert.equal(await closed, 1000);
+
+    const again = await authenticate(h, deviceId);
+    assert.equal(again.reply.type, 'auth_error');
+    assert.equal(again.reply.reason, 'satélite bloqueado');
+    again.ws.terminate();
+
+    const list = await call(h, 'GET', '/admin/v1/satellites');
+    assert.equal(list.body.satellites.find((s: { device_id: string }) => s.device_id === deviceId).blocked, true);
+
+    await call(h, 'PUT', `/admin/v1/satellites/${deviceId}`, { blocked: false });
+    const back = await authenticate(h, deviceId);
+    assert.equal(back.reply.type, 'auth_ok');
+    back.ws.terminate();
+  });
+
+  it('desconectar fecha a conexão; satélite desconhecido fecha zero', async () => {
+    const s = await authenticate(h, 'esp32-desconectar');
+    const closed = new Promise<void>((r) => s.ws.once('close', () => r()));
+    const res = await call(h, 'POST', '/admin/v1/satellites/esp32-desconectar/disconnect');
+    assert.equal(res.body.closed, 1);
+    await closed;
+    assert.equal((await call(h, 'POST', '/admin/v1/satellites/ninguem/disconnect')).body.closed, 0);
+  });
+
+  it('backup não leva segredo nenhum, nem mascarado', async () => {
+    const res = await call(h, 'GET', '/admin/v1/backup');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.format, 'luna-backup');
+    const text = JSON.stringify(res.body);
+    assert.ok(!text.includes('gemini-chave-secreta'));
+    assert.ok(!text.includes('um-token-longo-do-ha'));
+    assert.equal('geminiApiKey' in res.body.settings.provider, false);
+    assert.equal('token' in res.body.settings.ha, false);
+    assert.ok(Array.isArray(res.body.reminders));
+  });
+
+  it('restaurar: valida tudo antes, aplica como patch e mantém os segredos gravados', async () => {
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    const tokenAntes = h.settings.current().haToken;
+
+    // Mexe depois do backup; a restauração tem de voltar.
+    await call(h, 'PUT', '/admin/v1/devices', { aliases: { outro: 'luz_bancada' } });
+    let res = await call(h, 'POST', '/admin/v1/restore', { backup });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(h.settings.get('devices').aliases, backup.settings.devices.aliases);
+    assert.equal(h.settings.current().haToken, tokenAntes, 'segredo ausente do arquivo = mantém');
+
+    // Um grupo inválido recusa tudo, sem meio aplicar.
+    const bad = structuredClone(backup);
+    bad.settings.devices.aliases = { mudou: 'luz_bancada' };
+    bad.settings.weather = { latitude: 10, longitude: null };
+    res = await call(h, 'POST', '/admin/v1/restore', { backup: bad });
+    assert.equal(res.status, 422);
+    assert.match(res.body.field, /^weather\./);
+    assert.deepEqual(h.settings.get('devices').aliases, backup.settings.devices.aliases, 'nada foi gravado');
+
+    assert.equal((await call(h, 'POST', '/admin/v1/restore', { backup: { format: 'outro' } })).status, 422);
+  });
+
+  it('restaurar com reminders=replace recria os lembretes e pula o que já passou', async () => {
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    backup.reminders = [
+      { room_id: 'quarto', label: 'futuro', kind: 'once', due_at_utc: Date.now() + 7_200_000, local_hour: null, local_minute: null, repeat_rule: null },
+      { room_id: 'quarto', label: 'passado', kind: 'once', due_at_utc: Date.now() - 60_000, local_hour: null, local_minute: null, repeat_rule: null },
+      { room_id: 'sala', label: null, kind: 'recurring', due_at_utc: null, local_hour: 6, local_minute: 30, repeat_rule: 'weekdays' },
+    ];
+    const res = await call(h, 'POST', '/admin/v1/restore', { backup, reminders: 'replace' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.reminders.created, 2);
+    assert.equal(res.body.reminders.skipped, 1);
+    const labels = h.reminderStore.listLive().map((r) => r.label).sort();
+    assert.deepEqual(labels, [null, 'futuro'].sort());
+  });
+
+  it('backup e restauração deixam o bloqueio de fora; URL de outra origem é pulada, não recusa tudo', async () => {
+    await call(h, 'PUT', '/admin/v1/satellites/esp32-sumido', { blocked: true });
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    assert.equal('blocked' in backup.settings.satellites, false);
+
+    backup.settings.satellites.blocked = [];
+    backup.settings.calendar = { url: 'https://agenda.outro-host.example' };
+    const res = await call(h, 'POST', '/admin/v1/restore', { backup });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.not_applied, ['calendar.url']);
+    assert.ok(h.settings.get('satellites').blocked.includes('esp32-sumido'), 'restaurar desbloqueou');
+    await call(h, 'PUT', '/admin/v1/satellites/esp32-sumido', { blocked: false });
+  });
+
+  it('restaurar pula instante fora da janela e recusa horário não inteiro', async () => {
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    backup.reminders = [{ room_id: 'quarto', label: 'x', kind: 'once', due_at_utc: 1e15, local_hour: null, local_minute: null, repeat_rule: null }];
+    let res = await call(h, 'POST', '/admin/v1/restore', { backup, reminders: 'replace' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.reminders.skipped, 1);
+    assert.equal((await call(h, 'GET', '/admin/v1/reminders')).status, 200);
+    backup.reminders[0].due_at_utc = 1e300;
+    res = await call(h, 'POST', '/admin/v1/restore', { backup, reminders: 'replace' });
+    assert.equal(res.status, 422);
+  });
+
+  it('status e bootstrap trazem a release (null em dev)', async () => {
+    assert.ok('release' in (await call(h, 'GET', '/admin/v1/status')).body);
+    assert.ok('release' in (await call(h, 'GET', '/admin/v1/bootstrap')).body);
   });
 
   it('reiniciar responde 202 e só depois chama o shutdown', async () => {
@@ -296,6 +674,39 @@ describe('API admin', () => {
     assert.equal(h.restarts, 1);
   });
 });
+
+/** Abre um WebSocket de satélite de verdade contra o harness e manda `auth`. */
+async function authenticate(h: Harness, deviceId: string): Promise<{ ws: WebSocket; reply: any }> {
+  const ws = new WebSocket(h.baseUrl.replace('http', 'ws'));
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', reject);
+  });
+  const reply = new Promise<any>((resolve) => ws.once('message', (data) => resolve(JSON.parse(data.toString()))));
+  ws.send(
+    serializeControlMessage({
+      ...createEnvelope('auth', 'quarto', {}),
+      device_id: deviceId,
+      token: computeAuthToken(config.wsAuthSecret, deviceId),
+    } as never),
+  );
+  return { ws, reply: await reply };
+}
+
+let recordSeq = 1_000_000;
+function record(partial: Partial<LogRecord>): LogRecord {
+  return {
+    seq: ++recordSeq,
+    ts: Date.now(),
+    level: 'info',
+    levelValue: 30,
+    event: null,
+    roomId: null,
+    msg: '',
+    fields: {},
+    ...partial,
+  };
+}
 
 describe('API admin sem LUNA_ADMIN_TOKEN', () => {
   it('não existe: 404 em tudo, com ou sem token', async () => {

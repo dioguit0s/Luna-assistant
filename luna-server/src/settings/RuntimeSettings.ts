@@ -163,7 +163,7 @@ export class RuntimeSettings {
   }
 
   private merge(): AppConfig {
-    const { ha, provider } = this.values;
+    const { ha, provider, voice, weather } = this.values;
     return Object.freeze({
       ...this.base,
       haUrl: ha.url,
@@ -174,6 +174,14 @@ export class RuntimeSettings {
       geminiLiveModel: provider.geminiLiveModel,
       openaiRealtimeModel: provider.openaiRealtimeModel,
       openaiVoice: provider.openaiVoice,
+      geminiVadSilenceMs: voice.geminiVadSilenceMs,
+      geminiVadEndSensitivity: voice.geminiVadEndSensitivity,
+      geminiThinkingBudget: voice.geminiThinkingBudget,
+      openaiVadType: voice.openaiVadType,
+      openaiVadSilenceMs: voice.openaiVadSilenceMs,
+      userSilenceCutoffMs: voice.userSilenceCutoffMs,
+      weatherLatitude: weather.latitude,
+      weatherLongitude: weather.longitude,
     });
   }
 

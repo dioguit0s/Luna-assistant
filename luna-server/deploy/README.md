@@ -242,3 +242,11 @@ sudo systemctl start luna-server
 
 Isso **perde** o que mudou depois da cópia: lembretes criados e toda a
 configuração feita pelo painel (que volta a vir do `.env`/`devices.json`).
+
+A **v4** (painel v2: `latency_samples`, `error_log`, `reminder_events`) repete o
+padrão: a release que a traz copia o banco para `luna.db.pre-v3-<carimbo>` e
+migra, e qualquer release anterior passa a morrer no boot. Na prática o deploy
+do painel v2 é de mão única: se ele falhar no health check por **qualquer**
+motivo, o rollback automático também falha e o serviço fica fora até a
+restauração acima (com `pre-v3`). Suba essa release quando der para olhar o
+servidor em seguida.

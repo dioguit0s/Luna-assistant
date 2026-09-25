@@ -1,21 +1,38 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AppConfig } from '../config/env.js';
-import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
+import { ACTIONABLE_DOMAINS, type HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import type { ReminderStore, Reminder } from '../reminders/ReminderStore.js';
 import { spokenReminder } from '../reminders/spoken.js';
+import { resolvePanelReminder, type PanelReminder } from '../reminders/panelInput.js';
+import { localDateTime } from '../time/clock.js';
 import type { RoomManager } from '../rooms/RoomManager.js';
 import type { WeatherSource } from '../weather/WeatherSource.js';
 import type { RuntimeSettings } from '../settings/RuntimeSettings.js';
 import {
+  GROUP_NAMES,
   ROOM_ID_PATTERN,
+  SECRET_FIELDS,
   SettingsValidationError,
+  VALIDATORS,
   maskGroup,
+  toStored,
   type GroupName,
 } from '../settings/groups.js';
+import { sanitizeLabel } from '../orchestrator/tools/setReminder.js';
+import { nextOccurrenceAfter } from '../reminders/recurrence.js';
+import { MAX_IN_SECONDS, MIN_IN_SECONDS } from '../reminders/resolveOnce.js';
+import type { RepeatRule } from '../reminders/ReminderStore.js';
 import type { SatelliteInfo } from '../ws/WsServer.js';
-import { SERVER_VERSION } from '../ws/WsServer.js';
+import { SERVER_RELEASE, SERVER_VERSION } from '../ws/WsServer.js';
 import { getLogger } from '../logging/logger.js';
+import { LEVEL_VALUES, type LogLevelName, type LogRecord } from '../logging/logTap.js';
+import type { Diagnostics, LogFilter } from '../diagnostics/Diagnostics.js';
+import { matchesFilter } from '../diagnostics/Diagnostics.js';
+import { MAX_ROWS } from '../diagnostics/DiagnosticsStore.js';
+import { geocodeCity } from '../weather/geocode.js';
+import { OpenMeteoClient } from '../weather/OpenMeteoClient.js';
+import { describeWeatherCode } from '../weather/wmo.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
 
 export interface AdminApiDeps {
@@ -29,7 +46,16 @@ export interface AdminApiDeps {
   reminderStore: ReminderStore;
   /** Cancela no banco, para o toque se estiver tocando e rearma o scheduler. */
   cancelReminder: (reminder: Reminder) => void;
+  /**
+   * Lembrete criado ou editado pelo painel: rearma o scheduler e, com rótulo
+   * novo, pede a fala pré-renderizada (sem sessão aberta na sala, fica só-bipe).
+   */
+  onReminderSaved: (reminder: Reminder, labelChanged: boolean) => void;
   weatherSource: WeatherSource | null;
+  /** Série de TTFAB, últimos erros e log ao vivo (v2). */
+  diagnostics: Diagnostics;
+  /** Fecha as conexões de um `device_id` — ver `WsServer.disconnectDevice`. */
+  disconnectSatellite: (deviceId: string) => number;
   /** Shutdown gracioso; o `Restart=always` da unit traz o processo de volta. */
   onRestart: () => void;
   fetchImpl?: typeof fetch;
@@ -41,10 +67,32 @@ export type Light = 'ok' | 'error' | 'unknown' | 'off';
 
 const PREFIX = '/admin/v1/';
 const MAX_BODY_BYTES = 64 * 1024;
+/** Restauração carrega o backup inteiro (configuração + lembretes). */
+const MAX_RESTORE_BYTES = 1024 * 1024;
+export const BACKUP_FORMAT = 'luna-backup';
+export const BACKUP_VERSION = 1;
 const CALENDAR_TEST_TIMEOUT_MS = 3000;
+/**
+ * Domínios que o painel aciona ("testar") e aceita em dispositivo manual novo:
+ * os da descoberta do HA. O `control_device` em si não filtra domínio — por
+ * isso a entrada manual criada pela rede é que precisa ser barrada aqui, senão
+ * um `script.abrir_portao` viraria acionável por voz com `turn_on`.
+ */
+const TESTABLE_DOMAINS = new Set<string>(ACTIONABLE_DOMAINS);
+/** Meta de TTFAB do projeto; o gráfico do painel traça a linha aqui. */
+export const TTFAB_TARGET_MS = 800;
+const MAX_LATENCY_SAMPLES = 2000;
+/** Cada stream segura um socket aberto; o painel usa um só. */
+const MAX_LOG_STREAMS = 4;
+const SSE_HEARTBEAT_MS = 15_000;
+/**
+ * Cliente que não lê (notebook dormiu com o Diagnóstico aberto) acumula linha
+ * na memória até o TCP desistir. Acima disto de bytes pendentes, o stream cai.
+ */
+const SSE_MAX_BUFFERED_BYTES = 256 * 1024;
 
 /** Grupos que o painel lê e grava inteiros pela rota genérica `settings/:grupo`. */
-const EDITABLE_GROUPS = new Set<GroupName>(['ha', 'provider', 'calendar']);
+const EDITABLE_GROUPS = new Set<GroupName>(['ha', 'provider', 'calendar', 'voice', 'weather']);
 
 class HttpError extends Error {
   constructor(
@@ -97,6 +145,11 @@ export class AdminApi {
       return true;
     }
 
+    if (req.method === 'GET' && url.split('?')[0] === `${PREFIX}logs/stream`) {
+      this.streamLogs(req, res, url);
+      return true;
+    }
+
     this.route(req, url)
       .then((result) => send(res, result.status ?? 200, result.body))
       .catch((err: unknown) => {
@@ -135,6 +188,7 @@ export class AdminApi {
     }
     const method = req.method ?? 'GET';
     const [head, id, action] = segments;
+    const query = new URL(url, 'http://admin.local').searchParams;
 
     switch (`${method} ${head}${id !== undefined ? '/:id' : ''}${action !== undefined ? '/:action' : ''}`) {
       case 'GET status':
@@ -144,7 +198,14 @@ export class AdminApi {
       case 'GET satellites':
         return { body: { satellites: this.satellites() } };
       case 'PUT satellites/:id':
-        return { body: this.renameSatellite(id!, await readJson(req)) };
+        return { body: this.updateSatellite(id!, await readJson(req)) };
+      case 'POST satellites/:id/:action':
+        if (action === 'disconnect') return { body: this.disconnectSatellite(id!) };
+        break;
+      case 'GET backup':
+        return { body: this.backup() };
+      case 'POST restore':
+        return { body: this.restore(await readJson(req, MAX_RESTORE_BYTES)) };
       case 'GET rooms':
         return { body: this.rooms() };
       case 'PUT rooms/:id':
@@ -152,17 +213,33 @@ export class AdminApi {
       case 'GET devices':
         return { body: this.devices() };
       case 'PUT devices':
-        return { body: this.updateAliases(await readJson(req)) };
+        return { body: this.updateDevices(await readJson(req)) };
+      case 'POST devices/:id':
+        if (id === 'test') return { body: await this.testDevice(await readJson(req)) };
+        if (id === 'refresh') return { body: await this.refreshDevices() };
+        break;
       case 'GET reminders':
         return { body: { reminders: this.reminders() } };
       case 'DELETE reminders/:id':
         return { body: this.cancelReminder(id!) };
+      case 'POST reminders':
+        return { status: 201, body: this.createReminder(await readJson(req)) };
+      case 'PUT reminders/:id':
+        return { body: this.editReminder(id!, await readJson(req)) };
+      case 'GET reminders/:id':
+        if (id === 'history') return { body: this.reminderHistory(query) };
+        break;
       case 'GET settings/:id':
         return { body: this.readSettings(editableGroup(id!)) };
       case 'PUT settings/:id':
         return { body: this.writeSettings(editableGroup(id!), await readJson(req)) };
       case 'POST settings/:id/:action':
         if (action === 'test') return { body: await this.testConnection(editableGroup(id!), await readJson(req)) };
+        if (action === 'geocode' && id === 'weather') return { body: await this.geocode(await readJson(req)) };
+        break;
+      case 'GET diagnostics/:id':
+        if (id === 'latency') return { body: this.latency(query) };
+        if (id === 'errors') return { body: this.errors(query) };
         break;
       case 'POST restart':
         return { status: 202, body: this.restart() };
@@ -177,6 +254,7 @@ export class AdminApi {
     const satellites = this.deps.satellites();
     return {
       version: SERVER_VERSION,
+      release: releaseWire(),
       uptime_s: Math.floor(process.uptime()),
       started_at: now - Math.floor(process.uptime() * 1000),
       satellites_online: satellites.filter((s) => s.online).length,
@@ -211,9 +289,10 @@ export class AdminApi {
   }
 
   private weatherLight(): { light: Light; detail: string } {
-    if (!this.deps.weatherSource) return { light: 'off', detail: 'sem localização configurada' };
+    const { city, latitude } = this.deps.settings.get('weather');
+    if (!this.deps.weatherSource || latitude === null) return { light: 'off', detail: 'sem localização configurada' };
     return this.deps.weatherSource.current()
-      ? { light: 'ok', detail: 'previsão em dia' }
+      ? { light: 'ok', detail: city ? `previsão em dia · ${city}` : 'previsão em dia' }
       : { light: 'error', detail: 'sem previsão recente' };
   }
 
@@ -229,12 +308,12 @@ export class AdminApi {
   // ─── Satélites ─────────────────────────────────────────────────────────
 
   private satellites(): unknown[] {
-    const { names } = this.deps.settings.get('satellites');
+    const { names, blocked } = this.deps.settings.get('satellites');
     const listed = this.deps.satellites();
     const known = new Set(listed.map((s) => s.deviceId));
-    // Satélite com nome dado pelo painel mas não visto desde o boot continua
-    // na lista — offline e sem sala, que é tudo que se sabe dele.
-    const offlineNamed = Object.keys(names)
+    // Satélite com nome dado pelo painel (ou bloqueado) mas não visto desde o
+    // boot continua na lista — offline e sem sala, que é tudo que se sabe dele.
+    const offlineNamed = [...new Set([...Object.keys(names), ...blocked])]
       .filter((deviceId) => !known.has(deviceId))
       .map((deviceId) => ({
         deviceId,
@@ -247,24 +326,54 @@ export class AdminApi {
       device_id: s.deviceId,
       room_id: s.roomId,
       name: names[s.deviceId] ?? null,
+      blocked: blocked.includes(s.deviceId),
       online: s.online,
       connected_since: s.connectedSince,
       last_seen_at: s.lastSeenAt,
     }));
   }
 
-  private renameSatellite(deviceId: string, body: unknown): unknown {
+  /** `{ name }` e/ou `{ blocked }`: renomear e bloquear (v2) pela mesma rota. */
+  private updateSatellite(deviceId: string, body: unknown): unknown {
     const name = field(body, 'name');
-    const names = { ...this.deps.settings.get('satellites').names };
-    if (name === null || (typeof name === 'string' && name.trim() === '')) {
-      delete names[deviceId];
-    } else if (typeof name === 'string') {
-      names[deviceId] = name;
-    } else {
-      throw new HttpError(422, '"name" deve ser texto ou null', 'name');
+    const block = field(body, 'blocked');
+    if (name === undefined && block === undefined) {
+      throw new HttpError(422, 'envie "name" ou "blocked"', 'name');
     }
-    this.deps.settings.update('satellites', { names });
-    return { device_id: deviceId, name: names[deviceId] ?? null };
+    const current = this.deps.settings.get('satellites');
+    const patch: Record<string, unknown> = {};
+    if (name !== undefined) {
+      const names = { ...current.names };
+      if (name === null || (typeof name === 'string' && name.trim() === '')) {
+        delete names[deviceId];
+      } else if (typeof name === 'string') {
+        names[deviceId] = name;
+      } else {
+        throw new HttpError(422, '"name" deve ser texto ou null', 'name');
+      }
+      patch.names = names;
+    }
+    if (block !== undefined) {
+      if (typeof block !== 'boolean') throw new HttpError(422, '"blocked" deve ser booleano', 'blocked');
+      const set = new Set(current.blocked);
+      if (block) set.add(deviceId);
+      else set.delete(deviceId);
+      patch.blocked = [...set];
+    }
+    const next = this.deps.settings.update('satellites', patch);
+    // Bloqueio vale na hora: a conexão aberta cai, e a reconexão é recusada.
+    if (block === true) this.deps.disconnectSatellite(deviceId);
+    if (block !== undefined) {
+      getLogger().warn(
+        { event: block ? 'satellite_blocked' : 'satellite_unblocked', device_id: deviceId, via: 'admin' },
+        `Satélite ${deviceId} ${block ? 'bloqueado' : 'desbloqueado'} pelo painel`,
+      );
+    }
+    return { device_id: deviceId, name: next.names[deviceId] ?? null, blocked: next.blocked.includes(deviceId) };
+  }
+
+  private disconnectSatellite(deviceId: string): unknown {
+    return { device_id: deviceId, closed: this.deps.disconnectSatellite(deviceId) };
   }
 
   // ─── Salas e dispositivos ──────────────────────────────────────────────
@@ -313,6 +422,8 @@ export class AdminApi {
 
   private devices(): unknown {
     const overrides = this.deps.settings.get('devices');
+    const excluded = new Set(overrides.exclude.map((e) => e.toLowerCase()));
+    const refresh = this.deps.deviceRegistry.refreshStatus();
     return {
       aliases: overrides.aliases,
       exclude: overrides.exclude,
@@ -322,32 +433,231 @@ export class AdminApi {
         entity_id: d.entityId,
         name: d.name ?? null,
       })),
+      // v2: tudo que o HA devolveu, com a marca de excluído — é daqui que o
+      // painel inclui de volta o que alguém excluiu.
+      ha_entities: this.deps.deviceRegistry.discoveredEntities().map((e) => ({
+        entity_id: e.entity_id,
+        device: e.device,
+        room_id: e.room_id,
+        name: e.name ?? null,
+        excluded: excluded.has(e.entity_id.toLowerCase()),
+      })),
+      refreshed_at: refresh.at,
+      refresh_ok: refresh.ok,
     };
   }
 
-  /** v1 edita só os apelidos; exclusões e entradas manuais são v2. */
-  private updateAliases(body: unknown): unknown {
-    const aliases = field(body, 'aliases');
-    if (aliases === undefined) throw new HttpError(422, '"aliases" é obrigatório', 'aliases');
-    this.deps.settings.update('devices', { aliases });
+  /**
+   * Patch parcial de `aliases`, `exclude` e `devices` (entradas manuais, no
+   * formato de `devices.json`: `room_id`/`entity_id`). Campo ausente mantém;
+   * a validação é a mesma do arquivo (`validateDeviceOverrides`).
+   */
+  private updateDevices(body: unknown): unknown {
+    const patch: Record<string, unknown> = {};
+    for (const key of ['aliases', 'exclude', 'devices']) {
+      const value = field(body, key);
+      if (value !== undefined) patch[key] = value;
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new HttpError(422, 'nada para gravar: envie aliases, exclude ou devices', 'aliases');
+    }
+    // Só a entrada NOVA passa pelo filtro de domínio: uma que já estava no
+    // banco (semeada de um devices.json antigo) continua valendo, senão o
+    // painel não conseguiria mais gravar a lista sem apagá-la.
+    if (Array.isArray(patch.devices)) {
+      const known = new Set(this.deps.settings.get('devices').devices.map((d) => d.entityId.toLowerCase()));
+      for (const row of patch.devices as Array<Record<string, unknown>>) {
+        const entityId = typeof row?.entity_id === 'string' ? row.entity_id.trim().toLowerCase() : '';
+        if (known.has(entityId)) continue;
+        const domain = entityId.split('.')[0] ?? '';
+        if (!TESTABLE_DOMAINS.has(domain)) {
+          throw new HttpError(422, `dispositivo manual só de ${ACTIONABLE_DOMAINS.join('/')}: "${domain || entityId}" não`, 'devices');
+        }
+      }
+    }
+    this.deps.settings.update('devices', patch);
     return this.devices();
+  }
+
+  /**
+   * "Testar" do painel: liga ou desliga pelo HA, sem passar pela IA. Só o que
+   * o registro conhece (descoberto ou manual, excluído inclusive — o operador
+   * pode testar o que a Luna não pode acionar) e só nos domínios do
+   * `control_device`: o painel não vira um proxy genérico de serviços do HA.
+   */
+  private async testDevice(body: unknown): Promise<unknown> {
+    const entityId = field(body, 'entity_id');
+    const action = field(body, 'action');
+    if (typeof entityId !== 'string') throw new HttpError(422, '"entity_id" é obrigatório', 'entity_id');
+    if (action !== 'on' && action !== 'off') throw new HttpError(422, '"action" deve ser on ou off', 'action');
+    const known =
+      this.deps.deviceRegistry.discoveredEntities().some((e) => e.entity_id === entityId) ||
+      this.deps.settings.get('devices').devices.some((d) => d.entityId === entityId);
+    if (!known) throw new HttpError(404, 'entidade desconhecida pelo registro');
+    const domain = entityId.split('.')[0] ?? '';
+    if (!TESTABLE_DOMAINS.has(domain)) throw new HttpError(422, `domínio "${domain}" não é testável pelo painel`, 'entity_id');
+
+    const startedAt = this.now();
+    const result = await this.deps.haClient.callService(domain, action === 'on' ? 'turn_on' : 'turn_off', entityId);
+    getLogger().info(
+      { event: 'admin_device_test', entity_id: entityId, action, success: result.success, latency_ms: this.now() - startedAt },
+      `Teste pelo painel: ${entityId} → ${action}`,
+    );
+    return { ok: result.success, error: result.success ? null : result.error ?? 'falha no HA', latency_ms: this.now() - startedAt };
+  }
+
+  private async refreshDevices(): Promise<unknown> {
+    await this.deps.deviceRegistry.refresh();
+    const status = this.deps.deviceRegistry.refreshStatus();
+    return { ok: status.ok === true, at: status.at, count: this.deps.deviceRegistry.current().size };
   }
 
   // ─── Lembretes ─────────────────────────────────────────────────────────
 
   private reminders(): unknown[] {
-    const now = new Date(this.now());
-    return this.deps.reminderStore.listLive().map((r) => ({
+    return this.deps.reminderStore.listLive().map((r) => this.reminderWire(r));
+  }
+
+  private reminderWire(r: Reminder): unknown {
+    return {
       id: r.id,
       short_id: r.shortId,
       room_id: r.roomId,
       label: r.label,
       kind: r.kind,
+      due_at_utc: r.dueAtUtc,
+      local_hour: r.localHour,
+      local_minute: r.localMinute,
       repeat_rule: r.repeatRule,
       next_due_utc: r.nextDueUtc,
+      // Hora de parede de São Paulo (ADR 006): o painel preenche o formulário
+      // com isto, não com o fuso da máquina onde ele roda.
+      ...localWire(r.nextDueUtc),
       status: r.status,
-      spoken: spokenReminder(r, now),
-    }));
+      // Sem fala gravada, o toque é só o bipe (ver `Orchestrator.prerenderReminderSpeech`).
+      has_audio: r.label === null ? null : this.deps.reminderStore.hasAudio(r.id),
+      spoken: spokenReminder(r, new Date(this.now())),
+    };
+  }
+
+  /** v2: mesmo contrato de tempo e mesmas regras de rótulo da tool `set_reminder`. */
+  private createReminder(body: unknown): unknown {
+    const resolved = resolvePanelReminder(body, new Date(this.now()));
+    if (!resolved.ok) throw new HttpError(422, resolved.error, resolved.field);
+    const v = resolved.value;
+    const { reminderStore, config } = this.deps;
+    if (reminderStore.countLiveByRoom(v.roomId) >= config.reminderMaxPerRoom) {
+      throw new HttpError(422, `a sala já tem ${config.reminderMaxPerRoom} lembretes vivos`, 'room_id');
+    }
+    const created =
+      v.kind === 'once'
+        ? reminderStore.insertOnce({ roomId: v.roomId, label: v.label, dueAtUtc: v.dueAtUtc }, this.now())
+        : reminderStore.insertRecurring(
+            {
+              roomId: v.roomId,
+              label: v.label,
+              localHour: v.localHour,
+              localMinute: v.localMinute,
+              repeatRule: v.repeatRule,
+              nextDueUtc: v.nextDueUtc,
+            },
+            this.now(),
+          );
+    this.deps.onReminderSaved(created, created.label !== null);
+    getLogger().info(
+      {
+        event: 'reminder_set',
+        room_id: created.roomId,
+        reminder_id: created.id,
+        short_id: created.shortId,
+        next_due_utc: created.nextDueUtc,
+        kind: created.kind,
+        repeat_rule: created.repeatRule,
+        has_label: created.label !== null,
+        via: 'admin',
+      },
+      `Lembrete ${created.shortId} criado pelo painel em ${created.roomId}`,
+    );
+    return this.reminderWire(created);
+  }
+
+  private editReminder(rawId: string, body: unknown): unknown {
+    const id = Number(rawId);
+    if (!Number.isInteger(id) || id <= 0) throw new HttpError(422, 'id inválido', 'id');
+    const { reminderStore, config } = this.deps;
+    const current = reminderStore.get(id);
+    if (!current || (current.status !== 'armed' && current.status !== 'ringing')) {
+      throw new HttpError(404, 'lembrete não encontrado ou já encerrado');
+    }
+    if (current.status === 'ringing') throw new HttpError(409, 'o lembrete está tocando agora — dispense antes de editar');
+
+    // `keep_schedule: true`: só sala/rótulo mudaram. Reaproveita o horário
+    // gravado em vez de revalidar o que o formulário arredondou para HH:MM —
+    // um "daqui a 90 segundos" editado andaria até 59 s, ou já teria "passado".
+    const keep = typeof body === 'object' && body !== null && (body as Record<string, unknown>).keep_schedule === true;
+    // Com `keep`, o agendamento fictício só serve para validar sala e rótulo.
+    const b = body as Record<string, unknown>;
+    const resolved = resolvePanelReminder(keep ? { room_id: b.room_id, label: b.label, repeat: 'daily', time: '00:00' } : body, new Date(this.now()));
+    if (!resolved.ok) throw new HttpError(422, resolved.error, resolved.field);
+    const v = keep ? { ...this.keptSchedule(current), roomId: resolved.value.roomId, label: resolved.value.label } : resolved.value;
+    if (v.roomId !== current.roomId && reminderStore.countLiveByRoom(v.roomId) >= config.reminderMaxPerRoom) {
+      throw new HttpError(422, `a sala já tem ${config.reminderMaxPerRoom} lembretes vivos`, 'room_id');
+    }
+    const updated = reminderStore.update(
+      id,
+      v.kind === 'once'
+        ? { roomId: v.roomId, label: v.label, kind: 'once', dueAtUtc: v.dueAtUtc, localHour: null, localMinute: null, repeatRule: null, nextDueUtc: v.nextDueUtc }
+        : { roomId: v.roomId, label: v.label, kind: 'recurring', dueAtUtc: null, localHour: v.localHour, localMinute: v.localMinute, repeatRule: v.repeatRule, nextDueUtc: v.nextDueUtc },
+      this.now(),
+    );
+    // Começou a tocar entre a leitura e o UPDATE.
+    if (!updated) throw new HttpError(409, 'o lembrete mudou de estado — recarregue');
+
+    // A fala gravada diz o rótulo e é renderizada pela voz da sala: rótulo ou
+    // sala novos invalidam o áudio.
+    const labelChanged = updated.label !== current.label || updated.roomId !== current.roomId;
+    if (labelChanged) reminderStore.deleteAudio(id);
+    this.deps.onReminderSaved(updated, labelChanged && updated.label !== null);
+    getLogger().info(
+      {
+        event: 'reminder_edited',
+        room_id: updated.roomId,
+        reminder_id: updated.id,
+        short_id: updated.shortId,
+        next_due_utc: updated.nextDueUtc,
+        kind: updated.kind,
+        label_changed: labelChanged,
+        via: 'admin',
+      },
+      `Lembrete ${updated.shortId} editado pelo painel`,
+    );
+    return this.reminderWire(updated);
+  }
+
+  private keptSchedule(r: Reminder): PanelReminder {
+    return r.kind === 'once'
+      ? { roomId: r.roomId, label: r.label, kind: 'once', dueAtUtc: r.dueAtUtc!, nextDueUtc: r.nextDueUtc }
+      : { roomId: r.roomId, label: r.label, kind: 'recurring', localHour: r.localHour!, localMinute: r.localMinute!, repeatRule: r.repeatRule!, nextDueUtc: r.nextDueUtc };
+  }
+
+  private reminderHistory(query: URLSearchParams): unknown {
+    const limit = intParam(query, 'limit', 50, 1, 500);
+    const level = LEVEL_VALUES[this.deps.config.logLevel as LogLevelName];
+    return {
+      // O histórico vem das linhas `info` do log (ver `Diagnostics`): acima
+      // disso ele para de crescer, e o painel precisa dizer isso.
+      complete: level !== undefined && level <= LEVEL_VALUES.info,
+      events: this.deps.diagnostics.store.reminderHistory(limit).map((e) => ({
+        id: e.id,
+        at: e.at,
+        reminder_id: e.reminderId,
+        short_id: e.shortId,
+        kind: e.kind,
+        room_id: e.roomId,
+        label: e.label,
+        via: e.via ?? (e.kind === 'created' || e.kind === 'cancelled' ? 'voice' : null),
+      })),
+    };
   }
 
   private cancelReminder(rawId: string): unknown {
@@ -359,7 +669,7 @@ export class AdminApi {
     }
     this.deps.cancelReminder(reminder);
     getLogger().info(
-      { event: 'reminder_cancelled', room_id: reminder.roomId, short_id: reminder.shortId, via: 'admin' },
+      { event: 'reminder_cancelled', room_id: reminder.roomId, reminder_id: reminder.id, short_id: reminder.shortId, via: 'admin' },
       `Lembrete ${reminder.shortId} cancelado pelo painel`,
     );
     return { id, cancelled: true };
@@ -372,7 +682,10 @@ export class AdminApi {
       group,
       value: maskGroup(group, this.deps.settings.get(group)),
       updated_at: this.deps.settings.updatedAt(group),
-      applies: group === 'provider' ? 'next_session' : 'immediate',
+      applies: group === 'provider' || group === 'voice' ? 'next_session' : 'immediate',
+      // A previsão troca na hora; a tool `get_weather` só aparece ou some na
+      // próxima sessão (`RoomManager`).
+      ...(group === 'weather' ? { tool_applies: 'next_session' } : {}),
     };
   }
 
@@ -391,6 +704,7 @@ export class AdminApi {
    * API jura nunca devolver (ADR 010, decisão 4).
    */
   private async testConnection(group: GroupName, body: unknown): Promise<unknown> {
+    if (group === 'weather') return this.testWeather(body);
     if (group !== 'ha' && group !== 'calendar') {
       throw new HttpError(404, `não há teste de conexão para "${group}"`);
     }
@@ -418,6 +732,40 @@ export class AdminApi {
       return { ok: result.ok, latency_ms: result.latencyMs, error: result.error ?? null };
     }
     return this.testCalendar(url, token);
+  }
+
+  /**
+   * Busca a previsão para as coordenadas do corpo (ou as gravadas), sem gravar
+   * nada: é o "testar" antes de salvar uma cidade nova.
+   */
+  private async testWeather(body: unknown): Promise<unknown> {
+    const patch = (typeof body === 'object' && body !== null ? body : {}) as Record<string, unknown>;
+    const current = this.deps.settings.get('weather');
+    const lat = typeof patch.latitude === 'number' ? patch.latitude : current.latitude;
+    const lon = typeof patch.longitude === 'number' ? patch.longitude : current.longitude;
+    if (lat === null || lon === null || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+      return { ok: false, latency_ms: 0, error: 'coordenadas ausentes ou fora da faixa' };
+    }
+    const startedAt = Date.now();
+    const snapshot = await new OpenMeteoClient(lat, lon, this.fetchImpl).fetchForecast();
+    const latency = Date.now() - startedAt;
+    if (!snapshot) return { ok: false, latency_ms: latency, error: 'Open-Meteo não respondeu' };
+    return {
+      ok: true,
+      latency_ms: latency,
+      error: null,
+      now: { temperature_c: snapshot.current?.temperatureC ?? null, description: describeWeatherCode(snapshot.current?.weatherCode ?? null) },
+    };
+  }
+
+  private async geocode(body: unknown): Promise<unknown> {
+    const city = field(body, 'city');
+    if (typeof city !== 'string' || city.trim().length < 2 || city.length > 120) {
+      throw new HttpError(422, 'digite o nome da cidade', 'city');
+    }
+    const results = await geocodeCity(city.trim(), this.fetchImpl);
+    if (results === null) return { ok: false, error: 'serviço de geocoding não respondeu', results: [] };
+    return { ok: true, error: null, results };
   }
 
   /**
@@ -449,6 +797,141 @@ export class AdminApi {
     }
   }
 
+  // ─── Diagnóstico ───────────────────────────────────────────────────────
+
+  /**
+   * Série de TTFAB das últimas `hours` horas (padrão 24, até 30 dias) e o
+   * resumo por sala × provedor. `latency_ms` é o limite inferior do intervalo
+   * documentado em `metrics/ttfab.ts`; `since_turn_start_ms`, o superior.
+   * Sessão fria entra na série, mas fica fora dos percentis — o custo dela é
+   * de connect, não de turno, e aparece à parte em `cold`.
+   */
+  private latency(query: URLSearchParams): unknown {
+    const hours = intParam(query, 'hours', 24, 1, 24 * 30);
+    const since = this.now() - hours * 3600_000;
+    // Percentis sobre a janela inteira (a tabela já é capada em MAX_ROWS); só a
+    // série que vai para o gráfico é cortada nas mais recentes.
+    const all = this.deps.diagnostics.store.latencySince(since, MAX_ROWS);
+    const samples = all.slice(-MAX_LATENCY_SAMPLES);
+
+    const groups = new Map<string, { roomId: string; provider: string; warm: number[]; cold: number }>();
+    for (const s of all) {
+      const key = `${s.roomId}|${s.provider}`;
+      let g = groups.get(key);
+      if (!g) {
+        g = { roomId: s.roomId, provider: s.provider, warm: [], cold: 0 };
+        groups.set(key, g);
+      }
+      if (s.sessionCold) g.cold += 1;
+      else g.warm.push(s.latencyMs);
+    }
+
+    return {
+      target_ms: TTFAB_TARGET_MS,
+      since,
+      hours,
+      total: all.length,
+      truncated: all.length > samples.length,
+      samples: samples.map((s) => ({
+        at: s.at,
+        room_id: s.roomId,
+        device_id: s.deviceId,
+        provider: s.provider,
+        latency_ms: s.latencyMs,
+        since_turn_start_ms: s.sinceTurnStartMs,
+        provider_wait_ms: s.providerWaitMs,
+        session_cold: s.sessionCold,
+      })),
+      summary: [...groups.values()]
+        .sort((a, b) => a.roomId.localeCompare(b.roomId) || a.provider.localeCompare(b.provider))
+        .map((g) => {
+          const sorted = [...g.warm].sort((a, b) => a - b);
+          return {
+            room_id: g.roomId,
+            provider: g.provider,
+            count: sorted.length,
+            cold: g.cold,
+            p50_ms: percentile(sorted, 0.5),
+            p90_ms: percentile(sorted, 0.9),
+            max_ms: sorted.length ? sorted[sorted.length - 1]! : null,
+            over_target: sorted.filter((v) => v > TTFAB_TARGET_MS).length,
+          };
+        }),
+    };
+  }
+
+  private errors(query: URLSearchParams): unknown {
+    const limit = intParam(query, 'limit', 20, 1, 200);
+    return {
+      errors: this.deps.diagnostics.store.recentErrors(limit).map((e) => ({
+        id: e.id,
+        at: e.at,
+        level: e.level,
+        event: e.event,
+        room_id: e.roomId,
+        msg: e.msg,
+        detail: e.detail,
+      })),
+    };
+  }
+
+  /**
+   * Log ao vivo em Server-Sent Events: primeiro o que o buffer em memória tem
+   * e passa no filtro, depois cada linha nova. `?level=` (padrão `info`) e
+   * `?room=` filtram no servidor. Sem transcrição — ver `logTap.ts`.
+   */
+  private streamLogs(req: IncomingMessage, res: ServerResponse, url: string): void {
+    const query = new URL(url, 'http://admin.local').searchParams;
+    const level = query.get('level') ?? 'info';
+    if (!Object.hasOwn(LEVEL_VALUES, level)) {
+      send(res, 422, { error: 'nível desconhecido', field: 'level' });
+      return;
+    }
+    const room = query.get('room');
+    if (room !== null && room !== '' && !ROOM_ID_PATTERN.test(room)) {
+      send(res, 422, { error: 'room_id fora do formato', field: 'room' });
+      return;
+    }
+    if (this.deps.diagnostics.streamCount >= MAX_LOG_STREAMS) {
+      send(res, 429, { error: 'streams de log demais abertos' });
+      return;
+    }
+    const filter: LogFilter = { minLevel: level as LogLevelName, roomId: room || null };
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      connection: 'keep-alive',
+    });
+    // Meio-aberto (Wi-Fi caiu sem FIN) também precisa morrer: keepalive do TCP.
+    req.socket.setKeepAlive(true, SSE_HEARTBEAT_MS);
+    const push = (chunk: string): void => {
+      if (res.destroyed) return;
+      if (res.writableLength > SSE_MAX_BUFFERED_BYTES) {
+        res.destroy();
+        return;
+      }
+      res.write(chunk);
+    };
+    const write = (record: LogRecord): void => {
+      push(`id: ${record.seq}\ndata: ${JSON.stringify(logWire(record))}\n\n`);
+    };
+    for (const record of this.deps.diagnostics.recent(filter)) write(record);
+    push(': ok\n\n');
+
+    const unsubscribe = this.deps.diagnostics.onRecord((record) => {
+      if (matchesFilter(record, filter)) write(record);
+    });
+    const heartbeat = setInterval(() => push(': ping\n\n'), SSE_HEARTBEAT_MS);
+    heartbeat.unref();
+    const close = (): void => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    req.on('close', close);
+    res.on('close', close);
+  }
+
   // ─── Servidor ──────────────────────────────────────────────────────────
 
   private bootstrap(): unknown {
@@ -462,7 +945,195 @@ export class AdminApi {
       ws_auth_secret: { set: Boolean(config.wsAuthSecret), last4: null },
       admin_token: { set: Boolean(config.adminToken), last4: null },
       version: SERVER_VERSION,
+      release: releaseWire(),
     };
+  }
+
+  /**
+   * Backup para guardar fora do servidor (v2). **Sem segredo nenhum**: os
+   * campos de `SECRET_FIELDS` saem do arquivo, não mascarados — o arquivo vai
+   * parar num disco qualquer, e um `last4` ali não serve para nada. Leva a
+   * configuração de runtime e os lembretes vivos; não leva histórico,
+   * diagnóstico nem fala gravada.
+   */
+  private backup(): unknown {
+    const settings: Record<string, unknown> = {};
+    for (const group of GROUP_NAMES) {
+      const stored = { ...(toStored(group, this.deps.settings.get(group)) as Record<string, unknown>) };
+      for (const secret of SECRET_FIELDS[group] ?? []) delete stored[secret];
+      // `https://user:senha@host` também é segredo, mesmo fora dos SECRET_FIELDS.
+      if (typeof stored.url === 'string') stored.url = withoutUserinfo(stored.url);
+      // Bloqueio fica fora: restaurar um arquivo antigo desbloquearia o aparelho
+      // perdido sem aviso nenhum. Bloquear e desbloquear é só pela tela.
+      if (group === 'satellites') delete stored.blocked;
+      settings[group] = stored;
+    }
+    return {
+      format: BACKUP_FORMAT,
+      version: BACKUP_VERSION,
+      created_at: new Date(this.now()).toISOString(),
+      server_version: SERVER_VERSION,
+      release: releaseWire(),
+      settings,
+      reminders: this.deps.reminderStore.listLive().map((r) => ({
+        room_id: r.roomId,
+        label: r.label,
+        kind: r.kind,
+        due_at_utc: r.dueAtUtc,
+        local_hour: r.localHour,
+        local_minute: r.localMinute,
+        repeat_rule: r.repeatRule,
+      })),
+    };
+  }
+
+  /**
+   * Restaura um backup: `{ backup, reminders: "keep" | "replace" }`.
+   *
+   * Configuração: cada grupo do arquivo é aplicado como **patch** — segredo
+   * ausente mantém o gravado (a regra de sempre). Tudo é validado antes de
+   * gravar qualquer coisa: um grupo inválido recusa a restauração inteira,
+   * sem deixar meio aplicado. Isso inclui a regra de origem do HA: backup com
+   * outra URL de HA sem token é 422 no `ha.token`, como pela tela.
+   *
+   * Lembretes com `replace`: cancela os vivos e recria os do arquivo — único
+   * que já passou é pulado, recorrente ganha a próxima ocorrência de agora.
+   */
+  private restore(body: unknown): unknown {
+    const b = asRecord(body, 'body');
+    const backup = asRecord(b.backup, 'backup');
+    if (backup.format !== BACKUP_FORMAT) throw new HttpError(422, 'arquivo não é um backup da Luna', 'backup');
+    if (backup.version !== BACKUP_VERSION) throw new HttpError(422, `versão de backup ${String(backup.version)} desconhecida`, 'backup');
+    const mode = b.reminders ?? 'keep';
+    if (mode !== 'keep' && mode !== 'replace') throw new HttpError(422, '"reminders" deve ser keep ou replace', 'reminders');
+
+    const settings = asRecord(backup.settings ?? {}, 'settings');
+    const groups = GROUP_NAMES.filter((g) => settings[g] !== undefined);
+    // Segredo no arquivo (backup editado à mão, ou de outra ferramenta) não
+    // entra: restaurar não é caminho para trocar chave.
+    const patches = new Map<GroupName, Record<string, unknown>>();
+    const notApplied: string[] = [];
+    for (const group of groups) {
+      const patch = { ...asRecord(settings[group], `settings.${group}`) };
+      for (const secret of SECRET_FIELDS[group] ?? []) delete patch[secret];
+      if (group === 'satellites') delete patch.blocked;
+      // O token gravado só segue URL da mesma origem, e o arquivo não traz
+      // token: uma URL que mudou de host (HA trocou de IP, agenda desligada
+      // quando o backup foi feito) recusaria a restauração inteira. Pula só a
+      // URL e diz na resposta — o resto do grupo entra.
+      if ((group === 'ha' || group === 'calendar') && typeof patch.url === 'string') {
+        const current = this.deps.settings.get(group);
+        if (!sameOrigin(patch.url, current.url) && !(patch.url === '' && current.url === '')) {
+          delete patch.url;
+          notApplied.push(`${group}.url`);
+        }
+      }
+      try {
+        VALIDATORS[group](this.deps.settings.get(group) as never, patch);
+      } catch (err) {
+        if (err instanceof SettingsValidationError) {
+          throw new HttpError(422, `${group}: ${err.message}`, `${group}.${err.field}`);
+        }
+        throw err;
+      }
+      patches.set(group, patch);
+    }
+
+    const reminders = mode === 'replace' ? this.planReminders(backup.reminders) : null;
+
+    for (const [group, patch] of patches) this.deps.settings.update(group, patch);
+
+    let created = 0;
+    let cancelled = 0;
+    if (reminders) {
+      // O que toca agora fica: silenciar um alarme em curso não é o que
+      // "restaurar backup" promete.
+      for (const r of this.deps.reminderStore.listLive()) {
+        if (r.status !== 'armed') continue;
+        this.deps.cancelReminder(r);
+        cancelled += 1;
+        getLogger().info(
+          { event: 'reminder_cancelled', room_id: r.roomId, reminder_id: r.id, short_id: r.shortId, via: 'restore' },
+          `Lembrete ${r.shortId} cancelado pela restauração`,
+        );
+      }
+      for (const r of reminders.valid) {
+        const saved =
+          r.kind === 'once'
+            ? this.deps.reminderStore.insertOnce({ roomId: r.roomId, label: r.label, dueAtUtc: r.dueAtUtc! }, this.now())
+            : this.deps.reminderStore.insertRecurring(
+                { roomId: r.roomId, label: r.label, localHour: r.localHour!, localMinute: r.localMinute!, repeatRule: r.repeatRule!, nextDueUtc: r.nextDueUtc },
+                this.now(),
+              );
+        this.deps.onReminderSaved(saved, saved.label !== null);
+        getLogger().info(
+          { event: 'reminder_set', room_id: saved.roomId, reminder_id: saved.id, short_id: saved.shortId, kind: saved.kind, via: 'restore' },
+          `Lembrete ${saved.shortId} recriado pela restauração`,
+        );
+        created += 1;
+      }
+    }
+
+    getLogger().warn(
+      { event: 'admin_restore', groups: groups.join(','), reminders: mode, created, cancelled },
+      `Backup restaurado pelo painel (${groups.length} grupos, lembretes: ${mode})`,
+    );
+    return {
+      ok: true,
+      groups,
+      not_applied: notApplied,
+      reminders: { mode, cancelled, created, skipped: reminders?.skipped ?? 0 },
+    };
+  }
+
+  /** Valida os lembretes do arquivo antes de tocar em qualquer coisa. */
+  private planReminders(raw: unknown): {
+    valid: Array<{ roomId: string; label: string | null; kind: 'once' | 'recurring'; dueAtUtc: number | null; localHour: number | null; localMinute: number | null; repeatRule: RepeatRule | null; nextDueUtc: number }>;
+    skipped: number;
+  } {
+    if (!Array.isArray(raw)) throw new HttpError(422, '"reminders" do backup deve ser uma lista', 'backup.reminders');
+    const now = this.now();
+    const perRoom = new Map<string, number>();
+    const valid: ReturnType<AdminApi['planReminders']>['valid'] = [];
+    let skipped = 0;
+    raw.forEach((row, i) => {
+      const r = asRecord(row, `reminders[${i}]`);
+      const where = `backup.reminders[${i}]`;
+      if (typeof r.room_id !== 'string' || !ROOM_ID_PATTERN.test(r.room_id)) throw new HttpError(422, `${where}: sala inválida`, where);
+      const label = sanitizeLabel(typeof r.label === 'string' ? r.label : undefined);
+      if (label.ok === false) throw new HttpError(422, `${where}: ${label.error}`, where);
+      const count = perRoom.get(r.room_id) ?? 0;
+      if (count >= this.deps.config.reminderMaxPerRoom) {
+        skipped += 1;
+        return;
+      }
+      if (r.kind === 'once') {
+        if (typeof r.due_at_utc !== 'number' || !Number.isSafeInteger(r.due_at_utc)) {
+          throw new HttpError(422, `${where}: horário inválido`, where);
+        }
+        // Mesma janela do painel (`panelInput.ts`): já passou ou além de 30
+        // dias é pulado. Um instante absurdo no arquivo viraria `Invalid time
+        // value` em toda listagem de lembretes.
+        if (r.due_at_utc <= now + MIN_IN_SECONDS * 1000 || r.due_at_utc > now + MAX_IN_SECONDS * 1000) {
+          skipped += 1;
+          return;
+        }
+        valid.push({ roomId: r.room_id, label: label.value, kind: 'once', dueAtUtc: r.due_at_utc, localHour: null, localMinute: null, repeatRule: null, nextDueUtc: r.due_at_utc });
+      } else if (r.kind === 'recurring') {
+        const rules = ['daily', 'weekdays', 'weekend', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+        const h = r.local_hour;
+        const m = r.local_minute;
+        if (typeof r.repeat_rule !== 'string' || !rules.includes(r.repeat_rule) || !Number.isInteger(h) || !Number.isInteger(m) || (h as number) < 0 || (h as number) > 23 || (m as number) < 0 || (m as number) > 59) {
+          throw new HttpError(422, `${where}: recorrência inválida`, where);
+        }
+        const rule = r.repeat_rule as RepeatRule;
+        valid.push({ roomId: r.room_id, label: label.value, kind: 'recurring', dueAtUtc: null, localHour: h as number, localMinute: m as number, repeatRule: rule, nextDueUtc: nextOccurrenceAfter(rule, h as number, m as number, now) });
+      } else {
+        throw new HttpError(422, `${where}: tipo desconhecido`, where);
+      }
+      perRoom.set(r.room_id, count + 1);
+    });
+    return { valid, skipped };
   }
 
   private restart(): unknown {
@@ -471,6 +1142,64 @@ export class AdminApi {
     setTimeout(() => this.deps.onRestart(), 200).unref();
     return { restarting: true };
   }
+}
+
+function withoutUserinfo(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.username && !parsed.password) return url;
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString().replace(/\/$/, url.endsWith('/') ? '/' : '');
+  } catch {
+    return url;
+  }
+}
+
+function releaseWire(): { sha: string; deployed_at: string } | null {
+  return SERVER_RELEASE ? { sha: SERVER_RELEASE.sha, deployed_at: SERVER_RELEASE.deployedAt } : null;
+}
+
+function asRecord(value: unknown, name: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new HttpError(422, `"${name}" deve ser um objeto`, name);
+  }
+  return value as Record<string, unknown>;
+}
+
+function localWire(instantUtc: number): { local_date: string; local_time: string } {
+  const p = localDateTime(new Date(instantUtc));
+  const two = (n: number): string => String(n).padStart(2, '0');
+  return { local_date: `${p.year}-${two(p.month)}-${two(p.day)}`, local_time: `${two(p.hour)}:${two(p.minute)}` };
+}
+
+function logWire(record: LogRecord): unknown {
+  return {
+    seq: record.seq,
+    ts: record.ts,
+    level: record.level,
+    event: record.event,
+    room_id: record.roomId,
+    msg: record.msg,
+    fields: record.fields,
+  };
+}
+
+/** Percentil por posição, sobre uma lista já ordenada. `null` para lista vazia. */
+function percentile(sorted: number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  const index = Math.min(sorted.length - 1, Math.ceil(p * sorted.length) - 1);
+  return sorted[Math.max(0, index)]!;
+}
+
+function intParam(query: URLSearchParams, name: string, fallback: number, min: number, max: number): number {
+  const raw = query.get(name);
+  if (raw === null || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < min || value > max) {
+    throw new HttpError(422, `"${name}" deve ser inteiro entre ${min} e ${max}`, name);
+  }
+  return value;
 }
 
 function sameOrigin(a: string, b: string): boolean {
@@ -493,13 +1222,13 @@ function field(body: unknown, key: string): unknown {
   return (body as Record<string, unknown>)[key];
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'corpo grande demais');
+    if (size > limit) throw new HttpError(413, 'corpo grande demais');
     chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim();

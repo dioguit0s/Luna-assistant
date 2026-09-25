@@ -1,4 +1,4 @@
-import type { AppConfig, AudioProviderName } from '../config/env.js';
+import type { AppConfig, AudioProviderName, EndSensitivityName, OpenAIVadType } from '../config/env.js';
 import {
   serializeDeviceOverrides,
   validateDeviceOverrides,
@@ -25,6 +25,33 @@ export interface ProviderSettings {
 }
 
 /**
+ * Ajuste fino da conversa (v2, "Provedor de IA — avançado"): os botões de
+ * latência que antes só o `.env` mexia. Vale na próxima sessão do provider,
+ * exceto `userSilenceCutoffMs`, que o `Orchestrator` lê a cada turno.
+ */
+export interface VoiceSettings {
+  /** `null` = deixa o default do Gemini. */
+  geminiVadSilenceMs: number | null;
+  geminiVadEndSensitivity: EndSensitivityName | null;
+  /** `-1` automático, `0` desligado, `null` omite o campo. */
+  geminiThinkingBudget: number | null;
+  openaiVadType: OpenAIVadType;
+  openaiVadSilenceMs: number | null;
+  userSilenceCutoffMs: number;
+}
+
+/**
+ * Localização da casa para a previsão (v2). Coordenadas `null` desligam a tool
+ * `get_weather`. `city` é só rótulo: quem manda são as coordenadas, que o
+ * painel obtém por geocoding e o operador confirma.
+ */
+export interface WeatherSettings {
+  city: string;
+  latitude: number | null;
+  longitude: number | null;
+}
+
+/**
  * Conexão com o app de agendas. Só a conexão: as tools dependem do TODO da API
  * do app (ver `docs/painel-de-controle.md`).
  */
@@ -41,6 +68,12 @@ export interface RoomsSettings {
 export interface SatellitesSettings {
   /** `device_id` → nome amigável. */
   names: Record<string, string>;
+  /**
+   * `device_id`s recusados no handshake (aparelho perdido, v2). O segredo é um
+   * só para todos os satélites (HMAC por `device_id`), então bloquear é a
+   * única forma de cortar um aparelho sem trocar o segredo de todos.
+   */
+  blocked: string[];
 }
 
 export interface SettingsGroups {
@@ -50,6 +83,8 @@ export interface SettingsGroups {
   devices: DeviceOverrides;
   rooms: RoomsSettings;
   satellites: SatellitesSettings;
+  voice: VoiceSettings;
+  weather: WeatherSettings;
 }
 
 export type GroupName = keyof SettingsGroups;
@@ -61,6 +96,8 @@ export const GROUP_NAMES: readonly GroupName[] = [
   'devices',
   'rooms',
   'satellites',
+  'voice',
+  'weather',
 ];
 
 /** Erro de validação com o campo culpado — vira o 422 da API admin. */
@@ -106,6 +143,44 @@ function text(
     throw new SettingsValidationError(field, `"${field}" é longo demais.`);
   }
   return value;
+}
+
+/** Número opcional numa faixa; `null` explícito é permitido quando `nullable`. */
+function num(
+  patch: Record<string, unknown>,
+  field: string,
+  current: number | null,
+  opts: { min: number; max: number; integer?: boolean; nullable?: boolean },
+): number | null {
+  const raw = patch[field];
+  if (raw === undefined) return current;
+  if (raw === null) {
+    if (opts.nullable) return null;
+    throw new SettingsValidationError(field, `"${field}" é obrigatório.`);
+  }
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || (opts.integer && !Number.isInteger(raw))) {
+    throw new SettingsValidationError(field, `"${field}" deve ser ${opts.integer ? 'inteiro' : 'número'}.`);
+  }
+  if (raw < opts.min || raw > opts.max) {
+    throw new SettingsValidationError(field, `"${field}" deve ficar entre ${opts.min} e ${opts.max}.`);
+  }
+  return raw;
+}
+
+function oneOf<T extends string>(
+  patch: Record<string, unknown>,
+  field: string,
+  current: T | null,
+  values: readonly T[],
+  nullable: boolean,
+): T | null {
+  const raw = patch[field];
+  if (raw === undefined) return current;
+  if (raw === null && nullable) return null;
+  if (typeof raw !== 'string' || !(values as readonly string[]).includes(raw)) {
+    throw new SettingsValidationError(field, `"${field}" deve ser ${values.join(' ou ')}.`);
+  }
+  return raw as T;
 }
 
 /** Vazio é permitido (integração desligada); preenchido tem que ser http(s). */
@@ -230,18 +305,58 @@ export const VALIDATORS: { [G in GroupName]: Validator<G> } = {
     };
   },
 
+  // Faixas **iguais** às do `loadConfig` (`parseOptionalNumber`,
+  // `parseThinkingBudget`): o grupo nasce da semente do `.env`, e um valor que
+  // o `.env` aceitava e o validador recusasse derrubaria o primeiro boot desta
+  // versão num banco que já existe. Apertar aqui é apertar lá também.
+  voice: (current, raw) => {
+    const patch = asObject(raw, 'voice');
+    const ms = { min: 0, max: Number.MAX_SAFE_INTEGER };
+    return {
+      geminiVadSilenceMs: num(patch, 'geminiVadSilenceMs', current.geminiVadSilenceMs, { ...ms, nullable: true }),
+      geminiVadEndSensitivity: oneOf(patch, 'geminiVadEndSensitivity', current.geminiVadEndSensitivity, ['HIGH', 'LOW'] as const, true),
+      geminiThinkingBudget: num(patch, 'geminiThinkingBudget', current.geminiThinkingBudget, { min: -1, max: Number.MAX_SAFE_INTEGER, integer: true, nullable: true }),
+      openaiVadType: oneOf(patch, 'openaiVadType', current.openaiVadType, ['server_vad', 'semantic_vad'] as const, false)!,
+      openaiVadSilenceMs: num(patch, 'openaiVadSilenceMs', current.openaiVadSilenceMs, { ...ms, nullable: true }),
+      userSilenceCutoffMs: num(patch, 'userSilenceCutoffMs', current.userSilenceCutoffMs, ms)!,
+    };
+  },
+
+  weather: (current, raw) => {
+    const patch = asObject(raw, 'weather');
+    const latitude = num(patch, 'latitude', current.latitude, { min: -90, max: 90, nullable: true });
+    const longitude = num(patch, 'longitude', current.longitude, { min: -180, max: 180, nullable: true });
+    // Mesma regra do `loadConfig`: meia coordenada é previsão do lugar errado.
+    if ((latitude === null) !== (longitude === null)) {
+      throw new SettingsValidationError(latitude === null ? 'latitude' : 'longitude', 'Latitude e longitude vão juntas.');
+    }
+    const city = text(patch, 'city', current.city, { max: 120 });
+    return { city: latitude === null ? '' : city, latitude, longitude };
+  },
+
   satellites: (current, raw) => {
     const patch = asObject(raw, 'satellites');
-    if (patch.names === undefined) return current;
-    return {
-      names: stringMap(
-        patch.names,
-        'names',
-        (key) => key.length > 0 && key.length <= 128,
-        (value) => value.length > 0 && value.length <= 64,
-        'nome de 1 a 64 caracteres',
-      ),
-    };
+    // Campo a campo: um banco da v1 só tem `names`, e validar por cima da
+    // semente precisa manter o `blocked` vazio dela, não perder os nomes.
+    const names =
+      patch.names === undefined
+        ? current.names
+        : stringMap(
+            patch.names,
+            'names',
+            (key) => key.length > 0 && key.length <= 128,
+            (value) => value.length > 0 && value.length <= 64,
+            'nome de 1 a 64 caracteres',
+          );
+    let blocked = current.blocked ?? [];
+    if (patch.blocked !== undefined) {
+      if (!Array.isArray(patch.blocked) || patch.blocked.some((d) => typeof d !== 'string' || d.length === 0 || d.length > 128)) {
+        throw new SettingsValidationError('blocked', '"blocked" deve ser uma lista de device_id.');
+      }
+      if (patch.blocked.length > 256) throw new SettingsValidationError('blocked', 'satélites bloqueados demais.');
+      blocked = [...new Set(patch.blocked as string[])];
+    }
+    return { names, blocked };
   },
 };
 
@@ -277,7 +392,20 @@ export function seedFromConfig(
     calendar: { url: env.CALENDAR_URL?.trim() ?? '', token: env.CALENDAR_TOKEN?.trim() ?? '' },
     devices,
     rooms: { areas: {} },
-    satellites: { names: {} },
+    satellites: { names: {}, blocked: [] },
+    voice: {
+      geminiVadSilenceMs: base.geminiVadSilenceMs,
+      geminiVadEndSensitivity: base.geminiVadEndSensitivity,
+      geminiThinkingBudget: base.geminiThinkingBudget,
+      openaiVadType: base.openaiVadType,
+      openaiVadSilenceMs: base.openaiVadSilenceMs,
+      userSilenceCutoffMs: base.userSilenceCutoffMs,
+    },
+    weather: {
+      city: env.WEATHER_CITY?.trim() ?? '',
+      latitude: base.weatherLatitude,
+      longitude: base.weatherLongitude,
+    },
   };
 }
 
@@ -286,7 +414,7 @@ export function seedFromConfig(
  * delas **presente** no ambiente com valor diferente do banco gera o aviso
  * `config_env_ignored` — ausente não, senão todo campo com default avisaria.
  */
-export const ENV_SEEDS: ReadonlyArray<{ group: 'ha' | 'provider' | 'calendar'; field: string; env: string }> = [
+export const ENV_SEEDS: ReadonlyArray<{ group: 'ha' | 'provider' | 'calendar' | 'voice' | 'weather'; field: string; env: string }> = [
   { group: 'ha', field: 'url', env: 'HA_URL' },
   { group: 'ha', field: 'token', env: 'HA_TOKEN' },
   { group: 'provider', field: 'provider', env: 'AUDIO_PROVIDER' },
@@ -297,6 +425,14 @@ export const ENV_SEEDS: ReadonlyArray<{ group: 'ha' | 'provider' | 'calendar'; f
   { group: 'provider', field: 'openaiVoice', env: 'OPENAI_VOICE' },
   { group: 'calendar', field: 'url', env: 'CALENDAR_URL' },
   { group: 'calendar', field: 'token', env: 'CALENDAR_TOKEN' },
+  { group: 'voice', field: 'geminiVadSilenceMs', env: 'GEMINI_VAD_SILENCE_MS' },
+  { group: 'voice', field: 'geminiVadEndSensitivity', env: 'GEMINI_VAD_END_SENSITIVITY' },
+  { group: 'voice', field: 'geminiThinkingBudget', env: 'GEMINI_THINKING_BUDGET' },
+  { group: 'voice', field: 'openaiVadType', env: 'OPENAI_VAD_TYPE' },
+  { group: 'voice', field: 'openaiVadSilenceMs', env: 'OPENAI_VAD_SILENCE_MS' },
+  { group: 'voice', field: 'userSilenceCutoffMs', env: 'USER_SILENCE_CUTOFF_MS' },
+  { group: 'weather', field: 'latitude', env: 'WEATHER_LATITUDE' },
+  { group: 'weather', field: 'longitude', env: 'WEATHER_LONGITUDE' },
 ];
 
 /** Campos que a API admin nunca devolve (ADR 010, decisão 4). */

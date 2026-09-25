@@ -1,0 +1,192 @@
+import { LEVEL_VALUES, subscribeLogs, type LogLevelName, type LogRecord } from '../logging/logTap.js';
+import type { DiagnosticsStore, ReminderEventKind } from './DiagnosticsStore.js';
+
+/**
+ * Diagnóstico do painel (v2), alimentado só pelo log (`logTap.ts`) — nenhum
+ * ponto de negócio sabe que ele existe:
+ *
+ * - `event: 'ttfab'` vira amostra na série de latência;
+ * - `error`/`fatal`, e os `warn` de dependência externa que falhou, viram
+ *   entrada em "últimos erros";
+ * - tudo entra num buffer circular em memória, que é o "passado recente" do
+ *   log ao vivo quando o painel abre o stream.
+ *
+ * **Nada disto roda dentro da chamada de log.** O `ttfab` é logado no meio de
+ * `onAudioResponse`, antes de o primeiro chunk sair para o satélite: um
+ * `INSERT` síncrono ali somaria ao atraso real sem aparecer na métrica, que já
+ * foi tirada. O tap só enfileira; o SQLite e o SSE rodam num `setImmediate`, e
+ * a poda num timer de hora em hora.
+ */
+
+/** `warn` que o painel trata como erro: HA, provider, clima ou lembrete que falhou. */
+const WARN_AS_ERROR = new Set([
+  'ha_verify',
+  'ha_get_state',
+  'ha_list_entities',
+  'ha_not_configured',
+  'device_registry_refresh',
+  'weather_fetch',
+  'weather_refresh',
+  'gemini_session_closed',
+  'reminder_missed',
+  'alarm_missed',
+  'speaking_watchdog',
+]);
+
+/**
+ * Evento de log → entrada no histórico de lembretes. Todos saem em `info` ou
+ * `warn`: com `LOG_LEVEL` acima de `info` o histórico para de crescer (o
+ * lembrete em si não é afetado — o histórico é só leitura para o painel).
+ */
+const REMINDER_EVENTS: Record<string, ReminderEventKind> = {
+  reminder_set: 'created',
+  reminder_edited: 'edited',
+  reminder_fired: 'fired',
+  alarm_dismissed: 'dismissed',
+  alarm_snoozed: 'snoozed',
+  alarm_exhausted: 'exhausted',
+  alarm_missed: 'missed',
+  reminder_missed: 'missed',
+  reminder_cancelled: 'cancelled',
+};
+
+export const LIVE_BUFFER_SIZE = 500;
+const PRUNE_INTERVAL_MS = 60 * 60 * 1000;
+/** Rajada de log com o event loop travado: acima disto, descarta o excedente. */
+const MAX_PENDING = 2000;
+
+export interface LogFilter {
+  minLevel: LogLevelName;
+  roomId: string | null;
+}
+
+export function matchesFilter(record: LogRecord, filter: LogFilter): boolean {
+  if (record.levelValue < LEVEL_VALUES[filter.minLevel]) return false;
+  if (filter.roomId !== null && record.roomId !== filter.roomId) return false;
+  return true;
+}
+
+export class Diagnostics {
+  private readonly buffer: LogRecord[] = [];
+  private readonly listeners = new Set<(record: LogRecord) => void>();
+  private unsubscribe: (() => void) | null = null;
+  private pending: LogRecord[] = [];
+  private flushScheduled = false;
+  private pruneTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(readonly store: DiagnosticsStore) {}
+
+  start(): void {
+    if (this.unsubscribe) return;
+    this.unsubscribe = subscribeLogs((record) => this.enqueue(record));
+    this.safePrune();
+    this.pruneTimer = setInterval(() => this.safePrune(), PRUNE_INTERVAL_MS);
+    this.pruneTimer.unref();
+  }
+
+  stop(): void {
+    this.unsubscribe?.();
+    this.unsubscribe = null;
+    if (this.pruneTimer) clearInterval(this.pruneTimer);
+    this.pruneTimer = null;
+    this.pending = [];
+    this.listeners.clear();
+  }
+
+  private enqueue(record: LogRecord): void {
+    if (this.pending.length >= MAX_PENDING) return;
+    this.pending.push(record);
+    if (this.flushScheduled) return;
+    this.flushScheduled = true;
+    setImmediate(() => {
+      this.flushScheduled = false;
+      const batch = this.pending;
+      this.pending = [];
+      for (const r of batch) this.ingest(r);
+    });
+  }
+
+  private safePrune(): void {
+    try {
+      this.store.prune();
+    } catch {
+      // best effort, como o resto do diagnóstico
+    }
+  }
+
+  /** Síncrono. Em produção roda fora da chamada de log (ver `enqueue`); os testes chamam direto. */
+  ingest(record: LogRecord): void {
+    this.buffer.push(record);
+    if (this.buffer.length > LIVE_BUFFER_SIZE) this.buffer.shift();
+
+    // Falha de SQLite aqui não pode virar log de erro: o tap descarta
+    // reentrância, então logar seria só perder a linha. Engolir é o certo — o
+    // diagnóstico é best effort, o log em si já saiu.
+    try {
+      if (record.event === 'ttfab') this.recordLatency(record);
+      if (record.event !== null && Object.hasOwn(REMINDER_EVENTS, record.event)) this.recordReminderEvent(record);
+      if (record.levelValue >= LEVEL_VALUES.error || (record.event !== null && record.levelValue >= LEVEL_VALUES.warn && WARN_AS_ERROR.has(record.event))) {
+        this.store.insertError({
+          at: record.ts,
+          level: record.level,
+          event: record.event,
+          roomId: record.roomId,
+          msg: record.msg,
+          detail: Object.keys(record.fields).length > 0 ? record.fields : null,
+        });
+      }
+    } catch {
+      // ver acima
+    }
+
+    for (const listener of this.listeners) {
+      try {
+        listener(record);
+      } catch {
+        // um stream quebrado não afeta os outros
+      }
+    }
+  }
+
+  /** O que o buffer tem e passa no filtro, mais antigo primeiro. */
+  recent(filter: LogFilter, limit = 200): LogRecord[] {
+    const matching = this.buffer.filter((r) => matchesFilter(r, filter));
+    return matching.slice(-limit);
+  }
+
+  onRecord(listener: (record: LogRecord) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  get streamCount(): number {
+    return this.listeners.size;
+  }
+
+  private recordReminderEvent(record: LogRecord): void {
+    const id = record.fields.reminder_id;
+    if (typeof id !== 'number') return;
+    this.store.insertReminderEvent({
+      at: record.ts,
+      reminderId: id,
+      kind: REMINDER_EVENTS[record.event!]!,
+      roomId: record.roomId,
+      via: typeof record.fields.via === 'string' ? record.fields.via : null,
+    });
+  }
+
+  private recordLatency(record: LogRecord): void {
+    const f = record.fields;
+    if (typeof f.latency_ms !== 'number' || record.roomId === null) return;
+    this.store.insertLatency({
+      at: record.ts,
+      roomId: record.roomId,
+      deviceId: typeof f.device_id === 'string' ? f.device_id : null,
+      provider: typeof f.provider === 'string' ? f.provider : 'desconhecido',
+      latencyMs: f.latency_ms,
+      sinceTurnStartMs: typeof f.since_turn_start_ms === 'number' ? f.since_turn_start_ms : null,
+      providerWaitMs: typeof f.provider_wait_ms === 'number' ? f.provider_wait_ms : null,
+      sessionCold: f.session_cold === true,
+    });
+  }
+}

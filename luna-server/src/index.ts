@@ -16,6 +16,8 @@ import { nextDueAfter } from './reminders/recurrence.js';
 import { SettingsStore } from './settings/SettingsStore.js';
 import { RuntimeSettings } from './settings/RuntimeSettings.js';
 import { AdminApi } from './admin/AdminApi.js';
+import { DiagnosticsStore } from './diagnostics/DiagnosticsStore.js';
+import { Diagnostics } from './diagnostics/Diagnostics.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -74,6 +76,11 @@ async function main(): Promise<void> {
     () => loadDeviceOverrides(config.devicesConfigPath),
   );
 
+  // Diagnóstico do painel: ouve o log a partir daqui, então o que foi logado
+  // antes (abertura do banco) fica só no journal.
+  const diagnostics = new Diagnostics(new DiagnosticsStore(reminderStore.sharedDatabase()));
+  diagnostics.start();
+
   const ringBuffer = new ConversationRingBuffer();
   // Função, não o objeto: cada sessão nova lê o provider/modelo/voz do
   // momento — a troca pelo painel vale "na próxima conversa".
@@ -96,21 +103,28 @@ async function main(): Promise<void> {
   });
   settings.onChange('devices', (overrides) => deviceRegistry.setOverrides(overrides));
   settings.onChange('rooms', (rooms) => deviceRegistry.setRoomAreas(rooms.areas));
+  // Mesmo papel do `server_start` abaixo: os `ttfab` seguintes dizem sob qual
+  // VAD/thinking foram medidos. Sem segredo neste grupo.
+  settings.onChange('voice', (voice) =>
+    getLogger().info({ event: 'config_voice', ...voice }, 'Ajuste fino de voz alterado pelo painel'),
+  );
   // Descobre os dispositivos antes de aceitar conexões; se o HA não responder,
   // sobe com os overrides e o refresh por TTL recupera depois.
   await deviceRegistry.start();
 
-  // `null` nos dois — a validação cruzada em `loadConfig` garante que não vêm
-  // meio configurados — desliga a tool inteira: nem client nem cache nascem, e
-  // `RoomManager`/`Orchestrator` tratam `weatherSource: null` como "sem tempo".
-  let weatherSource: WeatherSource | null = null;
-  if (config.weatherLatitude !== null && config.weatherLongitude !== null) {
-    const openMeteoClient = new OpenMeteoClient(config.weatherLatitude, config.weatherLongitude);
-    weatherSource = new WeatherSource(openMeteoClient, config.weatherTtlMs, config.weatherMaxStaleMs);
-    // Mesma ordem do registro de dispositivos: busca antes de aceitar conexões,
-    // para que a primeira pergunta sobre o tempo não caia em cache frio.
-    await weatherSource.start();
-  }
+  // Localização vem do grupo `weather` do banco (painel v2). O source existe
+  // sempre, com client `null` quando não há coordenadas: trocar a cidade pelo
+  // painel troca o client na hora. Quem liga ou desliga a TOOL é o
+  // `RoomManager`, pela `settings.current()` de cada sessão nova.
+  const weatherClient = (): OpenMeteoClient | null => {
+    const { latitude, longitude } = settings.get('weather');
+    return latitude !== null && longitude !== null ? new OpenMeteoClient(latitude, longitude) : null;
+  };
+  const weatherSource = new WeatherSource(weatherClient(), config.weatherTtlMs, config.weatherMaxStaleMs);
+  // Mesma ordem do registro de dispositivos: busca antes de aceitar conexões,
+  // para que a primeira pergunta sobre o tempo não caia em cache frio.
+  await weatherSource.start();
+  settings.onChange('weather', () => weatherSource.setClient(weatherClient()));
 
   // O ReminderScheduler só pode nascer depois do WsServer estar construído: o
   // onFire precisa do ciclo de toque que vive no Orchestrator lá dentro, e o
@@ -151,6 +165,8 @@ async function main(): Promise<void> {
 
   wsServer.setReminderScheduler(reminderScheduler);
   wsServer.setProviderNameSource(() => settings.current().audioProvider);
+  wsServer.setRuntimeConfigSource(() => settings.current());
+  wsServer.setBlockedSource((deviceId) => settings.get('satellites').blocked.includes(deviceId));
 
   // `shutdown` só existe mais abaixo; o reinício pelo painel chega por aqui.
   let requestRestart: () => void = () => {};
@@ -169,7 +185,15 @@ async function main(): Promise<void> {
         alarmRinger.dismissByShortId(reminder.shortId);
         reminderScheduler.reschedule();
       },
+      onReminderSaved: (reminder, labelChanged) => {
+        reminderScheduler.reschedule();
+        if (!labelChanged) return;
+        if (reminder.label) wsServer.requestReminderPrerender(reminder.roomId, reminder.id, reminder.label);
+        else wsServer.cancelReminderPrerender(reminder.id);
+      },
       weatherSource,
+      diagnostics,
+      disconnectSatellite: (deviceId) => wsServer.disconnectDevice(deviceId, 'desconectado pelo painel'),
       onRestart: () => requestRestart(),
     }).handle,
   );
@@ -194,8 +218,8 @@ async function main(): Promise<void> {
       port: config.wsPort,
       devices: deviceRegistry.current().size,
       model: settings.current().geminiLiveModel,
-      vad_silence_ms: config.geminiVadSilenceMs,
-      thinking_budget: config.geminiThinkingBudget,
+      vad_silence_ms: settings.current().geminiVadSilenceMs,
+      thinking_budget: settings.current().geminiThinkingBudget,
       event: 'server_start',
     },
     'Luna Server iniciado',
@@ -223,9 +247,10 @@ async function main(): Promise<void> {
     }, SHUTDOWN_TIMEOUT_MS);
     forceExit.unref();
 
+    diagnostics.stop();
     await wsServer.stop();
     deviceRegistry.stop();
-    weatherSource?.stop();
+    weatherSource.stop();
     reminderScheduler.stop();
     // Antes do `reminderStore.close()`, e depois do scheduler: fechar um ciclo
     // de toque ESCREVE no banco (devolve o lembrete a `armed` ou o marca

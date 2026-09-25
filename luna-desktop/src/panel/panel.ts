@@ -156,11 +156,33 @@ function formatAgo(ts: number | null): string {
   return `HÁ ${Math.floor(s / 86400)}D`;
 }
 
+/**
+ * Hora de parede de São Paulo, o relógio único da Luna (ADR 006) — não o fuso
+ * do Windows onde o painel roda. Um computador em outro fuso mostraria (e,
+ * pior, devolveria ao editar) horários deslocados.
+ */
+const spFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Sao_Paulo',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+function spParts(ts: number): { year: string; month: string; day: string; hour: string; minute: string; second: string } {
+  const out: Record<string, string> = {};
+  for (const part of spFormatter.formatToParts(new Date(ts))) out[part.type] = part.value;
+  return out as ReturnType<typeof spParts>;
+}
+
 /** `25.09 06:30` */
 function formatStamp(ts: number | null): string {
   if (!ts) return '—';
-  const d = new Date(ts);
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const p = spParts(ts);
+  return `${p.day}.${p.month} ${p.hour}:${p.minute}`;
 }
 
 /** `04D 11H 23M` */
@@ -467,8 +489,10 @@ function paintCore(): void {
 
 function paintClock(): void {
   const now = new Date();
-  $('date').textContent = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}`;
-  $('clock').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  // Mesmo relógio dos lembretes: São Paulo, não o fuso do Windows.
+  const sp = spParts(now.getTime());
+  $('date').textContent = `${sp.day}.${sp.month}.${sp.year}`;
+  $('clock').textContent = `${sp.hour}:${sp.minute}:${sp.second}`;
   $('uptime').textContent =
     core.status && core.link !== 'offline' && core.link !== 'restarting'
       ? formatUptime(core.status.uptime_s + Math.floor((Date.now() - core.statusAt) / 1000))
@@ -522,8 +546,15 @@ function buildNoSignal(): void {
 let local: any = null;
 let micLevel = 0;
 
+/** Linha "EM VIGOR" da sensibilidade: repintada a cada evento `local` (o `ready` do sidecar reiniciado). */
+function wakeActiveText(view: any): string {
+  return `EM VIGOR: ${view?.wakeThresholdActive != null ? view.wakeThresholdActive.toFixed(2) : '—'} · MAIS BAIXO ACORDA MAIS FÁCIL, E ACORDA SEM QUERER`;
+}
+
 function paintLocal(): void {
   if (!local) return;
+  const active = document.getElementById('wake-active');
+  if (active) active.textContent = wakeActiveText(local);
   $('cmd-meta').textContent = `NÚCLEO ${hostOf(local.serverUrl).toUpperCase()} · OPERADOR ÚNICO`;
   paintVoice();
 }
@@ -588,6 +619,8 @@ interface Page {
   render(root: HTMLElement): Promise<void>;
   /** Recarrega sozinho enquanto a página está aberta. */
   pollMs?: number;
+  /** Saindo da página: solta o que ela segura aberto (o stream de log). */
+  leave?(): void;
 }
 
 const pages: Page[] = [];
@@ -606,6 +639,7 @@ function setMeta(text: string, raw = false): void {
 async function show(id: string): Promise<void> {
   const page = pages.find((p) => p.id === id) ?? pages[0]!;
   const changed = page !== currentPage;
+  if (changed) currentPage?.leave?.();
   currentPage = page;
   if (location.hash !== `#${page.id}`) history.replaceState(null, '', `#${page.id}`);
   const index = pages.indexOf(page);
@@ -615,6 +649,8 @@ async function show(id: string): Promise<void> {
     pendingConfirm = null;
     pendingEscape = null;
     confirmingReminder = null;
+    confirmingBlock = null;
+    restoreState.confirming = false;
     if (restart.phase === 'confirm') restart.phase = 'idle';
     typeInto($('screen-title'), page.title, { cps: 45, cursor: 'hi' });
     setMeta('');
@@ -682,10 +718,11 @@ pages.push({
   title: 'VISÃO GERAL DO SISTEMA',
   pollMs: 5000,
   async render(root) {
-    const [statusRes, satsRes, providerRes] = await Promise.all([
+    const [statusRes, satsRes, providerRes, errorsRes] = await Promise.all([
       window.panel.call('server.status'),
       window.panel.call('server.satellites'),
       window.panel.call('server.settings', 'provider'),
+      window.panel.call('server.errors', 5),
     ]);
     setMeta('RESUMO DO NÚCLEO E ENLACES');
     if (!statusRes.ok) return serverUnavailable(root, statusRes);
@@ -778,7 +815,22 @@ pages.push({
       next.length === 0 ? h('div', {}, 'NENHUM EVENTO AGENDADO. A TRIPULAÇÃO ESTÁ LIVRE.') : null,
     );
 
-    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)' }, nucleus, links, satellites, events));
+    // Servidor antigo (sem a rota) não quebra a tela: o quadro só não aparece.
+    const recentErrors = errorsRes.ok ? (errorsRes.body.errors as any[]) : null;
+    const errCols = '100px 190px minmax(0,1fr)';
+    const errorsFrame = recentErrors
+      ? frame(
+          'ÚLTIMOS ERROS',
+          { tone: recentErrors.length ? 'warn' : undefined, style: 'grid-column:1 / -1;gap:0' },
+          ...recentErrors.map((e) =>
+            grid(errCols, { class: 'tbl-row' }, h('span', { class: 'amber' }, formatStamp(e.at)), h('span', { class: 'raw ellipsis' }, e.event ?? '—'), h('span', { class: 'raw ellipsis', title: e.msg }, `${e.room_id ? `${e.room_id} · ` : ''}${e.msg}`)),
+          ),
+          recentErrors.length === 0 ? h('div', {}, 'NENHUM ERRO REGISTRADO.') : null,
+          recentErrors.length ? h('div', { class: 'row', style: 'padding-top:6px' }, h('span', { class: 'spacer' }), cmd('ABRIR DIAGNÓSTICO', () => void show('diagnostics'), { tone: 'quiet' })) : null,
+        )
+      : null;
+
+    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1.3fr)' }, nucleus, links, satellites, events, errorsFrame));
   },
 });
 
@@ -786,6 +838,8 @@ pages.push({
 
 let selectedSatellite: string | null = null;
 let editingSatellite: string | null = null;
+/** `device_id` com o S/N de bloqueio aberto. */
+let confirmingBlock: string | null = null;
 
 pages.push({
   id: 'satellites',
@@ -860,7 +914,7 @@ pages.push({
         h('span', { class: 'raw nowrap ellipsis' }, `${selected ? '►' : ' '} ${s.device_id}`),
         nameCell,
         h('span', { class: 'ellipsis' }, s.room_id ?? '—'),
-        h('span', { class: s.online ? 'hi' : 'fg' }, s.online ? '▣ ONLINE' : '— OFFLINE'),
+        h('span', { class: s.blocked ? 'amber' : s.online ? 'hi' : 'fg' }, s.blocked ? '⊘ BLOQUEADO' : s.online ? '▣ ONLINE' : '— OFFLINE'),
         h('span', {}, s.online ? formatStamp(s.connected_since) : '—'),
         h('span', {}, formatAgo(s.last_seen_at)),
       );
@@ -882,13 +936,40 @@ pages.push({
 
     const sel = sats.find((s) => s.device_id === selectedSatellite)!;
     const future = (label: string): HTMLElement => grid('96px 1fr', { class: 'grid dim', style: 'align-items:start' }, h('span', {}, label), h('span', {}, 'INDISPONÍVEL NESTA VERSÃO'));
+    // Bloquear pede S/N: corta o aparelho até alguém desbloquear aqui.
+    const blockControls: HTMLElement = (() => {
+      if (sel.blocked) {
+        return cmd('DESBLOQUEAR', async () => {
+          if (await run(`DESBLOQUEAR ${sel.device_id}`, 'server.blockSatellite', sel.device_id, false)) void renderCurrent();
+        }, { first: true });
+      }
+      if (confirmingBlock === sel.device_id) {
+        return confirmLine(
+          'BLOQUEAR ESTE SATÉLITE? (S/N)',
+          { yes: '[ S ]', no: '[ N ]' },
+          async () => {
+            confirmingBlock = null;
+            await run(`BLOQUEAR ${sel.device_id} · CONEXÃO DERRUBADA`, 'server.blockSatellite', sel.device_id, true);
+            void renderCurrent();
+          },
+          () => {
+            confirmingBlock = null;
+            void renderCurrent();
+          },
+        );
+      }
+      return cmd('BLOQUEAR', () => {
+        confirmingBlock = sel.device_id;
+        void renderCurrent();
+      }, { tone: 'amber', first: true });
+    })();
     const detail = frame(
       'DETALHE',
       { style: 'width:260px;flex-shrink:0;align-self:flex-start;margin-top:8px;gap:8px' },
       h('div', { class: 'display', style: 'font-size:26px;letter-spacing:.06em' }, sel.name ?? '— SEM NOME —'),
       kv('DEVICE_ID', h('span', { class: 'raw' }, sel.device_id)),
       kv('SALA', sel.room_id ?? '—'),
-      kv('ESTADO', sel.online ? '▣ ONLINE' : '— OFFLINE', sel.online ? '' : 'fg'),
+      kv('ESTADO', sel.blocked ? '⊘ BLOQUEADO' : sel.online ? '▣ ONLINE' : '— OFFLINE', sel.blocked ? 'amber' : sel.online ? '' : 'fg'),
       kv('CONECTADO DESDE', sel.online ? formatStamp(sel.connected_since) : '—'),
       kv('ÚLTIMO SINAL', formatAgo(sel.last_seen_at)),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── RECURSOS FUTUROS ──────────'),
@@ -896,6 +977,18 @@ pages.push({
       future('IP'),
       future('SINAL WI-FI'),
       cmd('IDENTIFICAR', () => undefined, { disabled: true, first: true }),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, '── ACESSO ─────────────────────'),
+      h(
+        'div',
+        { style: 'display:flex;flex-direction:column;gap:6px;align-items:flex-start' },
+        cmd('DESCONECTAR', async () => {
+          const body = await run(`DESCONECTAR ${sel.device_id}`, 'server.disconnectSatellite', sel.device_id);
+          if (body && body.closed === 0) say(`DESCONECTAR ${sel.device_id} ... NENHUMA CONEXÃO ABERTA`, 'warn');
+          void renderCurrent();
+        }, { disabled: !sel.online || sel.blocked, first: true }),
+        blockControls,
+        h('span', { class: 'small', style: 'line-height:1.6' }, sel.blocked ? 'RECUSADO NO HANDSHAKE ATÉ DESBLOQUEAR.' : 'DESCONECTAR: ELE RECONECTA SOZINHO. BLOQUEAR: APARELHO PERDIDO.'),
+      ),
     );
 
     root.append(h('div', { style: 'display:flex;gap:18px;flex:1;min-height:0' }, table, detail));
@@ -920,6 +1013,8 @@ function emptyReport(kicker: string, headline: string, hint: string): HTMLElemen
 
 let selectedRoom: string | null = null;
 let aliasTarget: string | null = null;
+/** Formulário de dispositivo manual aberto (só um por vez). */
+let manualDraft: { device: string; entity_id: string; name: string; error: string | null } | null = null;
 let mapTimer: ReturnType<typeof setTimeout> | null = null;
 
 pages.push({
@@ -932,6 +1027,9 @@ pages.push({
     if (!roomsRes.ok) return serverUnavailable(root, roomsRes);
     const { rooms: all, ha_areas: haAreas } = roomsRes.body as { rooms: any[]; ha_areas: string[] };
     const aliases: Record<string, string> = devicesRes.ok ? { ...(devicesRes.body.aliases ?? {}) } : {};
+    const exclude: string[] = devicesRes.ok ? [...(devicesRes.body.exclude ?? [])] : [];
+    const manual: any[] = devicesRes.ok ? [...(devicesRes.body.devices ?? [])] : [];
+    const haEntities: any[] = devicesRes.ok ? devicesRes.body.ha_entities ?? [] : [];
 
     // "Salas da Luna": onde há satélite ou mapeamento. Área do HA que nenhuma
     // delas usa é órfã — a Luna só a alcança de um satélite dentro dela.
@@ -960,6 +1058,7 @@ pages.push({
             onclick: () => {
               selectedRoom = r.room_id;
               aliasTarget = null;
+              manualDraft = null;
               void renderCurrent();
             },
           },
@@ -1022,11 +1121,35 @@ pages.push({
     const saveAliases = async (next: Record<string, string>, label: string): Promise<void> => {
       if (await run(label, 'server.saveAliases', next)) void renderCurrent();
     };
-    const devCols = '110px 240px minmax(0,1fr)';
+    const saveDevices = async (patch: Record<string, unknown>, label: string): Promise<void> => {
+      if (await run(label, 'server.saveDevices', patch)) void renderCurrent();
+    };
+    const testDevice = async (entityId: string, action: 'on' | 'off'): Promise<void> => {
+      const result = await window.panel.call('server.testDevice', entityId, action);
+      const verb = action === 'on' ? 'LIGAR' : 'DESLIGAR';
+      if (!result.ok) say(`TESTE ${verb} ${entityId} ... FALHA: ${errorOf(result)}`, 'warn');
+      else if (!result.body.ok) say(`TESTE ${verb} ${entityId} ... HA RECUSOU: ${String(result.body.error ?? '').toUpperCase()}`, 'warn');
+      else say(`TESTE ${verb} ${entityId} ... OK ${result.body.latency_ms}MS`);
+    };
+    const testable = (entityId: string): boolean => /^(switch|light|fan)\./.test(entityId);
+    const devCols = '110px 220px minmax(0,1fr) 170px';
     const devices = frame(
       'O QUE A LUNA ENXERGA AQUI',
       { style: 'gap:0' },
-      grid(devCols, { class: 'tbl-head' }, h('span', {}, 'TIPO'), h('span', {}, 'DISPOSITIVO / ENTITY_ID'), h('span', {}, 'APELIDOS')),
+      h(
+        'div',
+        { class: 'row small', style: 'gap:10px;padding-bottom:8px' },
+        h('span', {}, devicesRes.ok && devicesRes.body.refreshed_at ? `DESCOBERTA ${devicesRes.body.refresh_ok === false ? '◈ FALHOU' : 'OK'} · ${formatAgo(devicesRes.body.refreshed_at)}` : 'DESCOBERTA: AINDA NÃO RODOU'),
+        h('span', { class: 'spacer' }),
+        cmd('ATUALIZAR DO HA', async () => {
+          const body = await run('ATUALIZAR REGISTRO DO HA', 'server.refreshDevices');
+          if (body) {
+            say(body.ok ? `ATUALIZAR REGISTRO DO HA ... OK · ${body.count} DISPOSITIVOS` : 'ATUALIZAR REGISTRO DO HA ... HA NÃO RESPONDEU', body.ok ? 'ok' : 'warn');
+            void renderCurrent();
+          }
+        }, { tone: 'quiet' }),
+      ),
+      grid(devCols, { class: 'tbl-head' }, h('span', {}, 'TIPO'), h('span', {}, 'DISPOSITIVO / ENTITY_ID'), h('span', {}, 'APELIDOS'), h('span', {}, 'TESTAR')),
       ...(room.devices as any[]).map((d) => {
         const domain = String(d.entity_id).split('.')[0] ?? '';
         const chips = Object.entries(aliases)
@@ -1086,9 +1209,105 @@ pages.push({
           h('span', {}, DOMAIN_LABELS[domain] ?? domain.toUpperCase()),
           h('div', { style: 'display:flex;flex-direction:column;gap:2px;min-width:0' }, h('span', { class: 'hi ellipsis' }, d.name ?? d.device), h('span', { class: 'raw small ellipsis' }, d.entity_id)),
           h('div', { class: 'chips' }, ...chips, adder),
+          h(
+            'div',
+            { style: 'display:flex;gap:2px;justify-self:end;flex-wrap:wrap' },
+            testable(d.entity_id) ? cmd('ON', () => void testDevice(d.entity_id, 'on'), { tone: 'quiet', ariaLabel: `Ligar ${d.entity_id}` }) : null,
+            testable(d.entity_id) ? cmd('OFF', () => void testDevice(d.entity_id, 'off'), { tone: 'quiet', ariaLabel: `Desligar ${d.entity_id}` }) : null,
+            cmd('OCULTAR', () => void saveDevices({ exclude: [...exclude, d.entity_id] }, `OCULTAR ${d.entity_id} DA LUNA`), { tone: 'quiet', ariaLabel: `Ocultar ${d.entity_id} da Luna` }),
+          ),
         );
       }),
       room.devices.length === 0 ? h('div', { class: 'amber', style: 'padding:14px 0 6px' }, 'NENHUM DISPOSITIVO VISÍVEL. SEM ÁREA, SEM INVENTÁRIO.') : null,
+    );
+
+    // Ocultos: o que o HA tem mas a Luna não pode acionar. Vale para todas as
+    // salas — o `exclude` é global.
+    // Mesma normalização do `DeviceRegistry`: caixa e espaço não separam nada.
+    const norm = (v: string): string => String(v ?? '').trim().toLowerCase();
+    const hidden = exclude.map((entityId) => ({ entityId, info: haEntities.find((e) => norm(e.entity_id) === norm(entityId)) ?? manual.find((m) => norm(m.entity_id) === norm(entityId)) }));
+    const hiddenFrame = frame(
+      'OCULTOS DA LUNA // TODAS AS SALAS',
+      { tone: 'muted', style: 'gap:0' },
+      ...hidden.map(({ entityId, info }) =>
+        grid(
+          '1fr 150px 110px',
+          { class: 'tbl-row dotted', style: 'padding:4px 0' },
+          h('span', { class: 'raw ellipsis' }, entityId, info?.name ? h('span', { class: 'fg' }, `  ${info.name}`) : null),
+          h('span', { class: 'ellipsis' }, info?.room_id ?? '— FORA DO HA —'),
+          cmd('MOSTRAR', () => void saveDevices({ exclude: exclude.filter((e) => e !== entityId) }, `MOSTRAR ${entityId} PARA A LUNA`), { tone: 'quiet' }),
+        ),
+      ),
+      hidden.length === 0 ? h('div', { style: 'padding:6px 0' }, 'NENHUM. A LUNA ENXERGA TUDO QUE O HA DESCOBRIU.') : null,
+    );
+
+    // Manuais: para o que não está em nenhuma área do HA. O registro resolve
+    // pela área efetiva (`areaFor`), então é nela que a entrada nasce — gravar
+    // `desktop_diogo` numa sala mapeada para `escritorio` a deixaria inalcançável.
+    const manualArea: string = room.effective_area ?? room.room_id;
+    const manualHere = manual.filter((m) => norm(m.room_id) === norm(manualArea));
+    let manualForm: HTMLElement | null = null;
+    if (manualDraft) {
+      const draft = manualDraft;
+      const mk = (key: 'device' | 'entity_id' | 'name', placeholder: string): HTMLInputElement => {
+        const input = lineInput(draft[key], { placeholder, 'aria-label': placeholder, maxLength: 128 });
+        input.addEventListener('input', () => (draft[key] = input.value));
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') void addManual();
+          if (e.key === 'Escape') cancelManual();
+        });
+        return input;
+      };
+      const cancelManual = (): void => {
+        manualDraft = null;
+        pendingEscape = null;
+        void renderCurrent();
+      };
+      const addManual = async (): Promise<void> => {
+        const entry: Record<string, string> = { device: draft.device.trim(), room_id: manualArea, entity_id: draft.entity_id.trim() };
+        if (draft.name.trim()) entry.name = draft.name.trim();
+        const result = await window.panel.call('server.saveDevices', { devices: [...manual.map(({ device, room_id, entity_id, name }) => ({ device, room_id, entity_id, ...(name ? { name } : {}) })), entry] });
+        if (!result.ok) {
+          draft.error = errorOf(result);
+          say(`ADICIONAR ${entry.entity_id || '?'} ... FALHA: ${draft.error}`, 'warn');
+          pendingEscape = null;
+          void renderCurrent();
+          return;
+        }
+        say(`ADICIONAR ${entry.entity_id} EM ${manualArea} ... OK`);
+        manualDraft = null;
+        pendingEscape = null;
+        void renderCurrent();
+      };
+      pendingEscape = cancelManual;
+      const first = mk('device', 'NOME FALADO (EX: ABAJUR)');
+      queueMicrotask(() => first.focus());
+      manualForm = h(
+        'div',
+        { style: 'display:flex;flex-direction:column;gap:8px;padding-top:8px' },
+        grid('minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', { class: 'grid', style: 'gap:8px' }, first, mk('entity_id', 'ENTITY_ID (EX: LIGHT.ABAJUR)'), mk('name', 'NOME NO HA (OPCIONAL)')),
+        draft.error ? h('div', { class: 'amber', role: 'alert' }, `◈ ${draft.error.toUpperCase()}`) : null,
+        h('div', { class: 'row', style: 'gap:8px' }, cmd('ADICIONAR', () => void addManual(), { first: true }), cmd('CANCELAR', cancelManual, { tone: 'quiet' })),
+      );
+    }
+    const manualFrame = frame(
+      `MANUAIS NA ÁREA ${manualArea.toUpperCase()}`,
+      { style: 'gap:0' },
+      ...manualHere.map((m) =>
+        grid(
+          '150px minmax(0,1fr) 120px',
+          { class: 'tbl-row dotted', style: 'padding:4px 0' },
+          h('span', { class: 'hi ellipsis' }, m.device),
+          h('span', { class: 'raw ellipsis' }, m.entity_id),
+          cmd('REMOVER', () => void saveDevices({ devices: manual.filter((x) => x !== m).map(({ device, room_id, entity_id, name }) => ({ device, room_id, entity_id, ...(name ? { name } : {}) })) }, `REMOVER MANUAL ${m.entity_id}`), { tone: 'quiet' }),
+        ),
+      ),
+      manualHere.length === 0 && !manualForm ? h('div', { style: 'padding:6px 0' }, 'NENHUM. USE PARA O QUE NÃO ESTÁ EM ÁREA NENHUMA DO HA.') : null,
+      manualForm ??
+        h('div', { style: 'padding-top:8px' }, cmd('+ MANUAL', () => {
+          manualDraft = { device: '', entity_id: '', name: '', error: null };
+          void renderCurrent();
+        }, { tone: 'quiet', first: true })),
     );
 
     root.append(
@@ -1096,7 +1315,7 @@ pages.push({
         'div',
         { style: 'display:flex;gap:18px;padding-top:8px' },
         h('div', { style: 'width:240px;flex-shrink:0;display:flex;flex-direction:column;gap:24px' }, list, orphanFrame),
-        h('div', { style: 'flex:1;min-width:0;display:flex;flex-direction:column;gap:22px' }, mapping, unmapped, devices),
+        h('div', { style: 'flex:1;min-width:0;display:flex;flex-direction:column;gap:22px' }, mapping, unmapped, devices, manualFrame, hiddenFrame),
       ),
     );
   },
@@ -1287,16 +1506,185 @@ function providerFrame(saved: any): HTMLElement {
   return container;
 }
 
+/** Campo numérico em ms; vazio = `null` (default do provedor) quando `nullable`. */
+function msInput(value: number | null, label: string, nullable: boolean): HTMLInputElement {
+  return lineInput(value === null ? '' : String(value), { type: 'number', min: '0', step: '10', 'aria-label': label, placeholder: nullable ? 'PADRÃO DO PROVEDOR' : '' });
+}
+
+function readMs(input: HTMLInputElement, nullable: boolean): number | null | 'invalid' {
+  const raw = input.value.trim();
+  if (raw === '') return nullable ? null : 'invalid';
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : 'invalid';
+}
+
+/**
+ * Os botões de latência (VAD, silêncio, thinking) que antes só o `.env`
+ * mexia. Mudar aqui é mudar o TTFAB: a tela Diagnóstico mostra o efeito.
+ */
+function voiceFrame(saved: any): HTMLElement {
+  const draft = {
+    geminiVadEndSensitivity: saved.geminiVadEndSensitivity as string | null,
+    geminiThinkingBudget: saved.geminiThinkingBudget as number | null,
+    openaiVadType: saved.openaiVadType as string,
+  };
+  const geminiSilence = msInput(saved.geminiVadSilenceMs, 'Silêncio do VAD do Gemini', true);
+  const openaiSilence = msInput(saved.openaiVadSilenceMs, 'Silêncio do VAD da OpenAI', true);
+  const cutoff = msInput(saved.userSilenceCutoffMs, 'Corte de silêncio do usuário', false);
+
+  const sensitivity = cycler(
+    [{ value: null as string | null, label: 'PADRÃO' }, { value: 'HIGH', label: 'ALTA' }, { value: 'LOW', label: 'BAIXA' }],
+    [null, 'HIGH', 'LOW'].indexOf(draft.geminiVadEndSensitivity),
+    (v) => (draft.geminiVadEndSensitivity = v),
+    'sensibilidade',
+  );
+  const thinkingOptions: Array<{ value: number | null; label: string }> = [
+    { value: 0, label: 'DESLIGADO (0)' },
+    { value: -1, label: 'AUTOMÁTICO (−1)' },
+    { value: 512, label: '512 TOKENS' },
+    { value: 1024, label: '1024 TOKENS' },
+    { value: null, label: 'OMITIR CAMPO' },
+  ];
+  if (!thinkingOptions.some((o) => o.value === draft.geminiThinkingBudget)) thinkingOptions.push({ value: draft.geminiThinkingBudget, label: `${draft.geminiThinkingBudget} TOKENS` });
+  const thinking = cycler(thinkingOptions, thinkingOptions.findIndex((o) => o.value === draft.geminiThinkingBudget), (v) => (draft.geminiThinkingBudget = v), 'thinking');
+  const vadType = cycler(
+    [{ value: 'server_vad', label: 'SERVER_VAD' }, { value: 'semantic_vad', label: 'SEMANTIC_VAD' }],
+    draft.openaiVadType === 'semantic_vad' ? 1 : 0,
+    (v) => (draft.openaiVadType = v),
+    'tipo de VAD',
+  );
+
+  const save = async (): Promise<void> => {
+    const values = {
+      geminiVadSilenceMs: readMs(geminiSilence, true),
+      openaiVadSilenceMs: readMs(openaiSilence, true),
+      userSilenceCutoffMs: readMs(cutoff, false),
+    };
+    const bad = Object.entries(values).find(([, v]) => v === 'invalid');
+    if (bad) {
+      say(`SALVAR AVANÇADO ... RECUSADO: ${bad[0]} PRECISA SER UM INTEIRO EM MS`, 'warn');
+      return;
+    }
+    if (await run('SALVAR PROVEDOR · AVANÇADO · PRÓXIMA SESSÃO', 'server.saveSettings', 'voice', { ...values, ...draft })) void renderCurrent();
+  };
+
+  return frame(
+    'PROVEDOR DE IA // AVANÇADO',
+    { style: 'gap:10px' },
+    h('div', { class: 'small', style: 'line-height:1.6' }, 'MEXE NO TTFAB. MEÇA NA TELA DIAGNÓSTICO ANTES E DEPOIS.'),
+    h('div', { class: 'small hi' }, '── GEMINI'),
+    field('SILÊNCIO VAD', geminiSilence, 'next_session', 130),
+    field('FIM DA FALA', sensitivity, 'next_session', 130),
+    field('THINKING', thinking, 'next_session', 130),
+    h('div', { class: 'small hi' }, '── OPENAI'),
+    field('TIPO DE VAD', vadType, 'next_session', 130),
+    field('SILÊNCIO VAD', openaiSilence, 'next_session', 130),
+    h('div', { class: 'small hi' }, '── TODOS'),
+    field('CORTE (MS)', cutoff, 'immediate', 130),
+    h('div', { class: 'row' }, cmd('SALVAR', () => void save(), { first: true })),
+  );
+}
+
+/** Estado do clima entre repinturas: busca e escolha ainda não gravadas. */
+let weatherDraft: { query: string; results: any[] | null; pick: { label: string; latitude: number; longitude: number } | null } = { query: '', results: null, pick: null };
+
+function weatherFrame(saved: any, light: { light: Light; detail: string } | undefined): HTMLElement {
+  const lightInfo = lightText(light?.light ?? 'unknown');
+  const search = lineInput(weatherDraft.query, { 'aria-label': 'Cidade', placeholder: 'NOME DA CIDADE · ENTER', maxLength: 120 });
+  search.addEventListener('input', () => (weatherDraft.query = search.value));
+  const find = async (): Promise<void> => {
+    const city = search.value.trim();
+    if (city.length < 2) return;
+    const body = await run(`BUSCAR "${city.toUpperCase()}"`, 'server.geocode', city);
+    if (!body) return;
+    if (!body.ok) say(`BUSCAR "${city.toUpperCase()}" ... ${String(body.error).toUpperCase()}`, 'warn');
+    weatherDraft.results = body.results ?? [];
+    void renderCurrent();
+  };
+  search.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void find();
+  });
+
+  const target = weatherDraft.pick ?? (saved.latitude !== null ? { label: saved.city || '—', latitude: saved.latitude, longitude: saved.longitude } : null);
+  const coords = target ? `${target.latitude.toFixed(4)}, ${target.longitude.toFixed(4)}` : '—';
+  const results = weatherDraft.results;
+
+  return frame(
+    'CLIMA',
+    { tone: light?.light === 'error' ? 'warn' : undefined, style: 'gap:10px' },
+    grid('78px minmax(0,1fr)', { class: 'grid' }, h('span', {}, 'ESTADO'), h('span', { class: lightInfo.cls }, `${lightInfo.text}${light?.detail ? ` — ${light.detail}` : ''}`)),
+    kv(weatherDraft.pick ? 'ESCOLHIDA' : 'CIDADE', target ? target.label : 'NENHUMA', weatherDraft.pick ? 'amber' : ''),
+    kv('COORDENADAS', h('span', { class: 'raw' }, coords)),
+    field('BUSCAR', h('div', { class: 'row', style: 'gap:6px' }, search, cmd('BUSCAR', () => void find(), { tone: 'quiet' })), 'immediate', 70),
+    results
+      ? h(
+          'div',
+          { style: 'display:flex;flex-direction:column;gap:2px' },
+          ...results.map((r) =>
+            grid(
+              'minmax(0,1fr) 150px 80px',
+              { class: 'tbl-row dotted', style: 'padding:3px 0' },
+              h('span', { class: 'ellipsis' }, r.label),
+              h('span', { class: 'raw small' }, `${r.latitude.toFixed(3)}, ${r.longitude.toFixed(3)}`),
+              cmd('USAR', () => {
+                weatherDraft.pick = r;
+                weatherDraft.results = null;
+                void renderCurrent();
+              }, { tone: 'quiet' }),
+            ),
+          ),
+          results.length === 0 ? h('div', { class: 'amber' }, '◈ NENHUMA CIDADE COM ESSE NOME.') : null,
+        )
+      : null,
+    h(
+      'div',
+      { class: 'row', style: 'gap:6px' },
+      cmd('TESTAR', async () => {
+        if (!target) return say('TESTAR CLIMA ... SEM CIDADE ESCOLHIDA', 'warn');
+        const result = await window.panel.call('server.testConnection', 'weather', { latitude: target.latitude, longitude: target.longitude });
+        const b = result.body ?? {};
+        if (result.ok && b.ok) say(`TESTAR CLIMA ... OK ${b.latency_ms}MS · ${b.now?.temperature_c ?? '--'}°C ${String(b.now?.description ?? '').toUpperCase()}`);
+        else say(`TESTAR CLIMA ... FALHA: ${result.ok ? b.error : errorOf(result)}`, 'warn');
+      }, { first: true, disabled: !target }),
+      cmd('SALVAR', async () => {
+        const pick = weatherDraft.pick;
+        if (!pick) return;
+        if (await run(`SALVAR CLIMA "${pick.label.toUpperCase()}" · APLICADO A QUENTE`, 'server.saveSettings', 'weather', { city: pick.label, latitude: pick.latitude, longitude: pick.longitude })) {
+          weatherDraft = { query: '', results: null, pick: null };
+          void renderCurrent();
+        }
+      }, { disabled: !weatherDraft.pick }),
+      weatherDraft.pick
+        ? cmd('DESCARTAR', () => {
+            weatherDraft = { query: '', results: null, pick: null };
+            void renderCurrent();
+          }, { tone: 'quiet' })
+        : null,
+      saved.latitude !== null && !weatherDraft.pick
+        ? cmd('DESLIGAR', async () => {
+            if (await run('DESLIGAR CLIMA · A LUNA PARA DE FALAR DO TEMPO', 'server.saveSettings', 'weather', { latitude: null, longitude: null })) void renderCurrent();
+          }, { tone: 'amber' })
+        : null,
+    ),
+    h('div', { class: 'small', style: 'line-height:1.6' }, 'A PREVISÃO TROCA NA HORA; A TOOL DE CLIMA APARECE OU SOME NA PRÓXIMA SESSÃO DE VOZ.'),
+  );
+}
+
 pages.push({
   id: 'integrations',
   nav: 'INTEGRAÇÕES',
   title: 'INTEGRAÇÕES EXTERNAS',
+  leave() {
+    weatherDraft = { query: '', results: null, pick: null };
+  },
   async render(root) {
-    const [ha, provider, calendar, status] = await Promise.all([
+    const [ha, provider, calendar, status, voice, weather] = await Promise.all([
       window.panel.call('server.settings', 'ha'),
       window.panel.call('server.settings', 'provider'),
       window.panel.call('server.settings', 'calendar'),
       window.panel.call('server.status'),
+      window.panel.call('server.settings', 'voice'),
+      window.panel.call('server.settings', 'weather'),
     ]);
     setMeta('CONFIGURAÇÃO GUARDADA NO SERVIDOR');
     if (!ha.ok) return serverUnavailable(root, ha);
@@ -1306,6 +1694,8 @@ pages.push({
       'div',
       { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' },
       connectionFrame({ group: 'ha', title: 'HOME ASSISTANT', secretLabel: 'TOKEN', value: ha.body.value, light: lights.ha }),
+      // Servidor antigo (sem os grupos da v2) só não mostra os quadros novos.
+      weather.ok ? weatherFrame(weather.body.value, lights.weather) : null,
       calendar.ok
         ? connectionFrame({
             group: 'calendar',
@@ -1317,34 +1707,233 @@ pages.push({
           })
         : null,
     );
-    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1fr)' }, left, provider.ok ? providerFrame(provider.body.value) : h('div')));
+    const right = h(
+      'div',
+      { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' },
+      provider.ok ? providerFrame(provider.body.value) : null,
+      voice.ok ? voiceFrame(voice.body.value) : null,
+    );
+    root.append(h('div', { class: 'cols', style: 'grid-template-columns:minmax(0,1fr) minmax(0,1fr)' }, left, right));
   },
 });
 
 // ─── 05 Lembretes ────────────────────────────────────────────────────────
 
 let confirmingReminder: number | null = null;
+let reminderView: 'active' | 'history' = 'active';
+
+/** Formulário aberto (criar ou editar). Guardado fora do render para sobreviver ao repinte. */
+interface ReminderDraft {
+  id: number | null;
+  room_id: string;
+  label: string;
+  repeat: string;
+  date: string;
+  time: string;
+  error: { field: string; text: string } | null;
+  saving: boolean;
+  /** Data, hora ou repetição tocadas. Sem isso, editar manda `keep_schedule`. */
+  scheduleDirty: boolean;
+}
+let reminderDraft: ReminderDraft | null = null;
+
+const REPEAT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'none', label: 'ÚNICO' },
+  ...Object.entries(REPEAT_LABELS).map(([value, label]) => ({ value, label })),
+];
+
+const HISTORY_LABELS: Record<string, [string, string]> = {
+  created: ['+ CRIADO', 'hi'],
+  edited: ['✎ EDITADO', 'hi'],
+  fired: ['◉ TOCOU', 'hi'],
+  dismissed: ['▣ DISPENSADO', 'hi'],
+  snoozed: ['‖ ADIADO', 'fg'],
+  exhausted: ['◈ SEM RESPOSTA', 'amber'],
+  missed: ['◈ PERDIDO', 'amber'],
+  cancelled: ['— CANCELADO', 'fg'],
+};
+const VIA_LABELS: Record<string, string> = { admin: 'PAINEL', voice: 'VOZ' };
+
+/** `AAAA-MM-DD` em São Paulo, para o `<input type="date">`. */
+function localDateInput(ts: number): string {
+  const p = spParts(ts);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+function openReminderDraft(r: any | null, defaultRoom: string): void {
+  if (r) {
+    const p = spParts(r.next_due_utc);
+    reminderDraft = {
+      id: r.id,
+      room_id: r.room_id,
+      label: r.label ?? '',
+      repeat: r.repeat_rule ?? 'none',
+      // O servidor manda a hora de parede pronta; o cálculo local é só para
+      // um servidor anterior que não mande.
+      date: r.local_date ?? `${p.year}-${p.month}-${p.day}`,
+      time: r.kind === 'recurring' ? `${pad(r.local_hour)}:${pad(r.local_minute)}` : r.local_time ?? `${p.hour}:${p.minute}`,
+      error: null,
+      saving: false,
+      scheduleDirty: false,
+    };
+  } else {
+    reminderDraft = { id: null, room_id: defaultRoom, label: '', repeat: 'none', date: localDateInput(Date.now() + 86_400_000), time: '07:00', error: null, saving: false, scheduleDirty: true };
+  }
+  confirmingReminder = null;
+}
+
+function closeReminderDraft(): void {
+  reminderDraft = null;
+  pendingEscape = null;
+}
+
+function reminderEditor(draft: ReminderDraft, rooms: string[]): HTMLElement {
+  const bad = (field: string): string => (draft.error?.field === field ? ' invalid' : '');
+  const roomOptions = [...new Set([...rooms, draft.room_id].filter(Boolean))].sort().map((r) => ({ value: r, label: r }));
+  const roomCycler = cycler(roomOptions, roomOptions.findIndex((o) => o.value === draft.room_id), (value) => {
+    draft.room_id = value;
+  }, 'sala');
+  const repeatCycler = cycler(REPEAT_OPTIONS, REPEAT_OPTIONS.findIndex((o) => o.value === draft.repeat), (value) => {
+    draft.repeat = value;
+    draft.scheduleDirty = true;
+    // Data só vale para o único: repinta para mostrar ou esconder o campo.
+    void renderCurrent();
+  }, 'repetição');
+
+  const labelInput = lineInput(draft.label, { maxLength: 200, placeholder: 'VAZIO = ALARME SÓ COM BIPE', 'aria-label': 'Rótulo', class: `line-input${bad('label')}` });
+  labelInput.addEventListener('input', () => (draft.label = labelInput.value));
+  const dateInput = lineInput(draft.date, { type: 'date', 'aria-label': 'Data', class: `line-input${bad('date')}` });
+  dateInput.addEventListener('input', () => {
+    draft.date = dateInput.value;
+    draft.scheduleDirty = true;
+  });
+  const timeInput = lineInput(draft.time, { type: 'time', 'aria-label': 'Hora', class: `line-input${bad('time')}` });
+  timeInput.addEventListener('input', () => {
+    draft.time = timeInput.value;
+    draft.scheduleDirty = true;
+  });
+
+  const save = async (): Promise<void> => {
+    if (draft.saving) return;
+    draft.saving = true;
+    // Horário intocado numa edição: o servidor reaproveita o gravado, com os
+    // segundos de um "daqui a 90 segundos" — o formulário só tem HH:MM.
+    const body: Record<string, unknown> =
+      draft.id !== null && !draft.scheduleDirty
+        ? { room_id: draft.room_id, label: draft.label.trim() || null, keep_schedule: true }
+        : { room_id: draft.room_id, label: draft.label.trim() || null, repeat: draft.repeat, time: draft.time, ...(draft.repeat === 'none' ? { date: draft.date } : {}) };
+    const title = (draft.label.trim() || 'ALARME').toUpperCase();
+    const result = draft.id === null ? await window.panel.call('server.createReminder', body) : await window.panel.call('server.editReminder', draft.id, body);
+    draft.saving = false;
+    if (!result.ok) {
+      draft.error = { field: String(result.body?.field ?? ''), text: errorOf(result) };
+      say(`${draft.id === null ? 'CRIAR' : 'EDITAR'} "${title}" ... FALHA: ${errorOf(result)}`, 'warn');
+      pendingEscape = null;
+      void renderCurrent();
+      return;
+    }
+    say(`${draft.id === null ? 'CRIAR' : 'EDITAR'} "${title}" (${result.body.short_id}) ... OK`);
+    closeReminderDraft();
+    void renderCurrent();
+  };
+  for (const input of [labelInput, dateInput, timeInput]) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') void save();
+      if (e.key === 'Escape') {
+        closeReminderDraft();
+        void renderCurrent();
+      }
+    });
+  }
+  pendingEscape = () => {
+    closeReminderDraft();
+    void renderCurrent();
+  };
+
+  const fields = grid(
+    '110px minmax(0,1fr)',
+    { class: 'grid', style: 'gap:10px 12px;align-items:center' },
+    h('span', {}, 'SALA'),
+    roomCycler,
+    h('span', {}, 'RÓTULO'),
+    labelInput,
+    h('span', {}, 'REPETIÇÃO'),
+    repeatCycler,
+    draft.repeat === 'none' ? h('span', {}, 'DATA') : null,
+    draft.repeat === 'none' ? dateInput : null,
+    h('span', {}, 'HORA'),
+    timeInput,
+  );
+  return frame(
+    draft.id === null ? 'NOVO LEMBRETE' : 'EDITAR LEMBRETE',
+    { tone: draft.error ? 'warn' : undefined, style: 'gap:12px;margin-bottom:18px' },
+    fields,
+    draft.error ? h('div', { class: 'amber', role: 'alert' }, `◈ ${draft.error.text.toUpperCase()}`) : null,
+    h('div', { class: 'small' }, 'HORÁRIO DE BRASÍLIA · A FALA É GRAVADA PELA VOZ DA SALA QUANDO HOUVER SESSÃO ABERTA; SEM ELA, TOCA SÓ O BIPE'),
+    h(
+      'div',
+      { class: 'row', style: 'gap:10px' },
+      cmd('SALVAR', () => void save(), { first: true }),
+      cmd('CANCELAR', () => {
+        closeReminderDraft();
+        void renderCurrent();
+      }, { tone: 'quiet' }),
+    ),
+  );
+}
 
 pages.push({
   id: 'reminders',
   nav: 'LEMBRETES',
   title: 'LEMBRETES E ALARMES',
   pollMs: 15000,
+  leave() {
+    reminderDraft = null;
+  },
   async render(root) {
-    const result = await window.panel.call('server.reminders');
+    const [result, satsRes] = await Promise.all([window.panel.call('server.reminders'), window.panel.call('server.satellites')]);
     if (!result.ok) return serverUnavailable(root, result);
     const reminders = result.body.reminders as any[];
+    const rooms = [...new Set(((satsRes.ok ? satsRes.body.satellites : []) as any[]).map((s) => s.room_id).filter(Boolean))] as string[];
     setMeta(`${reminders.length} ATIVOS`);
+
+    const tabs = h(
+      'div',
+      { class: 'row', style: 'gap:6px;margin-bottom:14px' },
+      cmd(reminderView === 'active' ? '► ATIVOS' : 'ATIVOS', () => {
+        reminderView = 'active';
+        void renderCurrent();
+      }, { first: true, tone: reminderView === 'active' ? undefined : 'quiet' }),
+      cmd(reminderView === 'history' ? '► HISTÓRICO' : 'HISTÓRICO', () => {
+        reminderView = 'history';
+        closeReminderDraft();
+        void renderCurrent();
+      }, { tone: reminderView === 'history' ? undefined : 'quiet' }),
+      h('span', { class: 'spacer' }),
+      reminderView === 'active' && !reminderDraft
+        ? cmd('+ NOVO', () => {
+            openReminderDraft(null, local?.roomId ?? rooms[0] ?? '');
+            void renderCurrent();
+          })
+        : null,
+    );
+    root.append(tabs);
+
+    if (reminderView === 'history') return renderReminderHistory(root);
+
+    if (reminderDraft) root.append(reminderEditor(reminderDraft, rooms));
+
     if (reminders.length === 0) {
-      root.append(emptyReport('RELATÓRIO DE AGENDAMENTO // 0 REGISTROS', 'NENHUM EVENTO AGENDADO. A TRIPULAÇÃO ESTÁ LIVRE.', 'PARA AGENDAR, DIGA “HEY LUNA, ME LEMBRA DE…” EM QUALQUER SALA.'));
+      if (!reminderDraft) root.append(emptyReport('RELATÓRIO DE AGENDAMENTO // 0 REGISTROS', 'NENHUM EVENTO AGENDADO. A TRIPULAÇÃO ESTÁ LIVRE.', 'DIGA “HEY LUNA, ME LEMBRA DE…” EM QUALQUER SALA, OU USE [ + NOVO ].'));
       return;
     }
 
-    const cols = '150px 104px 100px 118px minmax(0,1fr) 104px';
+    const cols = '150px 104px 100px 118px minmax(0,1fr) 190px';
     const rows = reminders.map((r) => {
       const label = r.label ?? 'ALARME';
       const confirming = confirmingReminder === r.id;
-      const wrap = h('div', { style: `border-bottom:1px dotted var(--dim);border-left:1px solid ${confirming ? 'var(--amber)' : 'transparent'};border-right:1px solid ${confirming ? 'var(--amber)' : 'transparent'}` });
+      const editing = reminderDraft?.id === r.id;
+      const wrap = h('div', { style: `border-bottom:1px dotted var(--dim);border-left:1px solid ${confirming ? 'var(--amber)' : editing ? 'var(--hi)' : 'transparent'};border-right:1px solid ${confirming ? 'var(--amber)' : editing ? 'var(--hi)' : 'transparent'}` });
       wrap.append(
         grid(
           cols,
@@ -1353,11 +1942,20 @@ pages.push({
           h('span', { class: 'ellipsis' }, r.room_id),
           h('span', { class: 'hi' }, formatStamp(r.next_due_utc)),
           h('span', {}, r.repeat_rule ? REPEAT_LABELS[r.repeat_rule] ?? r.repeat_rule : 'ÚNICO'),
-          h('span', { style: 'text-wrap:pretty' }, r.spoken ? `“${r.spoken}”` : '—'),
-          h('span', { style: 'justify-self:end' }, cmd('CANCELAR', () => {
-            confirmingReminder = r.id;
-            void renderCurrent();
-          })),
+          h('span', { style: 'text-wrap:pretty' }, r.spoken ? `“${r.spoken}”` : '—', r.has_audio === false ? h('span', { class: 'small', style: 'display:block' }, '♪ FALA AINDA NÃO GRAVADA — TOCA SÓ O BIPE') : null),
+          h(
+            'span',
+            { style: 'justify-self:end;display:flex;gap:4px' },
+            cmd('EDITAR', () => {
+              openReminderDraft(r, r.room_id);
+              void renderCurrent();
+            }, { disabled: r.status === 'ringing' || editing, tone: 'quiet' }),
+            cmd('CANCELAR', () => {
+              confirmingReminder = r.id;
+              closeReminderDraft();
+              void renderCurrent();
+            }),
+          ),
         ),
       );
       if (confirming) {
@@ -1391,6 +1989,41 @@ pages.push({
     );
   },
 });
+
+async function renderReminderHistory(root: HTMLElement): Promise<void> {
+  const result = await window.panel.call('server.reminderHistory', 100);
+  if (!result.ok) return serverUnavailable(root, result);
+  const events = result.body.events as any[];
+  setMeta(`${events.length} EVENTOS RECENTES`);
+  if (result.body.complete === false) {
+    root.append(h('div', { class: 'banner', style: 'margin-bottom:12px' }, h('span', {}, '▲ HISTÓRICO INCOMPLETO: O LOG_LEVEL DO NÚCLEO ESTÁ ACIMA DE INFO, E OS EVENTOS DE LEMBRETE NÃO SÃO REGISTRADOS.')));
+  }
+  if (events.length === 0) {
+    root.append(emptyReport('HISTÓRICO // 0 REGISTROS', 'NADA TOCOU AINDA.', 'O HISTÓRICO COMEÇA A CONTAR A PARTIR DESTA VERSÃO DO NÚCLEO.'));
+    return;
+  }
+  const cols = '110px 150px minmax(0,1fr) 120px 70px';
+  root.append(
+    h(
+      'div',
+      { class: 'tbl', style: 'gap:0' },
+      grid(cols, { class: 'tbl-head strong' }, h('span', {}, 'QUANDO'), h('span', {}, 'EVENTO'), h('span', {}, 'RÓTULO'), h('span', {}, 'SALA'), h('span', {}, 'VIA')),
+      ...events.map((e) => {
+        const [text, cls] = HISTORY_LABELS[e.kind] ?? [String(e.kind).toUpperCase(), 'fg'];
+        return grid(
+          cols,
+          { class: 'tbl-row dotted', style: 'padding:6px 0;font-size:12px' },
+          h('span', {}, formatStamp(e.at)),
+          h('span', { class: cls }, text),
+          h('span', { class: 'hi ellipsis' }, e.label ?? (e.short_id ? 'ALARME' : '— REMOVIDO —'), e.short_id ? h('span', { class: 'raw fg' }, `  ${e.short_id}`) : null),
+          h('span', { class: 'ellipsis' }, e.room_id ?? '—'),
+          h('span', {}, e.via ? VIA_LABELS[e.via] ?? e.via.toUpperCase() : '—'),
+        );
+      }),
+      h('div', { class: 'small', style: 'margin-top:10px' }, 'SEM TRANSCRIÇÃO: SÓ O QUE ACONTECEU COM CADA LEMBRETE. RETENÇÃO DE 30 DIAS.'),
+    ),
+  );
+}
 
 // ─── 06 Este terminal ────────────────────────────────────────────────────
 
@@ -1541,6 +2174,71 @@ pages.push({
       ),
     );
 
+    // Preferências (v2): sensibilidade, atalho, notificação.
+    const thresholds: Array<{ value: number | null; label: string }> = [
+      { value: null, label: 'PADRÃO' },
+      { value: 0.9, label: '0.90 · SENSÍVEL' },
+      { value: 0.95, label: '0.95' },
+      { value: 0.97, label: '0.97 · EQUILIBRADA' },
+      { value: 0.99, label: '0.99 · RÍGIDA' },
+    ];
+    if (view.wakeThreshold !== null && !thresholds.some((t) => t.value === view.wakeThreshold)) {
+      thresholds.push({ value: view.wakeThreshold, label: view.wakeThreshold.toFixed(3) });
+    }
+    let thresholdTimer: ReturnType<typeof setTimeout> | null = null;
+    const thresholdCycler = cycler(thresholds, thresholds.findIndex((t) => t.value === view.wakeThreshold), (value, i) => {
+      if (thresholdTimer) clearTimeout(thresholdTimer);
+      thresholdTimer = setTimeout(() => void run(`SENSIBILIDADE → ${thresholds[i]!.label} · WAKE WORD REINICIANDO`, 'local.save', { wakeThreshold: value }), 600);
+    }, 'sensibilidade');
+
+    // Grava a combinação apertada, no formato de accelerator do Electron.
+    const shortcut = lineInput(view.talkShortcut, { 'aria-label': 'Atalho global para falar', placeholder: 'CLIQUE E APERTE A COMBINAÇÃO', readOnly: true });
+    shortcut.addEventListener('keydown', (e) => {
+      e.preventDefault();
+      if (e.key === 'Escape') return shortcut.blur();
+      if (e.key === 'Backspace' || e.key === 'Delete') {
+        shortcut.value = '';
+        return;
+      }
+      // Pela tecla FÍSICA (`e.code`), não pelo caractere: no ABNT2 Shift+1
+      // vira "!", AltGr vira Control+Alt e acento é tecla morta — nada disso
+      // é accelerator que o Electron entenda.
+      if (['Control', 'Shift', 'Alt', 'Meta', 'AltGraph', 'Dead', 'Tab'].includes(e.key)) return;
+      const code = e.code;
+      const named: Record<string, string> = { Space: 'Space', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown', Insert: 'Insert' };
+      const key = /^Key[A-Z]$/.test(code) ? code.slice(3) : /^Digit\d$/.test(code) ? code.slice(5) : /^F\d{1,2}$/.test(code) ? code : named[code];
+      if (!key) {
+        say('ATALHO ... TECLA NÃO SUPORTADA: USE LETRA, NÚMERO, F1–F24, ESPAÇO OU SETA', 'warn');
+        return;
+      }
+      // Win+tecla é quase todo reservado pelo Windows: nem oferece.
+      const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.shiftKey && 'Shift'].filter(Boolean) as string[];
+      shortcut.value = [...mods, key].join('+');
+    });
+    const prefs = frame(
+      'PREFERÊNCIAS',
+      { style: 'gap:10px' },
+      field('SENSIBILIDADE', thresholdCycler, 'IMEDIATO (REINICIA A WAKE WORD)', 118, true),
+      h('div', { class: 'small', id: 'wake-active' }, wakeActiveText(view)),
+      field('ATALHO FALAR', shortcut, 'IMEDIATO', 118, true),
+      view.talkShortcutError ? h('div', { class: 'amber small' }, `◈ ${String(view.talkShortcutError).toUpperCase()}`) : null,
+      h(
+        'div',
+        { class: 'row', style: 'gap:8px' },
+        cmd('SALVAR ATALHO', async () => {
+          const value = shortcut.value.trim();
+          if (await run(value ? `ATALHO ${value.toUpperCase()} · VALE EM QUALQUER JANELA` : 'ATALHO REMOVIDO', 'local.save', { talkShortcut: value })) void renderCurrent();
+        }, { first: true }),
+        cmd('LIMPAR', () => {
+          shortcut.value = '';
+        }, { tone: 'quiet' }),
+      ),
+      h('div', { class: 'small', style: 'line-height:1.6' }, 'O ATALHO ABRE A ESCUTA NA HORA, COMO “FORÇAR ESCUTA”. BACKSPACE APAGA.'),
+      toggle('NOTIFICAR LEMBRETES', 'AVISO DO WINDOWS QUANDO UM LEMBRETE TOCA NESTA SALA (PRECISA DO TOKEN ADMIN)', view.reminderNotifications, async () => {
+        if (await run(`NOTIFICAR LEMBRETES ${view.reminderNotifications ? 'DESLIGADO' : 'LIGADO'}`, 'local.save', { reminderNotifications: !view.reminderNotifications })) void renderCurrent();
+      }),
+    );
+
     // Áudio
     const deviceCycler = (kind: string, current: string, key: 'micDeviceId' | 'speakerDeviceId', name: string): HTMLElement => {
       const options = [{ value: '', label: 'PADRÃO DO SISTEMA' }, ...devices.filter((d) => d.kind === kind).map((d) => ({ value: d.deviceId, label: (d.label || 'DISPOSITIVO SEM NOME').toUpperCase() }))];
@@ -1578,7 +2276,7 @@ pages.push({
         'div',
         { class: 'cols', style: 'grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)' },
         h('div', { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' }, connection, keys),
-        audio,
+        h('div', { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' }, audio, prefs),
       ),
     );
   },
@@ -1588,6 +2286,9 @@ pages.push({
 
 const RESTART_ESTIMATE_MS = 12000;
 const RESTART_GIVE_UP_MS = 60000;
+
+/** Restauração: modo escolhido e o S/N em curso. */
+const restoreState = { mode: 'keep' as 'keep' | 'replace', confirming: false, result: null as string | null };
 
 const restart = {
   phase: 'idle' as 'idle' | 'confirm' | 'count' | 'back' | 'lost',
@@ -1719,6 +2420,8 @@ pages.push({
     const rows: Array<[string, string]> = b
       ? [
           ['VERSION', `v${b.version}`],
+          ['RELEASE', b.release ? b.release.sha.slice(0, 12) : '— (DEV OU RELEASE ANTIGA)'],
+          ['DEPLOYED_AT', b.release ? formatStamp(Date.parse(b.release.deployed_at)) : '—'],
           ['WS_PORT', String(b.ws_port)],
           ['DB_PATH', b.db_path],
           ['LOG_LEVEL', b.log_level],
@@ -1745,43 +2448,348 @@ pages.push({
       h('div', { class: 'small', style: 'margin-top:8px' }, `FIM DO DUMP · ${rows.length} REGISTROS · ALTERAR EXIGE EDITAR O .ENV DO SERVIDOR E REINICIAR`),
     );
 
+    const modeCycler = cycler(
+      [
+        { value: 'keep' as const, label: 'MANTER OS LEMBRETES DE AGORA' },
+        { value: 'replace' as const, label: 'SUBSTITUIR PELOS DO ARQUIVO' },
+      ],
+      restoreState.mode === 'replace' ? 1 : 0,
+      (v) => (restoreState.mode = v),
+      'modo',
+    );
+    const doRestore = async (): Promise<void> => {
+      const result = await window.panel.call('server.restoreBackup', restoreState.mode);
+      if (!result.ok) {
+        restoreState.result = `◈ ${errorOf(result).toUpperCase()}`;
+        say(`RESTAURAR BACKUP ... FALHA: ${errorOf(result)}`, 'warn');
+      } else if (result.body?.cancelled) {
+        restoreState.result = null;
+        say('RESTAURAR BACKUP ... CANCELADO', 'warn');
+      } else {
+        const r = result.body.reminders;
+        const skippedUrls = (result.body.not_applied ?? []) as string[];
+        restoreState.result =
+          `▣ ${result.body.groups.length} GRUPOS RESTAURADOS${r.mode === 'replace' ? ` · ${r.created} LEMBRETES RECRIADOS, ${r.skipped} PULADOS` : ''}` +
+          (skippedUrls.length ? ` · MANTIDOS OS DE AGORA (OUTRA ORIGEM, SEM TOKEN NO ARQUIVO): ${skippedUrls.join(', ').toUpperCase()}` : '');
+        say('RESTAURAR BACKUP ... OK');
+      }
+      void renderCurrent();
+    };
+    const backupBox = frame(
+      'BACKUP // SEM SEGREDOS',
+      { style: 'gap:12px' },
+      h('div', { style: 'font-size:12px;line-height:1.7;max-width:720px' }, 'O ARQUIVO LEVA A CONFIGURAÇÃO DO PAINEL E OS LEMBRETES ATIVOS. TOKENS, CHAVES E SENHAS FICAM DE FORA: AO RESTAURAR, OS GRAVADOS NO NÚCLEO CONTINUAM VALENDO. SATÉLITES BLOQUEADOS TAMBÉM NÃO ENTRAM NEM SAEM POR AQUI; ALARME TOCANDO AGORA NÃO É CANCELADO.'),
+      h(
+        'div',
+        { class: 'row', style: 'gap:10px' },
+        cmd('EXPORTAR BACKUP', async () => {
+          const body = await run('EXPORTAR BACKUP', 'server.saveBackup');
+          if (body && !body.saved) say('EXPORTAR BACKUP ... CANCELADO', 'warn');
+        }, { first: true }),
+      ),
+      grid('110px minmax(0,1fr)', { class: 'grid', style: 'align-items:center' }, h('span', {}, 'LEMBRETES'), modeCycler),
+      restoreState.confirming
+        ? confirmLine(
+            restoreState.mode === 'replace' ? 'RESTAURAR E SUBSTITUIR OS LEMBRETES? (S/N)' : 'RESTAURAR A CONFIGURAÇÃO? (S/N)',
+            { yes: '[ S ] ESCOLHER ARQUIVO', no: '[ N ]' },
+            () => {
+              restoreState.confirming = false;
+              void doRestore();
+            },
+            () => {
+              restoreState.confirming = false;
+              void renderCurrent();
+            },
+          )
+        : cmd('RESTAURAR…', () => {
+            restoreState.confirming = true;
+            restoreState.result = null;
+            void renderCurrent();
+          }, { tone: 'amber', first: true }),
+      restoreState.result ? h('div', { class: restoreState.result.startsWith('◈') ? 'amber' : 'hi' }, restoreState.result) : null,
+    );
+
     restartBox = frame('ZONA DE PERIGO', { tone: 'danger', style: 'gap:12px' });
-    root.append(h('div', { class: 'stack', style: 'gap:28px' }, dump, restartBox));
+    root.append(h('div', { class: 'stack', style: 'gap:28px' }, dump, backupBox, restartBox));
     paintRestart(true);
   },
 });
 
-// ─── 08 Diagnóstico (v2) ─────────────────────────────────────────────────
+// ─── 08 Diagnóstico ──────────────────────────────────────────────────────
+
+const DIAG_WINDOWS: Array<{ value: number; label: string }> = [
+  { value: 1, label: '1H' },
+  { value: 24, label: '24H' },
+  { value: 168, label: '7D' },
+  { value: 720, label: '30D' },
+];
+const LOG_LEVELS: Array<{ value: string; label: string }> = [
+  { value: 'debug', label: 'DEBUG+' },
+  { value: 'info', label: 'INFO+' },
+  { value: 'warn', label: 'WARN+' },
+  { value: 'error', label: 'ERROR+' },
+];
+const LOG_MAX_LINES = 300;
+const TTFAB_BAR = 40;
+
+const diag = {
+  hours: 24,
+  level: 'info',
+  room: null as string | null,
+  paused: false,
+  lines: [] as any[],
+  box: null as HTMLElement | null,
+  status: null as HTMLElement | null,
+  streamState: 'closed' as 'connecting' | 'open' | 'closed',
+  streamError: null as string | null,
+};
+
+const LEVEL_TAGS: Record<string, string> = { trace: 'TRC', debug: 'DBG', info: 'INF', warn: 'WRN', error: 'ERR', fatal: 'FTL' };
+
+function msOrDash(ms: number | null | undefined): string {
+  return typeof ms === 'number' ? `${String(ms).padStart(4)}MS` : '----MS';
+}
+
+/** `12:04:33`, em São Paulo. */
+function formatClock(ts: number): string {
+  const p = spParts(ts);
+  return `${p.hour}:${p.minute}:${p.second}`;
+}
+
+/** Barra de texto: █ até o p50, ▒ até o p90, ┊ na meta. Escala comum a todas as linhas. */
+function ttfabBar(p50: number | null, p90: number | null, target: number, scaleMs: number): string {
+  const col = (ms: number): number => Math.min(TTFAB_BAR - 1, Math.round((ms / scaleMs) * TTFAB_BAR));
+  const targetCol = col(target);
+  let s = '';
+  for (let i = 0; i < TTFAB_BAR; i++) {
+    if (p50 !== null && i < col(p50)) s += '█';
+    else if (p90 !== null && i < col(p90)) s += '▒';
+    else if (i === targetCol) s += '┊';
+    else s += '·';
+  }
+  return s;
+}
+
+function latencyChart(samples: any[], target: number, since: number, until: number): HTMLElement {
+  const W = 800;
+  const H = 140;
+  const warm = samples.filter((s) => !s.session_cold).map((s) => s.latency_ms as number);
+  const top = Math.max(target * 2, ...warm.map((v) => Math.min(v, target * 5)));
+  const y = (ms: number): number => H - 5 - (Math.min(ms, top) / top) * (H - 10);
+  const x = (at: number): number => ((at - since) / Math.max(1, until - since)) * W;
+  const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, preserveAspectRatio: 'none', role: 'img', 'aria-label': `TTFAB de ${samples.length} turnos, meta ${target} ms` });
+  root.append(svg('line', { x1: 0, x2: W, y1: y(target), y2: y(target), stroke: '#39FF6A', 'stroke-width': 1, 'stroke-dasharray': '6 5', 'vector-effect': 'non-scaling-stroke' }));
+  for (const s of samples) {
+    const over = s.latency_ms > target;
+    root.append(
+      svg('rect', {
+        x: x(s.at) - 1.5,
+        y: y(s.latency_ms) - 1.5,
+        width: 3,
+        height: 3,
+        fill: s.session_cold ? '#0E5A26' : over ? '#FFB000' : '#39FF6A',
+      }),
+    );
+  }
+  return h(
+    'div',
+    { style: 'display:flex;flex-direction:column;gap:4px' },
+    grid(
+      'minmax(0,1fr) 78px',
+      { class: 'grid', style: 'align-items:stretch' },
+      h('div', { class: 'chart' }, root as unknown as Node),
+      h(
+        'div',
+        { class: 'chart-axis' },
+        h('span', { style: 'top:-4px' }, `${top}MS`),
+        h('span', { style: `top:${(y(target) / H) * 140 - 6}px` }, `${target}MS META`),
+        h('span', { style: 'bottom:-4px' }, '0MS'),
+      ),
+    ),
+    h('div', { class: 'row tiny' }, h('span', {}, formatStamp(since)), h('span', { class: 'spacer' }), h('span', {}, 'AGORA')),
+  );
+}
+
+function logLine(r: any): HTMLElement {
+  const tone = r.level === 'error' || r.level === 'fatal' || r.level === 'warn' ? 'amber' : r.level === 'debug' || r.level === 'trace' ? 'fg' : '';
+  return grid(
+    '64px 34px 190px 110px minmax(0,1fr)',
+    { class: `tbl-row log-line ${tone}` },
+    h('span', {}, formatClock(r.ts)),
+    h('span', {}, LEVEL_TAGS[r.level] ?? r.level),
+    h('span', { class: 'raw ellipsis' }, r.event ?? '—'),
+    h('span', { class: 'ellipsis' }, r.room_id ?? '—'),
+    h('span', { class: 'raw ellipsis', title: r.msg }, r.msg || '—'),
+  );
+}
+
+function paintLogStatus(): void {
+  if (!diag.status?.isConnected) return;
+  const text =
+    diag.paused
+      ? '‖ PAUSADO'
+      : diag.streamState === 'open'
+        ? '◉ AO VIVO'
+        : diag.streamState === 'connecting'
+          ? `░ CONECTANDO${diag.streamError ? ` · ${diag.streamError.toUpperCase()}` : ''}`
+          : `— PARADO${diag.streamError ? ` · ${diag.streamError.toUpperCase()}` : ''}`;
+  diag.status.textContent = text;
+  diag.status.className = diag.streamError && diag.streamState !== 'open' ? 'amber' : diag.streamState === 'open' && !diag.paused ? 'hi' : '';
+}
+
+function appendLogLine(record: any): void {
+  diag.lines.push(record);
+  if (diag.lines.length > LOG_MAX_LINES) diag.lines.shift();
+  const box = diag.box;
+  if (!box?.isConnected || diag.paused) return;
+  const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+  box.append(logLine(record));
+  while (box.childElementCount > LOG_MAX_LINES) box.firstElementChild!.remove();
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+function restartLogStream(): void {
+  diag.lines = [];
+  diag.box?.replaceChildren();
+  void window.panel.call('logs.start', diag.level, diag.room);
+}
 
 pages.push({
   id: 'diagnostics',
   nav: 'DIAGNÓSTICO',
-  title: 'DIAGNÓSTICO // PRÉVIA v2',
-  soon: true,
+  title: 'DIAGNÓSTICO // LATÊNCIA E LOG',
+  pollMs: 30000,
+  leave() {
+    void window.panel.call('logs.stop');
+    diag.streamState = 'closed';
+  },
   async render(root) {
-    setMeta('MÓDULO NÃO INSTALADO');
-    // Esqueleto apagado do que a v2 vai mostrar — sem números inventados.
-    const bars = ['SALA', 'QUARTO', 'ESCRITÓRIO', 'COZINHA'].map((n) => h('div', { class: 'pre' }, `${n.padEnd(12)}${'·'.repeat(32)}┊${'·'.repeat(15)}  ----MS`));
-    const logs = Array.from({ length: 5 }, () => h('div', { class: 'pre' }, '--:--:--  ----   [----------]  ------------------------------'));
-    const skeleton = h(
-      'div',
-      { class: 'stack dim', 'aria-hidden': 'true', style: 'gap:24px' },
-      frame('TTFAB POR SATÉLITE // META 800MS', { tone: 'muted', style: 'gap:6px' }, ...bars, h('div', { class: 'pre' }, `${' '.repeat(44)}└ META 800MS`)),
-      frame('LOG AO VIVO', { tone: 'muted', style: 'gap:4px' }, h('div', { class: 'row', style: 'gap:18px;padding-bottom:6px' }, h('span', {}, 'SALA: [ TODAS ▾ ]'), h('span', {}, 'NÍVEL: [ INFO+ ▾ ]')), ...logs),
+    const [latRes, errRes, satsRes] = await Promise.all([
+      window.panel.call('server.latency', diag.hours),
+      window.panel.call('server.errors', 20),
+      window.panel.call('server.satellites'),
+    ]);
+    if (!latRes.ok) return serverUnavailable(root, latRes);
+    const lat = latRes.body;
+    const summary = lat.summary as any[];
+    const samples = lat.samples as any[];
+    const target: number = lat.target_ms;
+    setMeta(`${lat.total ?? samples.length} TURNOS EM ${DIAG_WINDOWS.find((w) => w.value === diag.hours)?.label ?? `${diag.hours}H`} · META ${target}MS`);
+
+    const windowCycler = cycler(DIAG_WINDOWS, DIAG_WINDOWS.findIndex((w) => w.value === diag.hours), (value) => {
+      diag.hours = value;
+      void renderCurrent();
+    }, 'janela');
+
+    const scale = Math.max(target * 2, ...summary.map((g) => g.p90_ms ?? 0));
+    const cols = '150px 90px minmax(0,1fr) 76px 76px 56px 64px';
+    const ttfab = frame(
+      `TTFAB POR SALA // META ${target}MS`,
+      { style: 'gap:4px' },
+      h('div', { class: 'row', style: 'gap:12px;padding-bottom:6px' }, h('span', { class: 'small' }, 'JANELA'), windowCycler, h('span', { class: 'spacer' }), h('span', { class: 'small' }, '█ P50 · ▒ P90 · ┊ META')),
+      grid(cols, { class: 'tbl-head' }, h('span', {}, 'SALA'), h('span', {}, 'PROVEDOR'), h('span', {}, 'DISTRIBUIÇÃO'), h('span', {}, 'P50'), h('span', {}, 'P90'), h('span', {}, 'N'), h('span', {}, '>META')),
+      ...summary.map((g) =>
+        grid(
+          cols,
+          { class: 'tbl-row' },
+          h('span', { class: 'ellipsis' }, g.room_id),
+          h('span', {}, String(g.provider).toUpperCase()),
+          h('span', { class: `pre ${g.p90_ms !== null && g.p90_ms > target ? 'amber' : 'hi'}`, 'aria-label': `p50 ${g.p50_ms ?? 'sem dado'} ms, p90 ${g.p90_ms ?? 'sem dado'} ms` }, ttfabBar(g.p50_ms, g.p90_ms, target, scale)),
+          h('span', { class: g.p50_ms !== null && g.p50_ms > target ? 'amber' : 'hi' }, msOrDash(g.p50_ms)),
+          h('span', { class: g.p90_ms !== null && g.p90_ms > target ? 'amber' : 'hi' }, msOrDash(g.p90_ms)),
+          h('span', {}, String(g.count)),
+          h('span', { class: g.over_target ? 'amber' : '' }, String(g.over_target)),
+        ),
+      ),
+      summary.length === 0 ? h('div', { style: 'padding:10px 0 4px' }, 'NENHUM TURNO MEDIDO NESTA JANELA. FALE COM A LUNA E VOLTE AQUI.') : null,
+      summary.some((g) => g.cold) ? h('div', { class: 'small', style: 'padding-top:6px' }, `SESSÕES FRIAS FORA DOS PERCENTIS: ${summary.reduce((n, g) => n + g.cold, 0)} (CUSTO DE CONEXÃO, NÃO DE TURNO)`) : null,
     );
-    skeleton.querySelectorAll('.frame-title').forEach((t) => ((t as HTMLElement).style.color = 'var(--dim)'));
-    const lock = h(
-      'div',
-      { style: 'position:absolute;inset:0;display:flex;align-items:center;justify-content:center' },
+
+    const series = frame(
+      'SÉRIE // LIMITE INFERIOR',
+      { style: 'gap:6px' },
+      samples.length ? latencyChart(samples, target, lat.since, Date.now()) : h('div', {}, 'SEM AMOSTRAS.'),
+      h('div', { class: 'small' }, '▪ VERDE: DENTRO DA META · ▪ ÂMBAR: ACIMA · ▪ APAGADO: SESSÃO FRIA'),
+      lat.truncated ? h('div', { class: 'small' }, `SÉRIE: OS ${samples.length} TURNOS MAIS RECENTES DE ${lat.total}. OS PERCENTIS USAM TODOS.`) : null,
+    );
+
+    const errors = (errRes.ok ? errRes.body.errors : []) as any[];
+    const errCols = '100px 190px 110px minmax(0,1fr)';
+    const errFrame = frame(
+      'ÚLTIMOS ERROS',
+      { tone: errors.length ? 'warn' : undefined, style: 'gap:0' },
+      grid(errCols, { class: 'tbl-head' }, h('span', {}, 'QUANDO'), h('span', {}, 'EVENTO'), h('span', {}, 'SALA'), h('span', {}, 'MENSAGEM')),
+      ...errors.map((e) =>
+        grid(errCols, { class: 'tbl-row dotted' }, h('span', { class: 'amber' }, formatStamp(e.at)), h('span', { class: 'raw ellipsis' }, e.event ?? '—'), h('span', { class: 'ellipsis' }, e.room_id ?? '—'), h('span', { class: 'raw ellipsis', title: e.msg }, e.msg)),
+      ),
+      errors.length === 0 ? h('div', { style: 'padding:10px 0 4px' }, errRes.ok ? 'NENHUM ERRO REGISTRADO. SISTEMAS NOMINAIS.' : `◈ ${errorOf(errRes)}`) : null,
+    );
+
+    // Log ao vivo: filtros no servidor; as linhas chegam como evento e
+    // entram direto na caixa, sem repintar a página.
+    const rooms = [...new Set(((satsRes.ok ? satsRes.body.satellites : []) as any[]).map((s) => s.room_id).filter(Boolean))].sort() as string[];
+    if (diag.room && !rooms.includes(diag.room)) rooms.push(diag.room);
+    const roomOptions = [{ value: null as string | null, label: 'TODAS' }, ...rooms.map((r) => ({ value: r as string | null, label: r }))];
+    const roomCycler = cycler(roomOptions, roomOptions.findIndex((o) => o.value === diag.room), (value) => {
+      diag.room = value;
+      restartLogStream();
+    }, 'sala');
+    const levelCycler = cycler(LOG_LEVELS, LOG_LEVELS.findIndex((o) => o.value === diag.level), (value) => {
+      diag.level = value;
+      restartLogStream();
+    }, 'nível');
+
+    diag.status = h('span');
+    diag.box = h('div', { class: 'log-box', role: 'log', 'aria-live': 'off' });
+    diag.box.append(...diag.lines.map(logLine));
+    const pauseBtn = cmd(diag.paused ? 'RETOMAR' : 'PAUSAR', () => {
+      diag.paused = !diag.paused;
+      pauseBtn.textContent = `[ ${diag.paused ? 'RETOMAR' : 'PAUSAR'} ]`;
+      if (!diag.paused) {
+        diag.box!.replaceChildren(...diag.lines.map(logLine));
+        diag.box!.scrollTop = diag.box!.scrollHeight;
+      }
+      paintLogStatus();
+    });
+    const live = frame(
+      'LOG AO VIVO // SEM TRANSCRIÇÃO',
+      { style: 'gap:6px' },
       h(
         'div',
-        { class: 'frame lock', style: 'background:var(--bg);padding:26px 40px;align-items:center;gap:12px;text-align:center' },
-        h('span', { class: 'small', style: 'letter-spacing:.3em' }, 'MÓDULO 08 // DIAGNÓSTICO'),
-        typed('span', { class: 'display', style: 'font-size:38px;letter-spacing:.06em' }, 'ACESSO RESTRITO — MÓDULO NÃO INSTALADO', { cps: 40, delayMs: 300, cursor: 'hi', keepCursor: true }),
-        h('span', { style: 'font-size:12px;line-height:1.7' }, 'PREVISÃO DE INSTALAÇÃO: v2.', h('br'), 'NENHUMA AÇÃO É REQUERIDA DA TRIPULAÇÃO.'),
+        { class: 'row', style: 'gap:16px;flex-wrap:wrap' },
+        h('span', { class: 'small' }, 'SALA'),
+        roomCycler,
+        h('span', { class: 'small' }, 'NÍVEL'),
+        levelCycler,
+        h('span', { class: 'spacer' }),
+        diag.status,
+        pauseBtn,
+        cmd('LIMPAR', () => {
+          diag.lines = [];
+          diag.box!.replaceChildren();
+        }, { tone: 'quiet' }),
+      ),
+      diag.box,
+    );
+
+    root.append(
+      h(
+        'div',
+        { class: 'stack', style: 'gap:22px' },
+        ttfab,
+        series,
+        errFrame,
+        live,
       ),
     );
-    root.append(h('div', { style: 'position:relative;flex:1;min-height:420px' }, skeleton, lock));
+    paintLogStatus();
+    queueMicrotask(() => {
+      if (diag.box) diag.box.scrollTop = diag.box.scrollHeight;
+    });
+    if (diag.streamState === 'closed') {
+      diag.streamState = 'connecting';
+      restartLogStream();
+    }
   },
 });
 
@@ -1808,6 +2816,14 @@ window.panel.onEvent((event) => {
     case 'wake':
       meter.wakeAt = Date.now();
       paintMeter();
+      break;
+    case 'log':
+      appendLogLine(event.record);
+      break;
+    case 'log-status':
+      diag.streamState = event.state;
+      diag.streamError = event.error;
+      paintLogStatus();
       break;
   }
 });

@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { PanelResult } from './methods.js';
+import type { LogStreamEvent } from '../admin/logStream.js';
 
 // De dist/main/panel/ sobe dois níveis até dist/.
 const DIST_DIR = fileURLToPath(new URL('../..', import.meta.url));
@@ -34,7 +35,8 @@ export type PanelEvent =
   | { type: 'local'; view: unknown }
   | { type: 'mic'; level: number }
   | { type: 'wake-score'; score: number; threshold: number | null }
-  | { type: 'wake'; score: number };
+  | { type: 'wake'; score: number }
+  | LogStreamEvent;
 
 export interface PanelController {
   open(tab?: string): void;
@@ -45,6 +47,8 @@ export interface PanelController {
 
 export function createPanelController(
   methods: Record<string, (...args: unknown[]) => Promise<PanelResult>>,
+  /** Janela destruída: quem segura recurso por ela (o stream de log) solta aqui. */
+  onClosed: () => void = () => {},
 ): PanelController {
   let win: BrowserWindow | null = null;
 
@@ -103,6 +107,7 @@ export function createPanelController(
       current.once('ready-to-show', () => current.show());
       current.on('closed', () => {
         if (win === current) win = null;
+        onClosed();
       });
       current.webContents.on('will-navigate', (event) => event.preventDefault());
       current.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));

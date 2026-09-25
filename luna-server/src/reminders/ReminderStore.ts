@@ -155,6 +155,50 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
       );
     `);
   },
+  /**
+   * Diagnóstico do painel (v2): série de TTFAB, últimos erros e histórico de
+   * lembretes (tocou, dispensado, adiado, perdido). Tabelas novas,
+   * sem tocar nas existentes; quem lê e grava é o `DiagnosticsStore`, que
+   * também poda (30 dias ou 10 mil linhas por tabela). Sem transcrição: só
+   * números, nomes de evento e a mensagem de log.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS latency_samples (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        at                  INTEGER NOT NULL,
+        room_id             TEXT    NOT NULL,
+        device_id           TEXT,
+        provider            TEXT    NOT NULL,
+        latency_ms          INTEGER NOT NULL,
+        since_turn_start_ms INTEGER,
+        provider_wait_ms    INTEGER,
+        session_cold        INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_latency_at ON latency_samples (at);
+
+      CREATE TABLE IF NOT EXISTS error_log (
+        id      INTEGER PRIMARY KEY AUTOINCREMENT,
+        at      INTEGER NOT NULL,
+        level   TEXT    NOT NULL,
+        event   TEXT,
+        room_id TEXT,
+        msg     TEXT    NOT NULL,
+        detail  TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_error_at ON error_log (at);
+
+      CREATE TABLE IF NOT EXISTS reminder_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        at          INTEGER NOT NULL,
+        reminder_id INTEGER NOT NULL,
+        kind        TEXT    NOT NULL,
+        room_id     TEXT,
+        via         TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_reminder_events_at ON reminder_events (at);
+    `);
+  },
 ];
 
 /**
@@ -499,6 +543,71 @@ export class ReminderStore {
     this.stmt(
       `UPDATE reminders SET status = 'armed', next_due_utc = ?, updated_at = ? WHERE id = ?`,
     ).run(nextDueUtc, now, id);
+  }
+
+  /**
+   * Edição pelo painel (v2): troca sala, rótulo e horário de um lembrete
+   * `armed`. `ringing` fica de fora de propósito — mexer no que toca agora
+   * brigaria com o ciclo do `AlarmRinger`; o painel manda dispensar antes.
+   *
+   * Trocar de sala gera `short_id` novo: ele só é único entre os vivos da sala.
+   *
+   * @returns o lembrete atualizado, ou `null` se ele não estava `armed`.
+   */
+  update(
+    id: number,
+    row: Omit<
+      Reminder,
+      'id' | 'shortId' | 'status' | 'createdAt' | 'updatedAt' | 'lastFiredAt' | 'fireCount'
+    >,
+    now = Date.now(),
+  ): Reminder | null {
+    const current = this.get(id);
+    if (!current || current.status !== 'armed') return null;
+    const shortId = current.roomId === row.roomId ? current.shortId : this.nextShortId(row.roomId);
+    const result = this.stmt(
+      `UPDATE reminders
+          SET short_id = ?, room_id = ?, label = ?, kind = ?, due_at_utc = ?,
+              local_hour = ?, local_minute = ?, repeat_rule = ?, next_due_utc = ?,
+              updated_at = ?
+        WHERE id = ? AND status = 'armed'`,
+    ).run(
+      shortId,
+      row.roomId,
+      row.label,
+      row.kind,
+      row.dueAtUtc,
+      row.localHour,
+      row.localMinute,
+      row.repeatRule,
+      row.nextDueUtc,
+      now,
+      id,
+    );
+    return Number(result.changes) === 1 ? this.get(id) : null;
+  }
+
+  /**
+   * `putAudio` só se o lembrete ainda estiver vivo e com o mesmo rótulo que
+   * foi renderizado — a captura leva segundos, e o painel pode editar no meio.
+   * Síncrono do `get` ao `INSERT`: nada roda entre os dois.
+   */
+  putAudioIfCurrent(reminderId: number, label: string, pcm16: Buffer, now = Date.now()): boolean {
+    const current = this.get(reminderId);
+    if (!current || current.label !== label || (current.status !== 'armed' && current.status !== 'ringing')) {
+      return false;
+    }
+    this.putAudio(reminderId, pcm16, now);
+    return true;
+  }
+
+  /** A fala gravada deixou de valer (rótulo trocado): o toque cai para só-bipe até renderizar de novo. */
+  deleteAudio(reminderId: number): void {
+    this.stmt('DELETE FROM reminder_audio WHERE reminder_id = ?').run(reminderId);
+  }
+
+  hasAudio(reminderId: number): boolean {
+    return this.stmt('SELECT 1 FROM reminder_audio WHERE reminder_id = ?').get(reminderId) !== undefined;
   }
 
   /**

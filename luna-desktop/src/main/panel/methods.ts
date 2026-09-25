@@ -7,6 +7,7 @@
 // Módulo puro (sem `electron`), testável com `node --test`.
 
 import type { AdminClient, AdminResult } from '../admin/client.js';
+import { validFilter, type LogFilter } from '../admin/logStream.js';
 import type { LocalSettingsPatch } from '../local-settings.js';
 import type { AppState } from '../state.js';
 
@@ -21,6 +22,14 @@ export interface LocalView {
   adminToken: { set: boolean; source: 'panel' | 'env' | 'none' };
   muted: boolean;
   autostart: boolean;
+  /** Limiar escolhido no painel; `null` = o do .env ou o default do sidecar. */
+  wakeThreshold: number | null;
+  /** Limiar em vigor no sidecar agora (do último `ready`). */
+  wakeThresholdActive: number | null;
+  talkShortcut: string;
+  /** O atalho gravado não pôde ser registrado (outro app já o usa). */
+  talkShortcutError: string | null;
+  reminderNotifications: boolean;
   state: AppState;
   /** Por que o satélite não está de pé, quando não está. */
   configError: string | null;
@@ -44,16 +53,35 @@ export interface LocalControls {
   listAudioDevices(): Promise<AudioDeviceInfo[]>;
 }
 
+/**
+ * Arquivo no disco, sempre por diálogo nativo: o painel nunca escolhe caminho
+ * nem lê arquivo sozinho — quem escolhe é a pessoa, na janela do sistema.
+ */
+export interface FileControls {
+  /** `null` = cancelado. Devolve o caminho gravado. */
+  saveJson(defaultName: string, data: unknown): Promise<string | null>;
+  /** `null` = cancelado. Lança em arquivo ilegível ou JSON inválido. */
+  openJson(): Promise<unknown | null>;
+}
+
+/** Log ao vivo do servidor; as linhas chegam ao painel como evento, não como resposta. */
+export interface LogControls {
+  start(filter: LogFilter): void;
+  stop(): void;
+}
+
 export interface PanelDeps {
   admin: AdminClient;
   local: LocalControls;
+  logs: LogControls;
+  files: FileControls;
 }
 
 export type PanelResult = AdminResult;
 
 type Method = (...args: unknown[]) => Promise<PanelResult>;
 
-const SERVER_GROUPS = new Set(['ha', 'provider', 'calendar']);
+const SERVER_GROUPS = new Set(['ha', 'provider', 'calendar', 'voice', 'weather']);
 
 function str(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.length === 0 || value.length > 256) {
@@ -80,6 +108,13 @@ function bool(value: unknown, name: string): boolean {
   return value;
 }
 
+function int(value: unknown, name: string, min: number, max: number): number {
+  if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) {
+    throw new TypeError(`argumento "${name}" inválido`);
+  }
+  return value as number;
+}
+
 const seg = encodeURIComponent;
 
 function ok(body: unknown): PanelResult {
@@ -87,7 +122,7 @@ function ok(body: unknown): PanelResult {
 }
 
 export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
-  const { admin, local } = deps;
+  const { admin, local, logs, files } = deps;
   const methods: Record<string, (...args: unknown[]) => Promise<PanelResult> | PanelResult> = {
     // ─── servidor (API admin) ───
     'server.status': () => admin.request('GET', 'status'),
@@ -97,6 +132,9 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
       admin.request('PUT', `satellites/${seg(str(deviceId, 'device_id'))}`, {
         name: name === null ? null : String(name ?? ''),
       }),
+    'server.blockSatellite': (deviceId, blocked) =>
+      admin.request('PUT', `satellites/${seg(str(deviceId, 'device_id'))}`, { blocked: bool(blocked, 'blocked') }),
+    'server.disconnectSatellite': (deviceId) => admin.request('POST', `satellites/${seg(str(deviceId, 'device_id'))}/disconnect`),
     'server.rooms': () => admin.request('GET', 'rooms'),
     'server.mapRoom': (roomId, area) =>
       admin.request('PUT', `rooms/${seg(str(roomId, 'room_id'))}`, {
@@ -104,16 +142,64 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
       }),
     'server.devices': () => admin.request('GET', 'devices'),
     'server.saveAliases': (aliases) => admin.request('PUT', 'devices', { aliases: obj(aliases, 'aliases') }),
-    'server.reminders': () => admin.request('GET', 'reminders'),
-    'server.cancelReminder': (id) => {
-      if (!Number.isInteger(id) || (id as number) <= 0) throw new TypeError('id inválido');
-      return admin.request('DELETE', `reminders/${id as number}`);
+    'server.saveDevices': (patch) => {
+      const p = obj(patch, 'patch');
+      const body: Record<string, unknown> = {};
+      if (p.aliases !== undefined) body.aliases = obj(p.aliases, 'aliases');
+      if (p.exclude !== undefined) {
+        if (!Array.isArray(p.exclude) || p.exclude.some((e) => typeof e !== 'string')) throw new TypeError('exclude inválido');
+        body.exclude = p.exclude;
+      }
+      if (p.devices !== undefined) {
+        if (!Array.isArray(p.devices)) throw new TypeError('devices inválido');
+        body.devices = p.devices.map((d, i) => obj(d, `devices[${i}]`));
+      }
+      return admin.request('PUT', 'devices', body);
     },
+    'server.testDevice': (entityId, action) => {
+      if (action !== 'on' && action !== 'off') throw new TypeError('ação inválida');
+      return admin.request('POST', 'devices/test', { entity_id: str(entityId, 'entity_id'), action });
+    },
+    'server.refreshDevices': () => admin.request('POST', 'devices/refresh'),
+    'server.reminders': () => admin.request('GET', 'reminders'),
+    'server.cancelReminder': (id) => admin.request('DELETE', `reminders/${int(id, 'id', 1, Number.MAX_SAFE_INTEGER)}`),
+    'server.createReminder': (body) => admin.request('POST', 'reminders', obj(body, 'lembrete')),
+    'server.editReminder': (id, body) =>
+      admin.request('PUT', `reminders/${int(id, 'id', 1, Number.MAX_SAFE_INTEGER)}`, obj(body, 'lembrete')),
+    'server.reminderHistory': (limit) => admin.request('GET', `reminders/history?limit=${int(limit ?? 50, 'limit', 1, 500)}`),
     'server.settings': (g) => admin.request('GET', `settings/${group(g)}`),
     'server.saveSettings': (g, patch) => admin.request('PUT', `settings/${group(g)}`, obj(patch, 'patch')),
     'server.testConnection': (g, patch) =>
       admin.request('POST', `settings/${group(g)}/test`, obj(patch ?? {}, 'patch')),
     'server.restart': () => admin.request('POST', 'restart'),
+    // Backup: o JSON vai direto do servidor para o disco pelo processo
+    // principal, sem passar pela janela do painel.
+    'server.saveBackup': async () => {
+      const result = await admin.request('GET', 'backup');
+      if (!result.ok) return result;
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = await files.saveJson(`luna-backup-${stamp}.json`, result.body);
+      return ok({ saved: path !== null, path });
+    },
+    'server.restoreBackup': async (mode) => {
+      if (mode !== 'keep' && mode !== 'replace') throw new TypeError('modo inválido');
+      const backup = await files.openJson();
+      if (backup === null) return ok({ cancelled: true });
+      return admin.request('POST', 'restore', { backup, reminders: mode });
+    },
+    'server.geocode': (city) => admin.request('POST', 'settings/weather/geocode', { city: str(city, 'cidade') }),
+    'server.latency': (hours) => admin.request('GET', `diagnostics/latency?hours=${int(hours ?? 24, 'hours', 1, 720)}`),
+    'server.errors': (limit) => admin.request('GET', `diagnostics/errors?limit=${int(limit ?? 20, 'limit', 1, 200)}`),
+
+    // ─── log ao vivo ───
+    'logs.start': (level, room) => {
+      logs.start(validFilter(level, room ?? null));
+      return ok(null);
+    },
+    'logs.stop': () => {
+      logs.stop();
+      return ok(null);
+    },
 
     // ─── este computador ───
     'local.get': () => ok(local.view()),

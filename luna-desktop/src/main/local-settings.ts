@@ -12,6 +12,12 @@ export interface StoredLocalSettings {
   roomId?: string;
   micDeviceId?: string;
   speakerDeviceId?: string;
+  /** Limiar da wake word (v2). Ausente = `WAKEWORD_THRESHOLD` do .env ou o default do sidecar. */
+  wakeThreshold?: number;
+  /** Accelerator do Electron para "falar agora" (v2). Ausente ou vazio = sem atalho. */
+  talkShortcut?: string;
+  /** Notificação do Windows quando um lembrete toca aqui (v2). Ausente = ligado. */
+  reminderNotifications?: boolean;
   secrets?: {
     authSecret?: string;
     adminToken?: string;
@@ -34,6 +40,9 @@ export interface ResolvedLocalSettings {
   adminToken: string;
   micDeviceId: string;
   speakerDeviceId: string;
+  wakeThreshold: number | null;
+  talkShortcut: string;
+  reminderNotifications: boolean;
   /** De onde veio cada segredo — o painel mostra, sem nunca mostrar o valor. */
   sources: { authSecret: SecretSource; adminToken: SecretSource };
 }
@@ -44,6 +53,11 @@ export interface LocalSettingsPatch {
   roomId?: string;
   micDeviceId?: string;
   speakerDeviceId?: string;
+  /** `null` volta ao .env/default. */
+  wakeThreshold?: number | null;
+  /** Vazio desliga o atalho. */
+  talkShortcut?: string;
+  reminderNotifications?: boolean;
   authSecret?: string;
   adminToken?: string;
 }
@@ -59,6 +73,17 @@ export class LocalSettingsError extends Error {
 
 export const DEFAULT_SERVER_URL = 'ws://localhost:8080';
 export const DEFAULT_ROOM_ID = 'desktop_diogo';
+
+/**
+ * Faixa do limiar exposta ao painel. Abaixo de 0.5 a wake word dispara com
+ * qualquer conversa; o default do sidecar é 0.97.
+ */
+export const WAKE_THRESHOLD_MIN = 0.5;
+export const WAKE_THRESHOLD_MAX = 0.999;
+
+/** Accelerator do Electron: modificadores + uma tecla, separados por `+`. */
+const SHORTCUT_PATTERN =
+  /^((CommandOrControl|Control|Ctrl|Alt|Shift)\+){1,3}([A-Z0-9]|F([1-9]|1[0-9]|2[0-4])|Space|Up|Down|Left|Right|Home|End|PageUp|PageDown|Insert)$|^F([1-9]|1[0-9]|2[0-4])$/;
 
 /** Mesmo formato que o luna-server exige no auth (ROOM_ID_PATTERN em WsServer.ts). */
 const ROOM_ID_PATTERN = /^[a-z0-9_]{1,64}$/;
@@ -91,6 +116,9 @@ export function resolveLocalSettings(
     adminToken: panelToken || envToken,
     micDeviceId: stored.micDeviceId ?? '',
     speakerDeviceId: stored.speakerDeviceId ?? '',
+    wakeThreshold: typeof stored.wakeThreshold === 'number' ? stored.wakeThreshold : null,
+    talkShortcut: stored.talkShortcut ?? '',
+    reminderNotifications: stored.reminderNotifications ?? true,
     sources: {
       authSecret: panelSecret ? 'panel' : envSecret ? 'env' : 'none',
       adminToken: panelToken ? 'panel' : envToken ? 'env' : 'none',
@@ -130,6 +158,36 @@ export function applyLocalPatch(
 
   if (patch.micDeviceId !== undefined) next.micDeviceId = patch.micDeviceId;
   if (patch.speakerDeviceId !== undefined) next.speakerDeviceId = patch.speakerDeviceId;
+
+  if (patch.wakeThreshold !== undefined) {
+    if (patch.wakeThreshold === null) {
+      delete next.wakeThreshold;
+    } else if (
+      typeof patch.wakeThreshold !== 'number' ||
+      !Number.isFinite(patch.wakeThreshold) ||
+      patch.wakeThreshold < WAKE_THRESHOLD_MIN ||
+      patch.wakeThreshold > WAKE_THRESHOLD_MAX
+    ) {
+      throw new LocalSettingsError('wakeThreshold', `Sensibilidade entre ${WAKE_THRESHOLD_MIN} e ${WAKE_THRESHOLD_MAX}.`);
+    } else {
+      next.wakeThreshold = patch.wakeThreshold;
+    }
+  }
+
+  if (patch.talkShortcut !== undefined) {
+    const accel = String(patch.talkShortcut).trim();
+    if (accel === '') delete next.talkShortcut;
+    else if (!SHORTCUT_PATTERN.test(accel)) {
+      throw new LocalSettingsError('talkShortcut', 'Atalho precisa de um modificador (Ctrl, Alt, Shift) e uma tecla, ou uma tecla F.');
+    } else next.talkShortcut = accel;
+  }
+
+  if (patch.reminderNotifications !== undefined) {
+    if (typeof patch.reminderNotifications !== 'boolean') {
+      throw new LocalSettingsError('reminderNotifications', 'Notificações: liga ou desliga.');
+    }
+    next.reminderNotifications = patch.reminderNotifications;
+  }
 
   for (const field of ['authSecret', 'adminToken'] as const) {
     const value = patch[field];
