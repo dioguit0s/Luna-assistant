@@ -181,9 +181,9 @@ async function main(): Promise<void> {
       },
       onReminderSaved: (reminder, labelChanged) => {
         reminderScheduler.reschedule();
-        if (labelChanged && reminder.label) {
-          wsServer.requestReminderPrerender(reminder.roomId, reminder.id, reminder.label);
-        }
+        if (!labelChanged) return;
+        if (reminder.label) wsServer.requestReminderPrerender(reminder.roomId, reminder.id, reminder.label);
+        else wsServer.cancelReminderPrerender(reminder.id);
       },
       weatherSource,
       diagnostics,

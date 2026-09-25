@@ -202,8 +202,12 @@ export class WsServer {
   }
 
   /** Fala de um lembrete salvo pelo painel — ver `Orchestrator.requestReminderPrerender`. */
-  requestReminderPrerender(roomId: string, reminderId: number, label: string): boolean {
-    return this.orchestrator.requestReminderPrerender(roomId, reminderId, label);
+  requestReminderPrerender(roomId: string, reminderId: number, label: string): void {
+    this.orchestrator.requestReminderPrerender(roomId, reminderId, label);
+  }
+
+  cancelReminderPrerender(reminderId: number): void {
+    this.orchestrator.cancelReminderPrerender(reminderId);
   }
 
   /**

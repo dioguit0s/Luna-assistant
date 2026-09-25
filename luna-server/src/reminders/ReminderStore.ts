@@ -587,6 +587,20 @@ export class ReminderStore {
     return Number(result.changes) === 1 ? this.get(id) : null;
   }
 
+  /**
+   * `putAudio` só se o lembrete ainda estiver vivo e com o mesmo rótulo que
+   * foi renderizado — a captura leva segundos, e o painel pode editar no meio.
+   * Síncrono do `get` ao `INSERT`: nada roda entre os dois.
+   */
+  putAudioIfCurrent(reminderId: number, label: string, pcm16: Buffer, now = Date.now()): boolean {
+    const current = this.get(reminderId);
+    if (!current || current.label !== label || (current.status !== 'armed' && current.status !== 'ringing')) {
+      return false;
+    }
+    this.putAudio(reminderId, pcm16, now);
+    return true;
+  }
+
   /** A fala gravada deixou de valer (rótulo trocado): o toque cai para só-bipe até renderizar de novo. */
   deleteAudio(reminderId: number): void {
     this.stmt('DELETE FROM reminder_audio WHERE reminder_id = ?').run(reminderId);

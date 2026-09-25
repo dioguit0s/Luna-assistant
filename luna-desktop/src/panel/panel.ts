@@ -156,11 +156,33 @@ function formatAgo(ts: number | null): string {
   return `HÁ ${Math.floor(s / 86400)}D`;
 }
 
+/**
+ * Hora de parede de São Paulo, o relógio único da Luna (ADR 006) — não o fuso
+ * do Windows onde o painel roda. Um computador em outro fuso mostraria (e,
+ * pior, devolveria ao editar) horários deslocados.
+ */
+const spFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Sao_Paulo',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23',
+});
+
+function spParts(ts: number): { year: string; month: string; day: string; hour: string; minute: string; second: string } {
+  const out: Record<string, string> = {};
+  for (const part of spFormatter.formatToParts(new Date(ts))) out[part.type] = part.value;
+  return out as ReturnType<typeof spParts>;
+}
+
 /** `25.09 06:30` */
 function formatStamp(ts: number | null): string {
   if (!ts) return '—';
-  const d = new Date(ts);
-  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const p = spParts(ts);
+  return `${p.day}.${p.month} ${p.hour}:${p.minute}`;
 }
 
 /** `04D 11H 23M` */
@@ -467,8 +489,10 @@ function paintCore(): void {
 
 function paintClock(): void {
   const now = new Date();
-  $('date').textContent = `${pad(now.getDate())}.${pad(now.getMonth() + 1)}.${now.getFullYear()}`;
-  $('clock').textContent = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+  // Mesmo relógio dos lembretes: São Paulo, não o fuso do Windows.
+  const sp = spParts(now.getTime());
+  $('date').textContent = `${sp.day}.${sp.month}.${sp.year}`;
+  $('clock').textContent = `${sp.hour}:${sp.minute}:${sp.second}`;
   $('uptime').textContent =
     core.status && core.link !== 'offline' && core.link !== 'restarting'
       ? formatUptime(core.status.uptime_s + Math.floor((Date.now() - core.statusAt) / 1000))
@@ -1656,6 +1680,8 @@ interface ReminderDraft {
   time: string;
   error: { field: string; text: string } | null;
   saving: boolean;
+  /** Data, hora ou repetição tocadas. Sem isso, editar manda `keep_schedule`. */
+  scheduleDirty: boolean;
 }
 let reminderDraft: ReminderDraft | null = null;
 
@@ -1676,26 +1702,30 @@ const HISTORY_LABELS: Record<string, [string, string]> = {
 };
 const VIA_LABELS: Record<string, string> = { admin: 'PAINEL', voice: 'VOZ' };
 
+/** `AAAA-MM-DD` em São Paulo, para o `<input type="date">`. */
 function localDateInput(ts: number): string {
-  const d = new Date(ts);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const p = spParts(ts);
+  return `${p.year}-${p.month}-${p.day}`;
 }
 
 function openReminderDraft(r: any | null, defaultRoom: string): void {
   if (r) {
-    const due = new Date(r.next_due_utc);
+    const p = spParts(r.next_due_utc);
     reminderDraft = {
       id: r.id,
       room_id: r.room_id,
       label: r.label ?? '',
       repeat: r.repeat_rule ?? 'none',
-      date: localDateInput(r.next_due_utc),
-      time: r.kind === 'recurring' ? `${pad(r.local_hour)}:${pad(r.local_minute)}` : `${pad(due.getHours())}:${pad(due.getMinutes())}`,
+      // O servidor manda a hora de parede pronta; o cálculo local é só para
+      // um servidor anterior que não mande.
+      date: r.local_date ?? `${p.year}-${p.month}-${p.day}`,
+      time: r.kind === 'recurring' ? `${pad(r.local_hour)}:${pad(r.local_minute)}` : r.local_time ?? `${p.hour}:${p.minute}`,
       error: null,
       saving: false,
+      scheduleDirty: false,
     };
   } else {
-    reminderDraft = { id: null, room_id: defaultRoom, label: '', repeat: 'none', date: localDateInput(Date.now() + 86_400_000), time: '07:00', error: null, saving: false };
+    reminderDraft = { id: null, room_id: defaultRoom, label: '', repeat: 'none', date: localDateInput(Date.now() + 86_400_000), time: '07:00', error: null, saving: false, scheduleDirty: true };
   }
   confirmingReminder = null;
 }
@@ -1713,6 +1743,7 @@ function reminderEditor(draft: ReminderDraft, rooms: string[]): HTMLElement {
   }, 'sala');
   const repeatCycler = cycler(REPEAT_OPTIONS, REPEAT_OPTIONS.findIndex((o) => o.value === draft.repeat), (value) => {
     draft.repeat = value;
+    draft.scheduleDirty = true;
     // Data só vale para o único: repinta para mostrar ou esconder o campo.
     void renderCurrent();
   }, 'repetição');
@@ -1720,15 +1751,25 @@ function reminderEditor(draft: ReminderDraft, rooms: string[]): HTMLElement {
   const labelInput = lineInput(draft.label, { maxLength: 200, placeholder: 'VAZIO = ALARME SÓ COM BIPE', 'aria-label': 'Rótulo', class: `line-input${bad('label')}` });
   labelInput.addEventListener('input', () => (draft.label = labelInput.value));
   const dateInput = lineInput(draft.date, { type: 'date', 'aria-label': 'Data', class: `line-input${bad('date')}` });
-  dateInput.addEventListener('input', () => (draft.date = dateInput.value));
+  dateInput.addEventListener('input', () => {
+    draft.date = dateInput.value;
+    draft.scheduleDirty = true;
+  });
   const timeInput = lineInput(draft.time, { type: 'time', 'aria-label': 'Hora', class: `line-input${bad('time')}` });
-  timeInput.addEventListener('input', () => (draft.time = timeInput.value));
+  timeInput.addEventListener('input', () => {
+    draft.time = timeInput.value;
+    draft.scheduleDirty = true;
+  });
 
   const save = async (): Promise<void> => {
     if (draft.saving) return;
     draft.saving = true;
-    const body: Record<string, unknown> = { room_id: draft.room_id, label: draft.label.trim() || null, repeat: draft.repeat, time: draft.time };
-    if (draft.repeat === 'none') body.date = draft.date;
+    // Horário intocado numa edição: o servidor reaproveita o gravado, com os
+    // segundos de um "daqui a 90 segundos" — o formulário só tem HH:MM.
+    const body: Record<string, unknown> =
+      draft.id !== null && !draft.scheduleDirty
+        ? { room_id: draft.room_id, label: draft.label.trim() || null, keep_schedule: true }
+        : { room_id: draft.room_id, label: draft.label.trim() || null, repeat: draft.repeat, time: draft.time, ...(draft.repeat === 'none' ? { date: draft.date } : {}) };
     const title = (draft.label.trim() || 'ALARME').toUpperCase();
     const result = draft.id === null ? await window.panel.call('server.createReminder', body) : await window.panel.call('server.editReminder', draft.id, body);
     draft.saving = false;
@@ -1902,6 +1943,9 @@ async function renderReminderHistory(root: HTMLElement): Promise<void> {
   if (!result.ok) return serverUnavailable(root, result);
   const events = result.body.events as any[];
   setMeta(`${events.length} EVENTOS RECENTES`);
+  if (result.body.complete === false) {
+    root.append(h('div', { class: 'banner', style: 'margin-bottom:12px' }, h('span', {}, '▲ HISTÓRICO INCOMPLETO: O LOG_LEVEL DO NÚCLEO ESTÁ ACIMA DE INFO, E OS EVENTOS DE LEMBRETE NÃO SÃO REGISTRADOS.')));
+  }
   if (events.length === 0) {
     root.append(emptyReport('HISTÓRICO // 0 REGISTROS', 'NADA TOCOU AINDA.', 'O HISTÓRICO COMEÇA A CONTAR A PARTIR DESTA VERSÃO DO NÚCLEO.'));
     return;
@@ -2323,10 +2367,10 @@ function msOrDash(ms: number | null | undefined): string {
   return typeof ms === 'number' ? `${String(ms).padStart(4)}MS` : '----MS';
 }
 
-/** `12:04:33` */
+/** `12:04:33`, em São Paulo. */
 function formatClock(ts: number): string {
-  const d = new Date(ts);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  const p = spParts(ts);
+  return `${p.hour}:${p.minute}:${p.second}`;
 }
 
 /** Barra de texto: █ até o p50, ▒ até o p90, ┊ na meta. Escala comum a todas as linhas. */

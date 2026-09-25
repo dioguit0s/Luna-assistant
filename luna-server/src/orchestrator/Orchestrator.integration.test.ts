@@ -1423,6 +1423,89 @@ describe('Orchestrator: pré-renderização da fala do lembrete', () => {
   });
 });
 
+describe('Orchestrator: pré-renderização pedida pelo painel', () => {
+  after(() => {
+    while (ringBuffers.length > 0) ringBuffers.pop()!.destroy();
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  let harness: Harness;
+
+  beforeEach(() => {
+    harness = buildHarness(() => new Response('[]', { status: 200 }));
+    mock.timers.enable({ apis: ['setTimeout', 'Date'], now: new Date('2026-08-20T12:00:00Z') });
+  });
+
+  afterEach(() => mock.timers.reset());
+
+  it('não abre a captura com turno em curso: espera o turnComplete da outra conversa', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({ roomId: ROOM_ID, label: 'remédio', dueAtUtc: Date.now() + 3_600_000 });
+
+    harness.provider.emitUserSpeech();
+    harness.orchestrator.requestReminderPrerender(ROOM_ID, criado.id, 'remédio');
+    mock.timers.tick(5_000);
+    assert.equal(harness.provider.spoken.length, 0, 'abriu a captura no meio da conversa');
+
+    harness.provider.emitTurnComplete({ assistantText: 'São sete horas.' });
+    mock.timers.tick(3_000);
+    assert.equal(harness.provider.spoken.length, 1, 'não renderizou depois que a sala liberou');
+    assert.match(harness.provider.spoken[0]!, /remédio/);
+  });
+
+  it('sem sessão aberta, desiste depois do teto e o lembrete fica só-bipe', async () => {
+    const criado = harness.reminderStore.insertOnce({ roomId: ROOM_ID, label: 'remédio', dueAtUtc: Date.now() + 3_600_000 });
+    harness.orchestrator.requestReminderPrerender(ROOM_ID, criado.id, 'remédio');
+    // Passo a passo: cada tentativa agenda a próxima de dentro do callback.
+    for (let i = 0; i < 300; i++) mock.timers.tick(500);
+    assert.equal(harness.provider.spoken.length, 0);
+    // E o timer parou: nada mais agendado para esse pedido.
+    assert.equal(harness.orchestrator['panelPrerenderByReminder'].size, 0);
+  });
+
+  it('o último rótulo salvo vence; rótulo apagado cancela o pedido', async () => {
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({ roomId: ROOM_ID, label: 'pão', dueAtUtc: Date.now() + 3_600_000 });
+    harness.provider.emitUserSpeech();
+    harness.orchestrator.requestReminderPrerender(ROOM_ID, criado.id, 'pão');
+    harness.orchestrator.requestReminderPrerender(ROOM_ID, criado.id, 'pão de queijo');
+    harness.provider.emitTurnComplete({});
+    mock.timers.tick(3_000);
+    assert.equal(harness.provider.spoken.length, 1);
+    assert.match(harness.provider.spoken[0]!, /pão de queijo/);
+
+    const outro = harness.reminderStore.insertOnce({ roomId: ROOM_ID, label: 'água', dueAtUtc: Date.now() + 3_600_000 });
+    harness.orchestrator.requestReminderPrerender(ROOM_ID, outro.id, 'água');
+    harness.orchestrator.cancelReminderPrerender(outro.id);
+    mock.timers.tick(3_000);
+    assert.equal(harness.provider.spoken.length, 1);
+  });
+});
+
+describe('Orchestrator: fala gravada só vale para o rótulo renderizado', () => {
+  after(() => {
+    while (ringBuffers.length > 0) ringBuffers.pop()!.destroy();
+    while (reminderStores.length > 0) reminderStores.pop()!.close();
+  });
+
+  it('rótulo editado durante a captura: o PCM antigo é descartado', async () => {
+    const harness = buildHarness(() => new Response('[]', { status: 200 }));
+    await harness.startSession();
+    const criado = harness.reminderStore.insertOnce({ roomId: ROOM_ID, label: 'remédio', dueAtUtc: Date.now() + 3_600_000 });
+
+    const renderizando = harness.orchestrator.prerenderReminderSpeech(ROOM_ID, criado.id, 'remédio');
+    await Promise.resolve();
+    harness.reminderStore.update(criado.id, {
+      roomId: ROOM_ID, label: 'vitamina', kind: 'once', dueAtUtc: criado.dueAtUtc, localHour: null, localMinute: null, repeatRule: null, nextDueUtc: criado.nextDueUtc,
+    });
+    harness.provider.emitAudioResponse(Buffer.from([1, 2]));
+    harness.provider.emitTurnComplete({});
+
+    assert.equal(await renderizando, false);
+    assert.equal(harness.reminderStore.getAudio(criado.id), null);
+  });
+});
+
 describe('Orchestrator: set_reminder ponta a ponta', () => {
   before(() => {
     createLogger(baseConfig);

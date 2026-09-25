@@ -4,7 +4,8 @@ import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import type { ReminderStore, Reminder } from '../reminders/ReminderStore.js';
 import { spokenReminder } from '../reminders/spoken.js';
-import { resolvePanelReminder } from '../reminders/panelInput.js';
+import { resolvePanelReminder, type PanelReminder } from '../reminders/panelInput.js';
+import { localDateTime } from '../time/clock.js';
 import type { RoomManager } from '../rooms/RoomManager.js';
 import type { WeatherSource } from '../weather/WeatherSource.js';
 import type { RuntimeSettings } from '../settings/RuntimeSettings.js';
@@ -458,6 +459,9 @@ export class AdminApi {
       local_minute: r.localMinute,
       repeat_rule: r.repeatRule,
       next_due_utc: r.nextDueUtc,
+      // Hora de parede de São Paulo (ADR 006): o painel preenche o formulário
+      // com isto, não com o fuso da máquina onde ele roda.
+      ...localWire(r.nextDueUtc),
       status: r.status,
       // Sem fala gravada, o toque é só o bipe (ver `Orchestrator.prerenderReminderSpeech`).
       has_audio: r.label === null ? null : this.deps.reminderStore.hasAudio(r.id),
@@ -516,9 +520,15 @@ export class AdminApi {
     }
     if (current.status === 'ringing') throw new HttpError(409, 'o lembrete está tocando agora — dispense antes de editar');
 
-    const resolved = resolvePanelReminder(body, new Date(this.now()));
+    // `keep_schedule: true`: só sala/rótulo mudaram. Reaproveita o horário
+    // gravado em vez de revalidar o que o formulário arredondou para HH:MM —
+    // um "daqui a 90 segundos" editado andaria até 59 s, ou já teria "passado".
+    const keep = typeof body === 'object' && body !== null && (body as Record<string, unknown>).keep_schedule === true;
+    // Com `keep`, o agendamento fictício só serve para validar sala e rótulo.
+    const b = body as Record<string, unknown>;
+    const resolved = resolvePanelReminder(keep ? { room_id: b.room_id, label: b.label, repeat: 'daily', time: '00:00' } : body, new Date(this.now()));
     if (!resolved.ok) throw new HttpError(422, resolved.error, resolved.field);
-    const v = resolved.value;
+    const v = keep ? { ...this.keptSchedule(current), roomId: resolved.value.roomId, label: resolved.value.label } : resolved.value;
     if (v.roomId !== current.roomId && reminderStore.countLiveByRoom(v.roomId) >= config.reminderMaxPerRoom) {
       throw new HttpError(422, `a sala já tem ${config.reminderMaxPerRoom} lembretes vivos`, 'room_id');
     }
@@ -553,9 +563,19 @@ export class AdminApi {
     return this.reminderWire(updated);
   }
 
+  private keptSchedule(r: Reminder): PanelReminder {
+    return r.kind === 'once'
+      ? { roomId: r.roomId, label: r.label, kind: 'once', dueAtUtc: r.dueAtUtc!, nextDueUtc: r.nextDueUtc }
+      : { roomId: r.roomId, label: r.label, kind: 'recurring', localHour: r.localHour!, localMinute: r.localMinute!, repeatRule: r.repeatRule!, nextDueUtc: r.nextDueUtc };
+  }
+
   private reminderHistory(query: URLSearchParams): unknown {
     const limit = intParam(query, 'limit', 50, 1, 500);
+    const level = LEVEL_VALUES[this.deps.config.logLevel as LogLevelName];
     return {
+      // O histórico vem das linhas `info` do log (ver `Diagnostics`): acima
+      // disso ele para de crescer, e o painel precisa dizer isso.
+      complete: level !== undefined && level <= LEVEL_VALUES.info,
       events: this.deps.diagnostics.store.reminderHistory(limit).map((e) => ({
         id: e.id,
         at: e.at,
@@ -860,6 +880,12 @@ export class AdminApi {
     setTimeout(() => this.deps.onRestart(), 200).unref();
     return { restarting: true };
   }
+}
+
+function localWire(instantUtc: number): { local_date: string; local_time: string } {
+  const p = localDateTime(new Date(instantUtc));
+  const two = (n: number): string => String(n).padStart(2, '0');
+  return { local_date: `${p.year}-${two(p.month)}-${two(p.day)}`, local_time: `${two(p.hour)}:${two(p.minute)}` };
 }
 
 function logWire(record: LogRecord): unknown {

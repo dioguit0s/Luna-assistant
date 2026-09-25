@@ -420,6 +420,17 @@ describe('API admin', () => {
     assert.deepEqual(h.saved.at(-1), { id: created.body.id, labelChanged: true });
   });
 
+  it('editar só o rótulo com keep_schedule não mexe no horário (nem nos segundos)', async () => {
+    const due = Date.now() + 95_000;
+    const r = h.reminderStore.insertOnce({ roomId: 'quarto', label: 'forno', dueAtUtc: due });
+    const res = await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, { room_id: 'quarto', label: 'tirar do forno', keep_schedule: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.next_due_utc, due);
+    assert.equal(res.body.label, 'tirar do forno');
+    assert.match(res.body.local_time, /^\d{2}:\d{2}$/);
+    assert.equal((await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, { room_id: 'quarto', label: 'Luna', keep_schedule: true })).body.field, 'label');
+  });
+
   it('não edita o que está tocando nem o que já acabou', async () => {
     const r = h.reminderStore.insertOnce({ roomId: 'quarto', label: null, dueAtUtc: Date.now() + 3_600_000 });
     const body = { room_id: 'quarto', repeat: 'daily', time: '08:00' };
@@ -437,6 +448,7 @@ describe('API admin', () => {
     const res = await call(h, 'GET', '/admin/v1/reminders/history?limit=2');
     assert.equal(res.status, 200);
     assert.deepEqual(res.body.events.map((e: { kind: string }) => e.kind), ['snoozed', 'fired']);
+    assert.equal(res.body.complete, false, 'LOG_LEVEL silent: histórico não cresce e o painel precisa saber');
     assert.equal(res.body.events[0].label, 'pão');
   });
 
