@@ -68,6 +68,7 @@ interface Harness {
   registry: DeviceRegistrySource;
   diagnostics: Diagnostics;
   cancelled: number[];
+  saved: Array<{ id: number; labelChanged: boolean }>;
   restarts: number;
   stop(): Promise<void>;
 }
@@ -106,6 +107,7 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
     registry,
     diagnostics,
     cancelled: [],
+    saved: [],
     restarts: 0,
     async stop() {
       await server.stop();
@@ -126,6 +128,9 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
       cancelReminder: (r) => {
         reminderStore.markStatus(r.id, 'cancelled');
         harness.cancelled.push(r.id);
+      },
+      onReminderSaved: (r, labelChanged) => {
+        harness.saved.push({ id: r.id, labelChanged });
       },
       weatherSource: null,
       diagnostics,
@@ -289,6 +294,74 @@ describe('API admin', () => {
 
     res = await call(h, 'DELETE', `/admin/v1/reminders/${r.id}`);
     assert.equal(res.status, 404, 'cancelar de novo não finge sucesso');
+  });
+
+  it('cria lembrete pelo painel com hora de parede de São Paulo', async () => {
+    const amanha = new Date(Date.now() + 86_400_000 - 3 * 3_600_000);
+    const date = amanha.toISOString().slice(0, 10);
+    const res = await call(h, 'POST', '/admin/v1/reminders', { room_id: 'quarto', label: 'remédio', repeat: 'none', date, time: '07:30' });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.kind, 'once');
+    // 07:30 em São Paulo = 10:30 UTC.
+    assert.equal(new Date(res.body.next_due_utc).toISOString().slice(11, 16), '10:30');
+    assert.equal(res.body.has_audio, false);
+    assert.deepEqual(h.saved.at(-1), { id: res.body.id, labelChanged: true });
+  });
+
+  it('criação recusa o nome da Luna, horário passado e data inexistente', async () => {
+    const base = { room_id: 'quarto', repeat: 'none', time: '07:30' };
+    let res = await call(h, 'POST', '/admin/v1/reminders', { ...base, label: 'falar com a Luna', date: '2099-01-01' });
+    assert.equal(res.status, 422);
+    assert.equal(res.body.field, 'label');
+    res = await call(h, 'POST', '/admin/v1/reminders', { ...base, date: '2020-01-01' });
+    assert.equal(res.body.field, 'date');
+    res = await call(h, 'POST', '/admin/v1/reminders', { ...base, date: '2026-02-31' });
+    assert.equal(res.body.field, 'date');
+    res = await call(h, 'POST', '/admin/v1/reminders', { ...base, repeat: 'toda_hora' });
+    assert.equal(res.body.field, 'repeat');
+  });
+
+  it('recorrente: próxima ocorrência calculada no servidor', async () => {
+    const res = await call(h, 'POST', '/admin/v1/reminders', { room_id: 'sala', label: null, repeat: 'weekdays', time: '06:30' });
+    assert.equal(res.status, 201);
+    assert.equal(res.body.repeat_rule, 'weekdays');
+    assert.equal(res.body.local_hour, 6);
+    assert.equal(res.body.has_audio, null, 'alarme sem rótulo não tem fala');
+    assert.ok(res.body.next_due_utc > Date.now());
+  });
+
+  it('editar troca horário e rótulo; rótulo novo apaga a fala gravada', async () => {
+    const created = await call(h, 'POST', '/admin/v1/reminders', { room_id: 'quarto', label: 'água', repeat: 'daily', time: '09:00' });
+    h.reminderStore.putAudio(created.body.id, Buffer.alloc(32));
+    let res = await call(h, 'PUT', `/admin/v1/reminders/${created.body.id}`, { room_id: 'quarto', label: 'água', repeat: 'daily', time: '10:00' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.local_hour, 10);
+    assert.equal(res.body.has_audio, true, 'só o horário mudou: fala continua valendo');
+
+    res = await call(h, 'PUT', `/admin/v1/reminders/${created.body.id}`, { room_id: 'escritorio', label: 'beber água', repeat: 'daily', time: '10:00' });
+    assert.equal(res.body.room_id, 'escritorio');
+    assert.equal(res.body.has_audio, false);
+    assert.deepEqual(h.saved.at(-1), { id: created.body.id, labelChanged: true });
+  });
+
+  it('não edita o que está tocando nem o que já acabou', async () => {
+    const r = h.reminderStore.insertOnce({ roomId: 'quarto', label: null, dueAtUtc: Date.now() + 3_600_000 });
+    const body = { room_id: 'quarto', repeat: 'daily', time: '08:00' };
+    h.reminderStore.markRinging(r.id, r.nextDueUtc);
+    assert.equal((await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, body)).status, 409);
+    h.reminderStore.markStatus(r.id, 'done');
+    assert.equal((await call(h, 'PUT', `/admin/v1/reminders/${r.id}`, body)).status, 404);
+  });
+
+  it('histórico: eventos do log viram linha, com rótulo atual', async () => {
+    const r = h.reminderStore.insertOnce({ roomId: 'quarto', label: 'pão', dueAtUtc: Date.now() + 3_600_000 });
+    h.diagnostics.ingest(record({ event: 'reminder_fired', roomId: 'quarto', fields: { reminder_id: r.id } }));
+    h.diagnostics.ingest(record({ event: 'alarm_snoozed', roomId: 'quarto', fields: { reminder_id: r.id, minutes: 5 } }));
+    h.diagnostics.ingest(record({ event: 'alarm_missed', roomId: 'quarto', fields: {} }));
+    const res = await call(h, 'GET', '/admin/v1/reminders/history?limit=2');
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.events.map((e: { kind: string }) => e.kind), ['snoozed', 'fired']);
+    assert.equal(res.body.events[0].label, 'pão');
   });
 
   it('bootstrap é só leitura e sem segredo', async () => {

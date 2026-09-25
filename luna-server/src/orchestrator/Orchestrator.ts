@@ -864,6 +864,24 @@ export class Orchestrator implements AlarmAudioSink {
   }
 
   /**
+   * Pré-renderização pedida pelo painel (lembrete criado ou editado lá). Passa
+   * pelo mesmo gate de sala quieta da voz; como não há confirmação falada a
+   * esperar, entra com `audioSeen: true`. Sem sessão de provider aberta na
+   * sala, `prerenderReminderSpeech` desiste e o toque fica só-bipe.
+   *
+   * Um pedido da voz já na fila da sala tem precedência: é o que o usuário
+   * acabou de ouvir confirmado.
+   *
+   * @returns `false` quando não enfileirou.
+   */
+  requestReminderPrerender(roomId: string, reminderId: number, label: string): boolean {
+    if (this.pendingPrerenderByRoom.has(roomId)) return false;
+    this.pendingPrerenderByRoom.set(roomId, { reminderId, label, audioSeen: true });
+    this.startPrerenderGate(roomId);
+    return true;
+  }
+
+  /**
    * Enfileira a pré-renderização da fala de um lembrete recém-criado, fora do
    * caminho da tool.
    *

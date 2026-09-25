@@ -1,5 +1,5 @@
 import { LEVEL_VALUES, subscribeLogs, type LogLevelName, type LogRecord } from '../logging/logTap.js';
-import type { DiagnosticsStore } from './DiagnosticsStore.js';
+import type { DiagnosticsStore, ReminderEventKind } from './DiagnosticsStore.js';
 
 /**
  * Diagnóstico do painel (v2), alimentado só pelo log (`logTap.ts`) — nenhum
@@ -26,6 +26,23 @@ const WARN_AS_ERROR = new Set([
   'alarm_missed',
   'speaking_watchdog',
 ]);
+
+/**
+ * Evento de log → entrada no histórico de lembretes. Todos saem em `info` ou
+ * `warn`: com `LOG_LEVEL` acima de `info` o histórico para de crescer (o
+ * lembrete em si não é afetado — o histórico é só leitura para o painel).
+ */
+const REMINDER_EVENTS: Record<string, ReminderEventKind> = {
+  reminder_set: 'created',
+  reminder_edited: 'edited',
+  reminder_fired: 'fired',
+  alarm_dismissed: 'dismissed',
+  alarm_snoozed: 'snoozed',
+  alarm_exhausted: 'exhausted',
+  alarm_missed: 'missed',
+  reminder_missed: 'missed',
+  reminder_cancelled: 'cancelled',
+};
 
 export const LIVE_BUFFER_SIZE = 500;
 
@@ -68,6 +85,7 @@ export class Diagnostics {
     // diagnóstico é best effort, o log em si já saiu.
     try {
       if (record.event === 'ttfab') this.recordLatency(record);
+      if (record.event !== null && Object.hasOwn(REMINDER_EVENTS, record.event)) this.recordReminderEvent(record);
       if (record.levelValue >= LEVEL_VALUES.error || (record.event !== null && record.levelValue >= LEVEL_VALUES.warn && WARN_AS_ERROR.has(record.event))) {
         this.store.insertError({
           at: record.ts,
@@ -104,6 +122,18 @@ export class Diagnostics {
 
   get streamCount(): number {
     return this.listeners.size;
+  }
+
+  private recordReminderEvent(record: LogRecord): void {
+    const id = record.fields.reminder_id;
+    if (typeof id !== 'number') return;
+    this.store.insertReminderEvent({
+      at: record.ts,
+      reminderId: id,
+      kind: REMINDER_EVENTS[record.event!]!,
+      roomId: record.roomId,
+      via: typeof record.fields.via === 'string' ? record.fields.via : null,
+    });
   }
 
   private recordLatency(record: LogRecord): void {

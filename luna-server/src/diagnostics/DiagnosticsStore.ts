@@ -35,6 +35,28 @@ export interface ErrorEntry {
   detail: Record<string, unknown> | null;
 }
 
+export type ReminderEventKind =
+  | 'created'
+  | 'edited'
+  | 'fired'
+  | 'dismissed'
+  | 'snoozed'
+  | 'exhausted'
+  | 'missed'
+  | 'cancelled';
+
+export interface ReminderEvent {
+  id: number;
+  at: number;
+  reminderId: number;
+  kind: ReminderEventKind;
+  roomId: string | null;
+  via: string | null;
+  /** Do `reminders` na hora da leitura; `null` se a linha já foi podada. */
+  label: string | null;
+  shortId: string | null;
+}
+
 export class DiagnosticsStore {
   private readonly statements = new Map<string, StatementSync>();
   private insertsSincePrune = 0;
@@ -67,6 +89,33 @@ export class DiagnosticsStore {
       'INSERT INTO error_log (at, level, event, room_id, msg, detail) VALUES (?, ?, ?, ?, ?, ?)',
     ).run(e.at, e.level, e.event, e.roomId, e.msg, e.detail ? JSON.stringify(e.detail) : null);
     this.afterInsert();
+  }
+
+  insertReminderEvent(e: Omit<ReminderEvent, 'id' | 'label' | 'shortId'>): void {
+    this.stmt(
+      'INSERT INTO reminder_events (at, reminder_id, kind, room_id, via) VALUES (?, ?, ?, ?, ?)',
+    ).run(e.at, e.reminderId, e.kind, e.roomId, e.via);
+    this.afterInsert();
+  }
+
+  /** Mais recentes primeiro, com rótulo e `short_id` atuais do lembrete. */
+  reminderHistory(limit: number): ReminderEvent[] {
+    return this.stmt(
+      `SELECT e.id, e.at, e.reminder_id, e.kind, e.room_id, e.via, r.label, r.short_id
+         FROM reminder_events e LEFT JOIN reminders r ON r.id = e.reminder_id
+        ORDER BY e.at DESC, e.id DESC LIMIT ?`,
+    )
+      .all(limit)
+      .map((r) => ({
+        id: Number(r.id),
+        at: Number(r.at),
+        reminderId: Number(r.reminder_id),
+        kind: String(r.kind) as ReminderEventKind,
+        roomId: r.room_id === null ? null : String(r.room_id),
+        via: r.via === null ? null : String(r.via),
+        label: r.label === null || r.label === undefined ? null : String(r.label),
+        shortId: r.short_id === null || r.short_id === undefined ? null : String(r.short_id),
+      }));
   }
 
   /** Amostras desde `sinceMs`, mais antigas primeiro. */
@@ -109,7 +158,7 @@ export class DiagnosticsStore {
   /** Por idade e por teto de linhas, nas duas tabelas. */
   prune(): void {
     const cutoff = this.now() - RETENTION_MS;
-    for (const table of ['latency_samples', 'error_log']) {
+    for (const table of ['latency_samples', 'error_log', 'reminder_events']) {
       this.stmt(`DELETE FROM ${table} WHERE at < ?`).run(cutoff);
       this.stmt(
         `DELETE FROM ${table} WHERE id <= (SELECT id FROM ${table} ORDER BY id DESC LIMIT 1 OFFSET ?)`,

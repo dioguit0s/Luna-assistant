@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6 Diagnóstico feito)
+**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6 Diagnóstico e M7 Lembretes feitos)
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -92,8 +92,8 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 |---|---|---|
 | Listar ativos: rótulo, sala, horário, recorrência | API | v1 |
 | Cancelar | API | v1 |
-| Criar e editar pelo painel | API | v2 |
-| Histórico: tocou, perdido, adiado | API (parte já está no banco) | v2 |
+| Criar e editar pelo painel | API | v2 ✔ |
+| Histórico: tocou, perdido, adiado | API (parte já está no banco) | v2 ✔ |
 
 ### 6. Agenda
 
@@ -162,6 +162,9 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `GET devices` / `PUT devices` | Overrides; v1 grava só `{ "aliases": {...} }` |
 | `GET reminders` | Lembretes vivos de todas as salas, com a frase falada |
 | `DELETE reminders/:id` | Cancela: banco, toque em curso e scheduler |
+| `POST reminders` | Cria: `{ room_id, label, repeat, date, time }` — hora de parede de São Paulo (ADR 006), `repeat` `none`/`daily`/`weekdays`/`weekend`/`mon`…`sun`, `date` só no `none`. Mesmas regras de rótulo da voz (sem "Luna", até 200). 201 — v2 |
+| `PUT reminders/:id` | Edita um `armed` com o mesmo corpo; `ringing` é 409. Rótulo ou sala novos apagam a fala gravada e pedem outra — v2 |
+| `GET reminders/history?limit=50` | Criado, editado, tocou, dispensado, adiado, sem resposta, perdido, cancelado — com `via` (`admin`/`voice`) quando se sabe — v2 |
 | `GET settings/:grupo` | `ha`, `provider` ou `calendar`, com segredos como `{ set, last4 }` e `applies` (`immediate` / `next_session`) |
 | `PUT settings/:grupo` | Patch parcial; campo ausente = mantém. 422 com `field` quando inválido |
 | `POST settings/ha/test`, `POST settings/calendar/test` | Testa com o corpo completado pelo que está gravado — dá para testar sem gravar |
@@ -170,9 +173,15 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `GET diagnostics/errors?limit=20` | Últimos erros: todo `error`/`fatal` e os `warn` de dependência externa (HA, clima, provider, lembrete perdido) — v2 |
 | `GET logs/stream?level=info&room=` | Log ao vivo em SSE: primeiro o buffer em memória (500 linhas) filtrado, depois cada linha nova; heartbeat a cada 15 s; até 4 streams (429) — v2 |
 
+A fala de um lembrete criado pelo painel é pré-renderizada pelo mesmo gate de sala quieta
+da voz, mas só quando a sala já tem sessão de provider aberta; sem ela o lembrete toca só o
+bipe (`has_audio: false` na listagem) até ser editado com a sala ativa. O histórico vem das
+linhas de log dos eventos de lembrete (`reminder_events`), então para de crescer com
+`LOG_LEVEL` acima de `info`.
+
 O diagnóstico não sabe de conversa: `logTap` descarta toda chave de log que possa carregar
 fala (`raw`, `text`, `transcript`…) e guarda só escalares. Retenção no SQLite: 30 dias ou 10
-mil linhas por tabela (`latency_samples`, `error_log`, migração 4).
+mil linhas por tabela (`latency_samples`, `error_log`, `reminder_events`, migração 4).
 
 Códigos: 404 em tudo sem `LUNA_ADMIN_TOKEN`; 403 fora de loopback/rede privada; 401
 token errado; 422 validação; 413 corpo acima de 64 KB.

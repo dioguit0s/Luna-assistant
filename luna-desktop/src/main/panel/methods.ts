@@ -120,10 +120,11 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
     'server.devices': () => admin.request('GET', 'devices'),
     'server.saveAliases': (aliases) => admin.request('PUT', 'devices', { aliases: obj(aliases, 'aliases') }),
     'server.reminders': () => admin.request('GET', 'reminders'),
-    'server.cancelReminder': (id) => {
-      if (!Number.isInteger(id) || (id as number) <= 0) throw new TypeError('id inválido');
-      return admin.request('DELETE', `reminders/${id as number}`);
-    },
+    'server.cancelReminder': (id) => admin.request('DELETE', `reminders/${int(id, 'id', 1, Number.MAX_SAFE_INTEGER)}`),
+    'server.createReminder': (body) => admin.request('POST', 'reminders', obj(body, 'lembrete')),
+    'server.editReminder': (id, body) =>
+      admin.request('PUT', `reminders/${int(id, 'id', 1, Number.MAX_SAFE_INTEGER)}`, obj(body, 'lembrete')),
+    'server.reminderHistory': (limit) => admin.request('GET', `reminders/history?limit=${int(limit ?? 50, 'limit', 1, 500)}`),
     'server.settings': (g) => admin.request('GET', `settings/${group(g)}`),
     'server.saveSettings': (g, patch) => admin.request('PUT', `settings/${group(g)}`, obj(patch, 'patch')),
     'server.testConnection': (g, patch) =>

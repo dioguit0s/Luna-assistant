@@ -1343,27 +1343,203 @@ pages.push({
 // ─── 05 Lembretes ────────────────────────────────────────────────────────
 
 let confirmingReminder: number | null = null;
+let reminderView: 'active' | 'history' = 'active';
+
+/** Formulário aberto (criar ou editar). Guardado fora do render para sobreviver ao repinte. */
+interface ReminderDraft {
+  id: number | null;
+  room_id: string;
+  label: string;
+  repeat: string;
+  date: string;
+  time: string;
+  error: { field: string; text: string } | null;
+  saving: boolean;
+}
+let reminderDraft: ReminderDraft | null = null;
+
+const REPEAT_OPTIONS: Array<{ value: string; label: string }> = [
+  { value: 'none', label: 'ÚNICO' },
+  ...Object.entries(REPEAT_LABELS).map(([value, label]) => ({ value, label })),
+];
+
+const HISTORY_LABELS: Record<string, [string, string]> = {
+  created: ['+ CRIADO', 'hi'],
+  edited: ['✎ EDITADO', 'hi'],
+  fired: ['◉ TOCOU', 'hi'],
+  dismissed: ['▣ DISPENSADO', 'hi'],
+  snoozed: ['‖ ADIADO', 'fg'],
+  exhausted: ['◈ SEM RESPOSTA', 'amber'],
+  missed: ['◈ PERDIDO', 'amber'],
+  cancelled: ['— CANCELADO', 'fg'],
+};
+const VIA_LABELS: Record<string, string> = { admin: 'PAINEL', voice: 'VOZ' };
+
+function localDateInput(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+function openReminderDraft(r: any | null, defaultRoom: string): void {
+  if (r) {
+    const due = new Date(r.next_due_utc);
+    reminderDraft = {
+      id: r.id,
+      room_id: r.room_id,
+      label: r.label ?? '',
+      repeat: r.repeat_rule ?? 'none',
+      date: localDateInput(r.next_due_utc),
+      time: r.kind === 'recurring' ? `${pad(r.local_hour)}:${pad(r.local_minute)}` : `${pad(due.getHours())}:${pad(due.getMinutes())}`,
+      error: null,
+      saving: false,
+    };
+  } else {
+    reminderDraft = { id: null, room_id: defaultRoom, label: '', repeat: 'none', date: localDateInput(Date.now() + 86_400_000), time: '07:00', error: null, saving: false };
+  }
+  confirmingReminder = null;
+}
+
+function closeReminderDraft(): void {
+  reminderDraft = null;
+  pendingEscape = null;
+}
+
+function reminderEditor(draft: ReminderDraft, rooms: string[]): HTMLElement {
+  const bad = (field: string): string => (draft.error?.field === field ? ' invalid' : '');
+  const roomOptions = [...new Set([...rooms, draft.room_id].filter(Boolean))].sort().map((r) => ({ value: r, label: r }));
+  const roomCycler = cycler(roomOptions, roomOptions.findIndex((o) => o.value === draft.room_id), (value) => {
+    draft.room_id = value;
+  }, 'sala');
+  const repeatCycler = cycler(REPEAT_OPTIONS, REPEAT_OPTIONS.findIndex((o) => o.value === draft.repeat), (value) => {
+    draft.repeat = value;
+    // Data só vale para o único: repinta para mostrar ou esconder o campo.
+    void renderCurrent();
+  }, 'repetição');
+
+  const labelInput = lineInput(draft.label, { maxLength: 200, placeholder: 'VAZIO = ALARME SÓ COM BIPE', 'aria-label': 'Rótulo', class: `line-input${bad('label')}` });
+  labelInput.addEventListener('input', () => (draft.label = labelInput.value));
+  const dateInput = lineInput(draft.date, { type: 'date', 'aria-label': 'Data', class: `line-input${bad('date')}` });
+  dateInput.addEventListener('input', () => (draft.date = dateInput.value));
+  const timeInput = lineInput(draft.time, { type: 'time', 'aria-label': 'Hora', class: `line-input${bad('time')}` });
+  timeInput.addEventListener('input', () => (draft.time = timeInput.value));
+
+  const save = async (): Promise<void> => {
+    if (draft.saving) return;
+    draft.saving = true;
+    const body: Record<string, unknown> = { room_id: draft.room_id, label: draft.label.trim() || null, repeat: draft.repeat, time: draft.time };
+    if (draft.repeat === 'none') body.date = draft.date;
+    const title = (draft.label.trim() || 'ALARME').toUpperCase();
+    const result = draft.id === null ? await window.panel.call('server.createReminder', body) : await window.panel.call('server.editReminder', draft.id, body);
+    draft.saving = false;
+    if (!result.ok) {
+      draft.error = { field: String(result.body?.field ?? ''), text: errorOf(result) };
+      say(`${draft.id === null ? 'CRIAR' : 'EDITAR'} "${title}" ... FALHA: ${errorOf(result)}`, 'warn');
+      pendingEscape = null;
+      void renderCurrent();
+      return;
+    }
+    say(`${draft.id === null ? 'CRIAR' : 'EDITAR'} "${title}" (${result.body.short_id}) ... OK`);
+    closeReminderDraft();
+    void renderCurrent();
+  };
+  for (const input of [labelInput, dateInput, timeInput]) {
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') void save();
+      if (e.key === 'Escape') {
+        closeReminderDraft();
+        void renderCurrent();
+      }
+    });
+  }
+  pendingEscape = () => {
+    closeReminderDraft();
+    void renderCurrent();
+  };
+
+  const fields = grid(
+    '110px minmax(0,1fr)',
+    { class: 'grid', style: 'gap:10px 12px;align-items:center' },
+    h('span', {}, 'SALA'),
+    roomCycler,
+    h('span', {}, 'RÓTULO'),
+    labelInput,
+    h('span', {}, 'REPETIÇÃO'),
+    repeatCycler,
+    draft.repeat === 'none' ? h('span', {}, 'DATA') : null,
+    draft.repeat === 'none' ? dateInput : null,
+    h('span', {}, 'HORA'),
+    timeInput,
+  );
+  return frame(
+    draft.id === null ? 'NOVO LEMBRETE' : 'EDITAR LEMBRETE',
+    { tone: draft.error ? 'warn' : undefined, style: 'gap:12px;margin-bottom:18px' },
+    fields,
+    draft.error ? h('div', { class: 'amber', role: 'alert' }, `◈ ${draft.error.text.toUpperCase()}`) : null,
+    h('div', { class: 'small' }, 'HORÁRIO DE BRASÍLIA · A FALA É GRAVADA PELA VOZ DA SALA QUANDO HOUVER SESSÃO ABERTA; SEM ELA, TOCA SÓ O BIPE'),
+    h(
+      'div',
+      { class: 'row', style: 'gap:10px' },
+      cmd('SALVAR', () => void save(), { first: true }),
+      cmd('CANCELAR', () => {
+        closeReminderDraft();
+        void renderCurrent();
+      }, { tone: 'quiet' }),
+    ),
+  );
+}
 
 pages.push({
   id: 'reminders',
   nav: 'LEMBRETES',
   title: 'LEMBRETES E ALARMES',
   pollMs: 15000,
+  leave() {
+    reminderDraft = null;
+  },
   async render(root) {
-    const result = await window.panel.call('server.reminders');
+    const [result, satsRes] = await Promise.all([window.panel.call('server.reminders'), window.panel.call('server.satellites')]);
     if (!result.ok) return serverUnavailable(root, result);
     const reminders = result.body.reminders as any[];
+    const rooms = [...new Set(((satsRes.ok ? satsRes.body.satellites : []) as any[]).map((s) => s.room_id).filter(Boolean))] as string[];
     setMeta(`${reminders.length} ATIVOS`);
+
+    const tabs = h(
+      'div',
+      { class: 'row', style: 'gap:6px;margin-bottom:14px' },
+      cmd(reminderView === 'active' ? '► ATIVOS' : 'ATIVOS', () => {
+        reminderView = 'active';
+        void renderCurrent();
+      }, { first: true, tone: reminderView === 'active' ? undefined : 'quiet' }),
+      cmd(reminderView === 'history' ? '► HISTÓRICO' : 'HISTÓRICO', () => {
+        reminderView = 'history';
+        closeReminderDraft();
+        void renderCurrent();
+      }, { tone: reminderView === 'history' ? undefined : 'quiet' }),
+      h('span', { class: 'spacer' }),
+      reminderView === 'active' && !reminderDraft
+        ? cmd('+ NOVO', () => {
+            openReminderDraft(null, local?.roomId ?? rooms[0] ?? '');
+            void renderCurrent();
+          })
+        : null,
+    );
+    root.append(tabs);
+
+    if (reminderView === 'history') return renderReminderHistory(root);
+
+    if (reminderDraft) root.append(reminderEditor(reminderDraft, rooms));
+
     if (reminders.length === 0) {
-      root.append(emptyReport('RELATÓRIO DE AGENDAMENTO // 0 REGISTROS', 'NENHUM EVENTO AGENDADO. A TRIPULAÇÃO ESTÁ LIVRE.', 'PARA AGENDAR, DIGA “HEY LUNA, ME LEMBRA DE…” EM QUALQUER SALA.'));
+      if (!reminderDraft) root.append(emptyReport('RELATÓRIO DE AGENDAMENTO // 0 REGISTROS', 'NENHUM EVENTO AGENDADO. A TRIPULAÇÃO ESTÁ LIVRE.', 'DIGA “HEY LUNA, ME LEMBRA DE…” EM QUALQUER SALA, OU USE [ + NOVO ].'));
       return;
     }
 
-    const cols = '150px 104px 100px 118px minmax(0,1fr) 104px';
+    const cols = '150px 104px 100px 118px minmax(0,1fr) 190px';
     const rows = reminders.map((r) => {
       const label = r.label ?? 'ALARME';
       const confirming = confirmingReminder === r.id;
-      const wrap = h('div', { style: `border-bottom:1px dotted var(--dim);border-left:1px solid ${confirming ? 'var(--amber)' : 'transparent'};border-right:1px solid ${confirming ? 'var(--amber)' : 'transparent'}` });
+      const editing = reminderDraft?.id === r.id;
+      const wrap = h('div', { style: `border-bottom:1px dotted var(--dim);border-left:1px solid ${confirming ? 'var(--amber)' : editing ? 'var(--hi)' : 'transparent'};border-right:1px solid ${confirming ? 'var(--amber)' : editing ? 'var(--hi)' : 'transparent'}` });
       wrap.append(
         grid(
           cols,
@@ -1372,11 +1548,20 @@ pages.push({
           h('span', { class: 'ellipsis' }, r.room_id),
           h('span', { class: 'hi' }, formatStamp(r.next_due_utc)),
           h('span', {}, r.repeat_rule ? REPEAT_LABELS[r.repeat_rule] ?? r.repeat_rule : 'ÚNICO'),
-          h('span', { style: 'text-wrap:pretty' }, r.spoken ? `“${r.spoken}”` : '—'),
-          h('span', { style: 'justify-self:end' }, cmd('CANCELAR', () => {
-            confirmingReminder = r.id;
-            void renderCurrent();
-          })),
+          h('span', { style: 'text-wrap:pretty' }, r.spoken ? `“${r.spoken}”` : '—', r.has_audio === false ? h('span', { class: 'small', style: 'display:block' }, '♪ FALA AINDA NÃO GRAVADA — TOCA SÓ O BIPE') : null),
+          h(
+            'span',
+            { style: 'justify-self:end;display:flex;gap:4px' },
+            cmd('EDITAR', () => {
+              openReminderDraft(r, r.room_id);
+              void renderCurrent();
+            }, { disabled: r.status === 'ringing' || editing, tone: 'quiet' }),
+            cmd('CANCELAR', () => {
+              confirmingReminder = r.id;
+              closeReminderDraft();
+              void renderCurrent();
+            }),
+          ),
         ),
       );
       if (confirming) {
@@ -1410,6 +1595,38 @@ pages.push({
     );
   },
 });
+
+async function renderReminderHistory(root: HTMLElement): Promise<void> {
+  const result = await window.panel.call('server.reminderHistory', 100);
+  if (!result.ok) return serverUnavailable(root, result);
+  const events = result.body.events as any[];
+  setMeta(`${events.length} EVENTOS RECENTES`);
+  if (events.length === 0) {
+    root.append(emptyReport('HISTÓRICO // 0 REGISTROS', 'NADA TOCOU AINDA.', 'O HISTÓRICO COMEÇA A CONTAR A PARTIR DESTA VERSÃO DO NÚCLEO.'));
+    return;
+  }
+  const cols = '110px 150px minmax(0,1fr) 120px 70px';
+  root.append(
+    h(
+      'div',
+      { class: 'tbl', style: 'gap:0' },
+      grid(cols, { class: 'tbl-head strong' }, h('span', {}, 'QUANDO'), h('span', {}, 'EVENTO'), h('span', {}, 'RÓTULO'), h('span', {}, 'SALA'), h('span', {}, 'VIA')),
+      ...events.map((e) => {
+        const [text, cls] = HISTORY_LABELS[e.kind] ?? [String(e.kind).toUpperCase(), 'fg'];
+        return grid(
+          cols,
+          { class: 'tbl-row dotted', style: 'padding:6px 0;font-size:12px' },
+          h('span', {}, formatStamp(e.at)),
+          h('span', { class: cls }, text),
+          h('span', { class: 'hi ellipsis' }, e.label ?? (e.short_id ? 'ALARME' : '— REMOVIDO —'), e.short_id ? h('span', { class: 'raw fg' }, `  ${e.short_id}`) : null),
+          h('span', { class: 'ellipsis' }, e.room_id ?? '—'),
+          h('span', {}, e.via ? VIA_LABELS[e.via] ?? e.via.toUpperCase() : '—'),
+        );
+      }),
+      h('div', { class: 'small', style: 'margin-top:10px' }, 'SEM TRANSCRIÇÃO: SÓ O QUE ACONTECEU COM CADA LEMBRETE. RETENÇÃO DE 30 DIAS.'),
+    ),
+  );
+}
 
 // ─── 06 Este terminal ────────────────────────────────────────────────────
 

@@ -134,6 +134,18 @@ describe('métodos do painel', () => {
     assert.equal(recorded.length, 1);
   });
 
+  it('lembretes: criar vai por POST com o corpo, editar exige id inteiro', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.createReminder']!({ room_id: 'quarto', time: '07:00' });
+    assert.equal(recorded[0]!.method, 'POST');
+    assert.equal(recorded[0]!.url, 'http://192.168.0.20:8080/admin/v1/reminders');
+    assert.deepEqual(recorded[0]!.body, { room_id: 'quarto', time: '07:00' });
+    await methods['server.editReminder']!(7, { room_id: 'quarto', time: '08:00' });
+    assert.equal(recorded[1]!.url, 'http://192.168.0.20:8080/admin/v1/reminders/7');
+    assert.equal((await methods['server.editReminder']!('7/../restart', {})).ok, false);
+    assert.equal(recorded.length, 2);
+  });
+
   it('log ao vivo: filtro validado no processo principal', async () => {
     const { methods, calls } = setup();
     assert.equal((await methods['logs.start']!('warn', 'quarto')).ok, true);

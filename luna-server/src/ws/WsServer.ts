@@ -196,6 +196,11 @@ export class WsServer {
     return this.orchestrator.getAlarmRinger();
   }
 
+  /** Fala de um lembrete salvo pelo painel — ver `Orchestrator.requestReminderPrerender`. */
+  requestReminderPrerender(roomId: string, reminderId: number, label: string): boolean {
+    return this.orchestrator.requestReminderPrerender(roomId, reminderId, label);
+  }
+
   /**
    * Fan-out de um payload para todos os satélites autenticados de um cômodo.
    * Único caminho de saída endereçado por sala — o Orchestrator não guarda

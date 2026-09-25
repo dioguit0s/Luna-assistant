@@ -4,6 +4,7 @@ import type { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import type { ReminderStore, Reminder } from '../reminders/ReminderStore.js';
 import { spokenReminder } from '../reminders/spoken.js';
+import { resolvePanelReminder } from '../reminders/panelInput.js';
 import type { RoomManager } from '../rooms/RoomManager.js';
 import type { WeatherSource } from '../weather/WeatherSource.js';
 import type { RuntimeSettings } from '../settings/RuntimeSettings.js';
@@ -32,6 +33,11 @@ export interface AdminApiDeps {
   reminderStore: ReminderStore;
   /** Cancela no banco, para o toque se estiver tocando e rearma o scheduler. */
   cancelReminder: (reminder: Reminder) => void;
+  /**
+   * Lembrete criado ou editado pelo painel: rearma o scheduler e, com rótulo
+   * novo, pede a fala pré-renderizada (sem sessão aberta na sala, fica só-bipe).
+   */
+  onReminderSaved: (reminder: Reminder, labelChanged: boolean) => void;
   weatherSource: WeatherSource | null;
   /** Série de TTFAB, últimos erros e log ao vivo (v2). */
   diagnostics: Diagnostics;
@@ -174,6 +180,13 @@ export class AdminApi {
         return { body: { reminders: this.reminders() } };
       case 'DELETE reminders/:id':
         return { body: this.cancelReminder(id!) };
+      case 'POST reminders':
+        return { status: 201, body: this.createReminder(await readJson(req)) };
+      case 'PUT reminders/:id':
+        return { body: this.editReminder(id!, await readJson(req)) };
+      case 'GET reminders/:id':
+        if (id === 'history') return { body: this.reminderHistory(query) };
+        break;
       case 'GET settings/:id':
         return { body: this.readSettings(editableGroup(id!)) };
       case 'PUT settings/:id':
@@ -357,18 +370,130 @@ export class AdminApi {
   // ─── Lembretes ─────────────────────────────────────────────────────────
 
   private reminders(): unknown[] {
-    const now = new Date(this.now());
-    return this.deps.reminderStore.listLive().map((r) => ({
+    return this.deps.reminderStore.listLive().map((r) => this.reminderWire(r));
+  }
+
+  private reminderWire(r: Reminder): unknown {
+    return {
       id: r.id,
       short_id: r.shortId,
       room_id: r.roomId,
       label: r.label,
       kind: r.kind,
+      due_at_utc: r.dueAtUtc,
+      local_hour: r.localHour,
+      local_minute: r.localMinute,
       repeat_rule: r.repeatRule,
       next_due_utc: r.nextDueUtc,
       status: r.status,
-      spoken: spokenReminder(r, now),
-    }));
+      // Sem fala gravada, o toque é só o bipe (ver `Orchestrator.prerenderReminderSpeech`).
+      has_audio: r.label === null ? null : this.deps.reminderStore.hasAudio(r.id),
+      spoken: spokenReminder(r, new Date(this.now())),
+    };
+  }
+
+  /** v2: mesmo contrato de tempo e mesmas regras de rótulo da tool `set_reminder`. */
+  private createReminder(body: unknown): unknown {
+    const resolved = resolvePanelReminder(body, new Date(this.now()));
+    if (!resolved.ok) throw new HttpError(422, resolved.error, resolved.field);
+    const v = resolved.value;
+    const { reminderStore, config } = this.deps;
+    if (reminderStore.countLiveByRoom(v.roomId) >= config.reminderMaxPerRoom) {
+      throw new HttpError(422, `a sala já tem ${config.reminderMaxPerRoom} lembretes vivos`, 'room_id');
+    }
+    const created =
+      v.kind === 'once'
+        ? reminderStore.insertOnce({ roomId: v.roomId, label: v.label, dueAtUtc: v.dueAtUtc }, this.now())
+        : reminderStore.insertRecurring(
+            {
+              roomId: v.roomId,
+              label: v.label,
+              localHour: v.localHour,
+              localMinute: v.localMinute,
+              repeatRule: v.repeatRule,
+              nextDueUtc: v.nextDueUtc,
+            },
+            this.now(),
+          );
+    this.deps.onReminderSaved(created, created.label !== null);
+    getLogger().info(
+      {
+        event: 'reminder_set',
+        room_id: created.roomId,
+        reminder_id: created.id,
+        short_id: created.shortId,
+        next_due_utc: created.nextDueUtc,
+        kind: created.kind,
+        repeat_rule: created.repeatRule,
+        has_label: created.label !== null,
+        via: 'admin',
+      },
+      `Lembrete ${created.shortId} criado pelo painel em ${created.roomId}`,
+    );
+    return this.reminderWire(created);
+  }
+
+  private editReminder(rawId: string, body: unknown): unknown {
+    const id = Number(rawId);
+    if (!Number.isInteger(id) || id <= 0) throw new HttpError(422, 'id inválido', 'id');
+    const { reminderStore, config } = this.deps;
+    const current = reminderStore.get(id);
+    if (!current || (current.status !== 'armed' && current.status !== 'ringing')) {
+      throw new HttpError(404, 'lembrete não encontrado ou já encerrado');
+    }
+    if (current.status === 'ringing') throw new HttpError(409, 'o lembrete está tocando agora — dispense antes de editar');
+
+    const resolved = resolvePanelReminder(body, new Date(this.now()));
+    if (!resolved.ok) throw new HttpError(422, resolved.error, resolved.field);
+    const v = resolved.value;
+    if (v.roomId !== current.roomId && reminderStore.countLiveByRoom(v.roomId) >= config.reminderMaxPerRoom) {
+      throw new HttpError(422, `a sala já tem ${config.reminderMaxPerRoom} lembretes vivos`, 'room_id');
+    }
+    const updated = reminderStore.update(
+      id,
+      v.kind === 'once'
+        ? { roomId: v.roomId, label: v.label, kind: 'once', dueAtUtc: v.dueAtUtc, localHour: null, localMinute: null, repeatRule: null, nextDueUtc: v.nextDueUtc }
+        : { roomId: v.roomId, label: v.label, kind: 'recurring', dueAtUtc: null, localHour: v.localHour, localMinute: v.localMinute, repeatRule: v.repeatRule, nextDueUtc: v.nextDueUtc },
+      this.now(),
+    );
+    // Começou a tocar entre a leitura e o UPDATE.
+    if (!updated) throw new HttpError(409, 'o lembrete mudou de estado — recarregue');
+
+    // A fala gravada diz o rótulo e é renderizada pela voz da sala: rótulo ou
+    // sala novos invalidam o áudio.
+    const labelChanged = updated.label !== current.label || updated.roomId !== current.roomId;
+    if (labelChanged) reminderStore.deleteAudio(id);
+    this.deps.onReminderSaved(updated, labelChanged && updated.label !== null);
+    getLogger().info(
+      {
+        event: 'reminder_edited',
+        room_id: updated.roomId,
+        reminder_id: updated.id,
+        short_id: updated.shortId,
+        next_due_utc: updated.nextDueUtc,
+        kind: updated.kind,
+        label_changed: labelChanged,
+        via: 'admin',
+      },
+      `Lembrete ${updated.shortId} editado pelo painel`,
+    );
+    return this.reminderWire(updated);
+  }
+
+  private reminderHistory(query: URLSearchParams): unknown {
+    const limit = intParam(query, 'limit', 50, 1, 500);
+    return {
+      events: this.deps.diagnostics.store.reminderHistory(limit).map((e) => ({
+        id: e.id,
+        at: e.at,
+        reminder_id: e.reminderId,
+        short_id: e.shortId,
+        kind: e.kind,
+        room_id: e.roomId,
+        label: e.label,
+        via: e.via ?? (e.kind === 'created' || e.kind === 'cancelled' ? 'voice' : null),
+      })),
+    };
   }
 
   private cancelReminder(rawId: string): unknown {
@@ -380,7 +505,7 @@ export class AdminApi {
     }
     this.deps.cancelReminder(reminder);
     getLogger().info(
-      { event: 'reminder_cancelled', room_id: reminder.roomId, short_id: reminder.shortId, via: 'admin' },
+      { event: 'reminder_cancelled', room_id: reminder.roomId, reminder_id: reminder.id, short_id: reminder.shortId, via: 'admin' },
       `Lembrete ${reminder.shortId} cancelado pelo painel`,
     );
     return { id, cancelled: true };

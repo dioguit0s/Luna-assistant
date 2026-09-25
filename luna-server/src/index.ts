@@ -176,6 +176,12 @@ async function main(): Promise<void> {
         alarmRinger.dismissByShortId(reminder.shortId);
         reminderScheduler.reschedule();
       },
+      onReminderSaved: (reminder, labelChanged) => {
+        reminderScheduler.reschedule();
+        if (labelChanged && reminder.label) {
+          wsServer.requestReminderPrerender(reminder.roomId, reminder.id, reminder.label);
+        }
+      },
       weatherSource,
       diagnostics,
       onRestart: () => requestRestart(),
