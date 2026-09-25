@@ -1,6 +1,7 @@
 #!/bin/bash
 # Orquestra o pipeline inteiro de treino do "Hey Luna" (microWakeWord).
-# Cada etapa é resumível: se já existir a saída, o script da etapa pula.
+# Cada etapa é resumível: se já existir a saída, o script da etapa pula
+# (exceto custom_negatives, que sempre regenera a partir dos WAVs).
 #
 # Uso:
 #   ./run.sh                 # roda tudo, na ordem
@@ -16,9 +17,16 @@ WORK="$(pwd)/work"
 SCRIPTS="$(pwd)/scripts"
 mkdir -p "$WORK"
 
+# Flags extras do `docker run`, ex. MWW_DOCKER_ARGS="--memory=8g --cpus=3".
+# Sem --memory, um vazamento do TF no treino (ver 06b_train_loop.sh) cai no
+# OOM killer do HOST, que pode escolher outro processo — no servidor de
+# produção, o luna-server. Com --memory, morre só o container (código 137) e
+# `./run.sh train` retoma do último checkpoint.
+read -ra DOCKER_EXTRA <<< "${MWW_DOCKER_ARGS:-}"
+
 run() {
   echo "=== $1 ==="
-  MSYS_NO_PATHCONV=1 docker run --rm \
+  MSYS_NO_PATHCONV=1 docker run --rm ${DOCKER_EXTRA[@]+"${DOCKER_EXTRA[@]}"} \
     -v "$WORK:/work" \
     -v "$SCRIPTS:/scripts" \
     "$IMAGE" "${@:2}"
@@ -29,8 +37,8 @@ step_augdata()     { run "2/7 dados de augmentation" python3 /scripts/02_downloa
 step_features()    { run "3/7 espectrogramas"       python3 /scripts/03_generate_features.py; }
 step_negatives()   { run "4/7 negativos"            bash /scripts/04_download_negatives.sh; }
 # Opcional: só gera algo se houver WAVs em work/custom_negatives_wav/ — ver
-# "Se o modelo dispara demais" no README. Roda sempre (é barata e no-op
-# quando vazia) para não exigir mais um passo manual em "all".
+# "Se o modelo dispara demais" no README. Roda sempre (no-op quando vazia)
+# para não exigir mais um passo manual em "all"; com WAVs, regenera do zero.
 step_custom_negatives() { run "4b/7 negativos pt-BR (opcional)" python3 /scripts/04b_generate_custom_negatives.py; }
 step_train()       {
   run "5/7 config de treino" python3 /scripts/05_write_training_config.py
