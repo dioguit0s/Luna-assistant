@@ -54,6 +54,8 @@ export type Light = 'ok' | 'error' | 'unknown' | 'off';
 const PREFIX = '/admin/v1/';
 const MAX_BODY_BYTES = 64 * 1024;
 const CALENDAR_TEST_TIMEOUT_MS = 3000;
+/** Domínios que o "testar" do painel aciona — os mesmos que o `control_device` liga e desliga. */
+const TESTABLE_DOMAINS = new Set(['switch', 'light', 'fan']);
 /** Meta de TTFAB do projeto; o gráfico do painel traça a linha aqui. */
 export const TTFAB_TARGET_MS = 800;
 const MAX_LATENCY_SAMPLES = 2000;
@@ -181,7 +183,11 @@ export class AdminApi {
       case 'GET devices':
         return { body: this.devices() };
       case 'PUT devices':
-        return { body: this.updateAliases(await readJson(req)) };
+        return { body: this.updateDevices(await readJson(req)) };
+      case 'POST devices/:id':
+        if (id === 'test') return { body: await this.testDevice(await readJson(req)) };
+        if (id === 'refresh') return { body: await this.refreshDevices() };
+        break;
       case 'GET reminders':
         return { body: { reminders: this.reminders() } };
       case 'DELETE reminders/:id':
@@ -353,6 +359,8 @@ export class AdminApi {
 
   private devices(): unknown {
     const overrides = this.deps.settings.get('devices');
+    const excluded = new Set(overrides.exclude.map((e) => e.toLowerCase()));
+    const refresh = this.deps.deviceRegistry.refreshStatus();
     return {
       aliases: overrides.aliases,
       exclude: overrides.exclude,
@@ -362,15 +370,69 @@ export class AdminApi {
         entity_id: d.entityId,
         name: d.name ?? null,
       })),
+      // v2: tudo que o HA devolveu, com a marca de excluído — é daqui que o
+      // painel inclui de volta o que alguém excluiu.
+      ha_entities: this.deps.deviceRegistry.discoveredEntities().map((e) => ({
+        entity_id: e.entity_id,
+        device: e.device,
+        room_id: e.room_id,
+        name: e.name ?? null,
+        excluded: excluded.has(e.entity_id.toLowerCase()),
+      })),
+      refreshed_at: refresh.at,
+      refresh_ok: refresh.ok,
     };
   }
 
-  /** v1 edita só os apelidos; exclusões e entradas manuais são v2. */
-  private updateAliases(body: unknown): unknown {
-    const aliases = field(body, 'aliases');
-    if (aliases === undefined) throw new HttpError(422, '"aliases" é obrigatório', 'aliases');
-    this.deps.settings.update('devices', { aliases });
+  /**
+   * Patch parcial de `aliases`, `exclude` e `devices` (entradas manuais, no
+   * formato de `devices.json`: `room_id`/`entity_id`). Campo ausente mantém;
+   * a validação é a mesma do arquivo (`validateDeviceOverrides`).
+   */
+  private updateDevices(body: unknown): unknown {
+    const patch: Record<string, unknown> = {};
+    for (const key of ['aliases', 'exclude', 'devices']) {
+      const value = field(body, key);
+      if (value !== undefined) patch[key] = value;
+    }
+    if (Object.keys(patch).length === 0) {
+      throw new HttpError(422, 'nada para gravar: envie aliases, exclude ou devices', 'aliases');
+    }
+    this.deps.settings.update('devices', patch);
     return this.devices();
+  }
+
+  /**
+   * "Testar" do painel: liga ou desliga pelo HA, sem passar pela IA. Só o que
+   * o registro conhece (descoberto ou manual, excluído inclusive — o operador
+   * pode testar o que a Luna não pode acionar) e só nos domínios do
+   * `control_device`: o painel não vira um proxy genérico de serviços do HA.
+   */
+  private async testDevice(body: unknown): Promise<unknown> {
+    const entityId = field(body, 'entity_id');
+    const action = field(body, 'action');
+    if (typeof entityId !== 'string') throw new HttpError(422, '"entity_id" é obrigatório', 'entity_id');
+    if (action !== 'on' && action !== 'off') throw new HttpError(422, '"action" deve ser on ou off', 'action');
+    const known =
+      this.deps.deviceRegistry.discoveredEntities().some((e) => e.entity_id === entityId) ||
+      this.deps.settings.get('devices').devices.some((d) => d.entityId === entityId);
+    if (!known) throw new HttpError(404, 'entidade desconhecida pelo registro');
+    const domain = entityId.split('.')[0] ?? '';
+    if (!TESTABLE_DOMAINS.has(domain)) throw new HttpError(422, `domínio "${domain}" não é testável pelo painel`, 'entity_id');
+
+    const startedAt = this.now();
+    const result = await this.deps.haClient.callService(domain, action === 'on' ? 'turn_on' : 'turn_off', entityId);
+    getLogger().info(
+      { event: 'admin_device_test', entity_id: entityId, action, success: result.success, latency_ms: this.now() - startedAt },
+      `Teste pelo painel: ${entityId} → ${action}`,
+    );
+    return { ok: result.success, error: result.success ? null : result.error ?? 'falha no HA', latency_ms: this.now() - startedAt };
+  }
+
+  private async refreshDevices(): Promise<unknown> {
+    await this.deps.deviceRegistry.refresh();
+    const status = this.deps.deviceRegistry.refreshStatus();
+    return { ok: status.ok === true, at: status.at, count: this.deps.deviceRegistry.current().size };
   }
 
   // ─── Lembretes ─────────────────────────────────────────────────────────

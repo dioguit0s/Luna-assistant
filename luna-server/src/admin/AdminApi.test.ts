@@ -274,6 +274,40 @@ describe('API admin', () => {
     assert.equal(h.registry.current().resolve('bancada', 'escritorio').ok, true);
   });
 
+  it('exclusões e dispositivos manuais pelo painel valem na hora', async () => {
+    let res = await call(h, 'PUT', '/admin/v1/devices', { exclude: ['switch.luz_bancada'] });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.exclude, ['switch.luz_bancada']);
+    assert.equal(h.registry.current().resolve('luz_bancada', 'escritorio').ok, false, 'excluída');
+    assert.deepEqual(res.body.aliases, { bancada: 'luz_bancada' }, 'campo ausente mantém');
+
+    res = await call(h, 'PUT', '/admin/v1/devices', {
+      exclude: [],
+      devices: [{ device: 'abajur', room_id: 'quarto', entity_id: 'light.abajur' }],
+    });
+    assert.equal(res.status, 200);
+    assert.equal(h.registry.current().resolve('abajur', 'quarto').ok, true);
+
+    res = await call(h, 'PUT', '/admin/v1/devices', { devices: [{ device: 'x', room_id: 'quarto', entity_id: 'sem-ponto' }] });
+    assert.equal(res.status, 422);
+    assert.equal((await call(h, 'PUT', '/admin/v1/devices', {})).status, 422);
+  });
+
+  it('testar: só entidade conhecida e domínio acionável', async () => {
+    assert.equal((await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'lock.porta', action: 'off' })).status, 404);
+    assert.equal((await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'light.abajur', action: 'abrir' })).status, 422);
+    // HA sem URL neste harness: a chamada vai, e a falha volta como resultado, não como 500.
+    const res = await call(h, 'POST', '/admin/v1/devices/test', { entity_id: 'light.abajur', action: 'on' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.ok, false);
+  });
+
+  it('forçar refresh responde com o estado da descoberta', async () => {
+    const res = await call(h, 'POST', '/admin/v1/devices/refresh');
+    assert.equal(res.status, 200);
+    assert.equal(typeof res.body.count, 'number');
+  });
+
   it('nome de satélite aparece na lista mesmo offline', async () => {
     await call(h, 'PUT', '/admin/v1/satellites/esp32-aa', { name: 'Quarto' });
     const res = await call(h, 'GET', '/admin/v1/satellites');

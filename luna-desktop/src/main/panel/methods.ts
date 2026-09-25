@@ -119,6 +119,25 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
       }),
     'server.devices': () => admin.request('GET', 'devices'),
     'server.saveAliases': (aliases) => admin.request('PUT', 'devices', { aliases: obj(aliases, 'aliases') }),
+    'server.saveDevices': (patch) => {
+      const p = obj(patch, 'patch');
+      const body: Record<string, unknown> = {};
+      if (p.aliases !== undefined) body.aliases = obj(p.aliases, 'aliases');
+      if (p.exclude !== undefined) {
+        if (!Array.isArray(p.exclude) || p.exclude.some((e) => typeof e !== 'string')) throw new TypeError('exclude inválido');
+        body.exclude = p.exclude;
+      }
+      if (p.devices !== undefined) {
+        if (!Array.isArray(p.devices)) throw new TypeError('devices inválido');
+        body.devices = p.devices.map((d, i) => obj(d, `devices[${i}]`));
+      }
+      return admin.request('PUT', 'devices', body);
+    },
+    'server.testDevice': (entityId, action) => {
+      if (action !== 'on' && action !== 'off') throw new TypeError('ação inválida');
+      return admin.request('POST', 'devices/test', { entity_id: str(entityId, 'entity_id'), action });
+    },
+    'server.refreshDevices': () => admin.request('POST', 'devices/refresh'),
     'server.reminders': () => admin.request('GET', 'reminders'),
     'server.cancelReminder': (id) => admin.request('DELETE', `reminders/${int(id, 'id', 1, Number.MAX_SAFE_INTEGER)}`),
     'server.createReminder': (body) => admin.request('POST', 'reminders', obj(body, 'lembrete')),

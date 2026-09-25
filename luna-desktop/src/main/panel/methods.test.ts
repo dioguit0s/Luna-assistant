@@ -146,6 +146,17 @@ describe('métodos do painel', () => {
     assert.equal(recorded.length, 2);
   });
 
+  it('dispositivos: patch só com as chaves conhecidas; testar exige on/off', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.saveDevices']!({ exclude: ['switch.x'], outra: 1 });
+    assert.deepEqual(recorded[0]!.body, { exclude: ['switch.x'] });
+    assert.equal((await methods['server.saveDevices']!({ exclude: 'switch.x' })).ok, false);
+    await methods['server.testDevice']!('light.abajur', 'on');
+    assert.deepEqual(recorded[1]!.body, { entity_id: 'light.abajur', action: 'on' });
+    assert.equal((await methods['server.testDevice']!('light.abajur', 'toggle')).ok, false);
+    assert.equal(recorded.length, 2);
+  });
+
   it('log ao vivo: filtro validado no processo principal', async () => {
     const { methods, calls } = setup();
     assert.equal((await methods['logs.start']!('warn', 'quarto')).ok, true);

@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6 Diagnóstico e M7 Lembretes feitos)
+**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6 Diagnóstico, M7 Lembretes e M8 Dispositivos feitos)
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -72,9 +72,9 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Mapear sala da Luna ↔ área do HA (resolve o `desktop_diogo`) | API + Persist | v1 |
 | O que a Luna "enxerga" em cada sala (mesma saída do `list_devices`, [ADR 009](adr/009-inventario-por-comodo.md)) | API | v1 |
 | Editar apelidos (`aliases`) | API + Persist | v1 |
-| Editar exclusões (`exclude`) e dispositivos manuais | API + Persist | v2 |
-| "Testar": ligar/desligar um dispositivo pelo painel | API | v2 |
-| Forçar refresh do registro de dispositivos do HA | API | v2 |
+| Editar exclusões (`exclude`) e dispositivos manuais | API + Persist | v2 ✔ |
+| "Testar": ligar/desligar um dispositivo pelo painel | API | v2 ✔ |
+| Forçar refresh do registro de dispositivos do HA | API | v2 ✔ |
 
 ### 4. Integrações
 
@@ -159,7 +159,9 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove |
 | `GET rooms` | Salas (de satélite, áreas do HA, mapeadas), área efetiva e o que o `list_devices` veria nelas |
 | `PUT rooms/:room_id` | `{ "area": "escritorio" }` — `null` remove o mapeamento |
-| `GET devices` / `PUT devices` | Overrides; v1 grava só `{ "aliases": {...} }` |
+| `GET devices` / `PUT devices` | Overrides. `PUT` é patch de `aliases`, `exclude` e `devices` (entradas manuais no formato do `devices.json`); campo ausente mantém. `GET` traz também `ha_entities` (o que o HA descobriu, com `excluded`) e o estado do último refresh — v2 |
+| `POST devices/test` | `{ entity_id, action: "on" \| "off" }` pelo HA, sem a IA. Só entidade que o registro conhece e só `switch`/`light`/`fan` — v2 |
+| `POST devices/refresh` | Redescobre no HA agora, sem esperar o TTL — v2 |
 | `GET reminders` | Lembretes vivos de todas as salas, com a frase falada |
 | `DELETE reminders/:id` | Cancela: banco, toque em curso e scheduler |
 | `POST reminders` | Cria: `{ room_id, label, repeat, date, time }` — hora de parede de São Paulo (ADR 006), `repeat` `none`/`daily`/`weekdays`/`weekend`/`mon`…`sun`, `date` só no `none`. Mesmas regras de rótulo da voz (sem "Luna", até 200). 201 — v2 |

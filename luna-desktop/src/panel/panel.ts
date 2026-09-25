@@ -939,6 +939,8 @@ function emptyReport(kicker: string, headline: string, hint: string): HTMLElemen
 
 let selectedRoom: string | null = null;
 let aliasTarget: string | null = null;
+/** Formulário de dispositivo manual aberto (só um por vez). */
+let manualDraft: { device: string; entity_id: string; name: string; error: string | null } | null = null;
 let mapTimer: ReturnType<typeof setTimeout> | null = null;
 
 pages.push({
@@ -951,6 +953,9 @@ pages.push({
     if (!roomsRes.ok) return serverUnavailable(root, roomsRes);
     const { rooms: all, ha_areas: haAreas } = roomsRes.body as { rooms: any[]; ha_areas: string[] };
     const aliases: Record<string, string> = devicesRes.ok ? { ...(devicesRes.body.aliases ?? {}) } : {};
+    const exclude: string[] = devicesRes.ok ? [...(devicesRes.body.exclude ?? [])] : [];
+    const manual: any[] = devicesRes.ok ? [...(devicesRes.body.devices ?? [])] : [];
+    const haEntities: any[] = devicesRes.ok ? devicesRes.body.ha_entities ?? [] : [];
 
     // "Salas da Luna": onde há satélite ou mapeamento. Área do HA que nenhuma
     // delas usa é órfã — a Luna só a alcança de um satélite dentro dela.
@@ -979,6 +984,7 @@ pages.push({
             onclick: () => {
               selectedRoom = r.room_id;
               aliasTarget = null;
+              manualDraft = null;
               void renderCurrent();
             },
           },
@@ -1041,11 +1047,35 @@ pages.push({
     const saveAliases = async (next: Record<string, string>, label: string): Promise<void> => {
       if (await run(label, 'server.saveAliases', next)) void renderCurrent();
     };
-    const devCols = '110px 240px minmax(0,1fr)';
+    const saveDevices = async (patch: Record<string, unknown>, label: string): Promise<void> => {
+      if (await run(label, 'server.saveDevices', patch)) void renderCurrent();
+    };
+    const testDevice = async (entityId: string, action: 'on' | 'off'): Promise<void> => {
+      const result = await window.panel.call('server.testDevice', entityId, action);
+      const verb = action === 'on' ? 'LIGAR' : 'DESLIGAR';
+      if (!result.ok) say(`TESTE ${verb} ${entityId} ... FALHA: ${errorOf(result)}`, 'warn');
+      else if (!result.body.ok) say(`TESTE ${verb} ${entityId} ... HA RECUSOU: ${String(result.body.error ?? '').toUpperCase()}`, 'warn');
+      else say(`TESTE ${verb} ${entityId} ... OK ${result.body.latency_ms}MS`);
+    };
+    const testable = (entityId: string): boolean => /^(switch|light|fan)\./.test(entityId);
+    const devCols = '110px 220px minmax(0,1fr) 170px';
     const devices = frame(
       'O QUE A LUNA ENXERGA AQUI',
       { style: 'gap:0' },
-      grid(devCols, { class: 'tbl-head' }, h('span', {}, 'TIPO'), h('span', {}, 'DISPOSITIVO / ENTITY_ID'), h('span', {}, 'APELIDOS')),
+      h(
+        'div',
+        { class: 'row small', style: 'gap:10px;padding-bottom:8px' },
+        h('span', {}, devicesRes.ok && devicesRes.body.refreshed_at ? `DESCOBERTA ${devicesRes.body.refresh_ok === false ? '◈ FALHOU' : 'OK'} · ${formatAgo(devicesRes.body.refreshed_at)}` : 'DESCOBERTA: AINDA NÃO RODOU'),
+        h('span', { class: 'spacer' }),
+        cmd('ATUALIZAR DO HA', async () => {
+          const body = await run('ATUALIZAR REGISTRO DO HA', 'server.refreshDevices');
+          if (body) {
+            say(body.ok ? `ATUALIZAR REGISTRO DO HA ... OK · ${body.count} DISPOSITIVOS` : 'ATUALIZAR REGISTRO DO HA ... HA NÃO RESPONDEU', body.ok ? 'ok' : 'warn');
+            void renderCurrent();
+          }
+        }, { tone: 'quiet' }),
+      ),
+      grid(devCols, { class: 'tbl-head' }, h('span', {}, 'TIPO'), h('span', {}, 'DISPOSITIVO / ENTITY_ID'), h('span', {}, 'APELIDOS'), h('span', {}, 'TESTAR')),
       ...(room.devices as any[]).map((d) => {
         const domain = String(d.entity_id).split('.')[0] ?? '';
         const chips = Object.entries(aliases)
@@ -1105,9 +1135,103 @@ pages.push({
           h('span', {}, DOMAIN_LABELS[domain] ?? domain.toUpperCase()),
           h('div', { style: 'display:flex;flex-direction:column;gap:2px;min-width:0' }, h('span', { class: 'hi ellipsis' }, d.name ?? d.device), h('span', { class: 'raw small ellipsis' }, d.entity_id)),
           h('div', { class: 'chips' }, ...chips, adder),
+          h(
+            'div',
+            { style: 'display:flex;gap:2px;justify-self:end;flex-wrap:wrap' },
+            testable(d.entity_id) ? cmd('ON', () => void testDevice(d.entity_id, 'on'), { tone: 'quiet', ariaLabel: `Ligar ${d.entity_id}` }) : null,
+            testable(d.entity_id) ? cmd('OFF', () => void testDevice(d.entity_id, 'off'), { tone: 'quiet', ariaLabel: `Desligar ${d.entity_id}` }) : null,
+            cmd('OCULTAR', () => void saveDevices({ exclude: [...exclude, d.entity_id] }, `OCULTAR ${d.entity_id} DA LUNA`), { tone: 'quiet', ariaLabel: `Ocultar ${d.entity_id} da Luna` }),
+          ),
         );
       }),
       room.devices.length === 0 ? h('div', { class: 'amber', style: 'padding:14px 0 6px' }, 'NENHUM DISPOSITIVO VISÍVEL. SEM ÁREA, SEM INVENTÁRIO.') : null,
+    );
+
+    // Ocultos: o que o HA tem mas a Luna não pode acionar. Vale para todas as
+    // salas — o `exclude` é global.
+    const hidden = exclude.map((entityId) => ({ entityId, info: haEntities.find((e) => e.entity_id === entityId) ?? manual.find((m) => m.entity_id === entityId) }));
+    const hiddenFrame = frame(
+      'OCULTOS DA LUNA // TODAS AS SALAS',
+      { tone: 'muted', style: 'gap:0' },
+      ...hidden.map(({ entityId, info }) =>
+        grid(
+          '1fr 150px 110px',
+          { class: 'tbl-row dotted', style: 'padding:4px 0' },
+          h('span', { class: 'raw ellipsis' }, entityId, info?.name ? h('span', { class: 'fg' }, `  ${info.name}`) : null),
+          h('span', { class: 'ellipsis' }, info?.room_id ?? '— FORA DO HA —'),
+          cmd('MOSTRAR', () => void saveDevices({ exclude: exclude.filter((e) => e !== entityId) }, `MOSTRAR ${entityId} PARA A LUNA`), { tone: 'quiet' }),
+        ),
+      ),
+      hidden.length === 0 ? h('div', { style: 'padding:6px 0' }, 'NENHUM. A LUNA ENXERGA TUDO QUE O HA DESCOBRIU.') : null,
+    );
+
+    // Manuais: para o que não está em nenhuma área do HA. O registro resolve
+    // pela área efetiva (`areaFor`), então é nela que a entrada nasce — gravar
+    // `desktop_diogo` numa sala mapeada para `escritorio` a deixaria inalcançável.
+    const manualArea: string = room.effective_area ?? room.room_id;
+    const manualHere = manual.filter((m) => m.room_id === manualArea);
+    let manualForm: HTMLElement | null = null;
+    if (manualDraft) {
+      const draft = manualDraft;
+      const mk = (key: 'device' | 'entity_id' | 'name', placeholder: string): HTMLInputElement => {
+        const input = lineInput(draft[key], { placeholder, 'aria-label': placeholder, maxLength: 128 });
+        input.addEventListener('input', () => (draft[key] = input.value));
+        input.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') void addManual();
+          if (e.key === 'Escape') cancelManual();
+        });
+        return input;
+      };
+      const cancelManual = (): void => {
+        manualDraft = null;
+        pendingEscape = null;
+        void renderCurrent();
+      };
+      const addManual = async (): Promise<void> => {
+        const entry: Record<string, string> = { device: draft.device.trim(), room_id: manualArea, entity_id: draft.entity_id.trim() };
+        if (draft.name.trim()) entry.name = draft.name.trim();
+        const result = await window.panel.call('server.saveDevices', { devices: [...manual.map(({ device, room_id, entity_id, name }) => ({ device, room_id, entity_id, ...(name ? { name } : {}) })), entry] });
+        if (!result.ok) {
+          draft.error = errorOf(result);
+          say(`ADICIONAR ${entry.entity_id || '?'} ... FALHA: ${draft.error}`, 'warn');
+          pendingEscape = null;
+          void renderCurrent();
+          return;
+        }
+        say(`ADICIONAR ${entry.entity_id} EM ${manualArea} ... OK`);
+        manualDraft = null;
+        pendingEscape = null;
+        void renderCurrent();
+      };
+      pendingEscape = cancelManual;
+      const first = mk('device', 'NOME FALADO (EX: ABAJUR)');
+      queueMicrotask(() => first.focus());
+      manualForm = h(
+        'div',
+        { style: 'display:flex;flex-direction:column;gap:8px;padding-top:8px' },
+        grid('minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', { class: 'grid', style: 'gap:8px' }, first, mk('entity_id', 'ENTITY_ID (EX: LIGHT.ABAJUR)'), mk('name', 'NOME NO HA (OPCIONAL)')),
+        draft.error ? h('div', { class: 'amber', role: 'alert' }, `◈ ${draft.error.toUpperCase()}`) : null,
+        h('div', { class: 'row', style: 'gap:8px' }, cmd('ADICIONAR', () => void addManual(), { first: true }), cmd('CANCELAR', cancelManual, { tone: 'quiet' })),
+      );
+    }
+    const manualFrame = frame(
+      `MANUAIS NA ÁREA ${manualArea.toUpperCase()}`,
+      { style: 'gap:0' },
+      ...manualHere.map((m) =>
+        grid(
+          '150px minmax(0,1fr) 120px',
+          { class: 'tbl-row dotted', style: 'padding:4px 0' },
+          h('span', { class: 'hi ellipsis' }, m.device),
+          h('span', { class: 'raw ellipsis' }, m.entity_id),
+          cmd('REMOVER', () => void saveDevices({ devices: manual.filter((x) => x !== m).map(({ device, room_id, entity_id, name }) => ({ device, room_id, entity_id, ...(name ? { name } : {}) })) }, `REMOVER MANUAL ${m.entity_id}`), { tone: 'quiet' }),
+        ),
+      ),
+      manualHere.length === 0 && !manualForm ? h('div', { style: 'padding:6px 0' }, 'NENHUM. USE PARA O QUE NÃO ESTÁ EM ÁREA NENHUMA DO HA.') : null,
+      manualForm ??
+        h('div', { style: 'padding-top:8px' }, cmd('+ MANUAL', () => {
+          manualDraft = { device: '', entity_id: '', name: '', error: null };
+          void renderCurrent();
+        }, { tone: 'quiet', first: true })),
     );
 
     root.append(
@@ -1115,7 +1239,7 @@ pages.push({
         'div',
         { style: 'display:flex;gap:18px;padding-top:8px' },
         h('div', { style: 'width:240px;flex-shrink:0;display:flex;flex-direction:column;gap:24px' }, list, orphanFrame),
-        h('div', { style: 'flex:1;min-width:0;display:flex;flex-direction:column;gap:22px' }, mapping, unmapped, devices),
+        h('div', { style: 'flex:1;min-width:0;display:flex;flex-direction:column;gap:22px' }, mapping, unmapped, devices, manualFrame, hiddenFrame),
       ),
     );
   },
