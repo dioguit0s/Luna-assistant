@@ -234,6 +234,8 @@ merece plano próprio.
   `userData/settings.json` com segredos no `safeStorage`. O item "Configurações" da bandeja
   abre o painel; sem segredo configurado, o app abre o painel sozinho.
 - **Sidecar:** evento `score` (`--score-interval-ms`) para o medidor de wake word ao vivo.
+- **Visual:** sistema "LUNA 6000" (terminal de fósforo verde), vindo do Claude Design —
+  tokens, componentes e regras em [design-system-painel.md](design-system-painel.md).
 
 Diferenças em relação ao inventário:
 

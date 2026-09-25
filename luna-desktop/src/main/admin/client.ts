@@ -72,6 +72,9 @@ export class AdminClient {
         ok: false,
         status: 0,
         body: {
+          // Distingue "servidor fora do ar" de configuração faltando (também
+          // status 0): o painel mostra a tela SEM SINAL só no primeiro caso.
+          offline: true,
           error: timedOut
             ? `Servidor não respondeu em ${REQUEST_TIMEOUT_MS / 1000}s.`
             : `Servidor inacessível (${err instanceof Error ? err.message : String(err)}).`,

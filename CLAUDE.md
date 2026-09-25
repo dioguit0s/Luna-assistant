@@ -8,7 +8,7 @@ Referência por tarefa:
 
 - Mexer em mensagem entre satélite e servidor → [`docs/protocolo-websocket.md`](docs/protocolo-websocket.md) (fonte canônica do contrato)
 - Mexer no código do servidor → [`docs/arquitetura-servidor.md`](docs/arquitetura-servidor.md) (mapa dos módulos)
-- Mexer no painel de controle (desktop ou API admin do servidor) → [`docs/painel-de-controle.md`](docs/painel-de-controle.md) e [ADR 010](docs/adr/010-painel-de-controle-e-api-admin.md)
+- Mexer no painel de controle (desktop ou API admin do servidor) → [`docs/painel-de-controle.md`](docs/painel-de-controle.md) e [ADR 010](docs/adr/010-painel-de-controle-e-api-admin.md); no visual do painel → [`docs/design-system-painel.md`](docs/design-system-painel.md)
 - Montar ambiente ou tarefa comum → [`docs/onboarding.md`](docs/onboarding.md)
 - Navegar tudo → [`README.md`](README.md) e [`docs/Home.md`](docs/Home.md)
 

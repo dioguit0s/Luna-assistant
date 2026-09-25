@@ -33,6 +33,37 @@ for (const page of PAGES) {
   stripModuleSyntax(dest, page.scripts);
 }
 
+// Fontes do painel (docs/design-system-painel.md). Vão empacotadas porque a CSP
+// do painel não permite rede — Google Fonts está fora de questão. Só o subset
+// latin, que cobre o português; os glifos de caixa e bloco (╞═ ▣ █ ▁▂) caem no
+// monoespaçado do sistema, como no design. A licença (OFL) viaja junto.
+const FONTS = [
+  { pkg: 'vt323', files: ['vt323-latin-400-normal.woff2'] },
+  {
+    pkg: 'ibm-plex-mono',
+    files: [
+      'ibm-plex-mono-latin-400-normal.woff2',
+      'ibm-plex-mono-latin-500-normal.woff2',
+      'ibm-plex-mono-latin-600-normal.woff2',
+    ],
+  },
+];
+const fontsDest = join(root, 'dist', 'panel', 'fonts');
+mkdirSync(fontsDest, { recursive: true });
+for (const font of FONTS) {
+  const base = join(root, 'node_modules', '@fontsource', font.pkg);
+  for (const file of font.files) {
+    const from = join(base, 'files', file);
+    if (!existsSync(from)) {
+      console.error(`[copy-renderer] ERRO: fonte ${from} não existe — rode npm install.`);
+      process.exit(1);
+    }
+    cpSync(from, join(fontsDest, file));
+  }
+  cpSync(join(base, 'LICENSE'), join(fontsDest, `${font.pkg}-LICENSE.txt`));
+  console.log(`[copy-renderer] fonte ${font.pkg} -> dist/panel/fonts/`);
+}
+
 // renderer.ts e capture-worklet.ts são escritos de propósito sem import/export
 // (ver comentário no topo de renderer.ts) para carregar como <script src="...">
 // clássico via file://, sem a checagem estrita de MIME/CORS que Chromium

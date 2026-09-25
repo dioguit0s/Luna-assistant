@@ -78,14 +78,15 @@ export function createPanelController(
       }
 
       win = new BrowserWindow({
-        width: 1040,
-        height: 720,
-        minWidth: 760,
-        minHeight: 520,
+        // Tamanho de referência do design (docs/design-system-painel.md).
+        width: 1200,
+        height: 760,
+        minWidth: 960,
+        minHeight: 600,
         show: false,
-        title: 'Luna — Configurações',
+        title: 'LUNA 6000 — Painel de controle',
         autoHideMenuBar: true,
-        backgroundColor: '#14131a',
+        backgroundColor: '#050805',
         webPreferences: {
           preload: PRELOAD_PATH,
           partition: PARTITION,
