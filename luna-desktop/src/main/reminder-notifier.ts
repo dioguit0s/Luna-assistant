@@ -53,7 +53,10 @@ export class ReminderNotifier {
     try {
       const result = await this.admin.request('GET', 'reminders');
       if (!result.ok) return;
-      const reminders = ((result.body as { reminders?: ReminderWire[] })?.reminders ?? []) as ReminderWire[];
+      const raw = (result.body as { reminders?: unknown })?.reminders;
+      // Resposta de outra coisa (proxy, versão diferente do servidor): nada a avisar.
+      if (!Array.isArray(raw)) return;
+      const reminders = raw as ReminderWire[];
       const room = this.roomId();
       const live = new Set<string>();
       for (const r of reminders) {
@@ -65,6 +68,8 @@ export class ReminderNotifier {
       }
       // Esquece o que já não existe, para o conjunto não crescer sem fim.
       for (const key of this.notified) if (!live.has(key)) this.notified.delete(key);
+    } catch (err) {
+      console.warn(`[luna-desktop] notificador de lembretes: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.inFlight = false;
     }

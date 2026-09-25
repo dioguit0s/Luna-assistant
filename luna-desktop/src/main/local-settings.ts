@@ -82,7 +82,8 @@ export const WAKE_THRESHOLD_MIN = 0.5;
 export const WAKE_THRESHOLD_MAX = 0.999;
 
 /** Accelerator do Electron: modificadores + uma tecla, separados por `+`. */
-const SHORTCUT_PATTERN = /^((CommandOrControl|Control|Ctrl|Alt|Shift|Super|Meta)\+){1,3}[A-Za-z0-9]+$|^F([1-9]|1[0-9]|2[0-4])$/;
+const SHORTCUT_PATTERN =
+  /^((CommandOrControl|Control|Ctrl|Alt|Shift)\+){1,3}([A-Z0-9]|F([1-9]|1[0-9]|2[0-4])|Space|Up|Down|Left|Right|Home|End|PageUp|PageDown|Insert)$|^F([1-9]|1[0-9]|2[0-4])$/;
 
 /** Mesmo formato que o luna-server exige no auth (ROOM_ID_PATTERN em WsServer.ts). */
 const ROOM_ID_PATTERN = /^[a-z0-9_]{1,64}$/;

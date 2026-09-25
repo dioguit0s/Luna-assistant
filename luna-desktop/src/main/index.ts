@@ -89,7 +89,9 @@ function applyTalkShortcut(accel: string): boolean {
     ok = false;
   }
   if (!ok) {
-    shortcutError = `O atalho ${accel} já está em uso por outro programa.`;
+    // `register` devolve false quando outro programa já tem a combinação, e
+    // lança quando o Electron não entende o accelerator.
+    shortcutError = `O Windows recusou o atalho ${accel} (em uso por outro programa ou reservado pelo sistema).`;
     console.warn(`[luna-desktop] ${shortcutError}`);
     return false;
   }
@@ -397,15 +399,6 @@ if (!gotLock) {
           view: localView,
           async save(patch) {
             const before = local ?? readLocalSettings();
-            // Atalho: testa o registro ANTES de gravar — gravar um atalho que
-            // o Windows recusou deixaria a tela dizendo que ele existe.
-            if (patch.talkShortcut !== undefined && patch.talkShortcut.trim() !== before.talkShortcut) {
-              if (!applyTalkShortcut(patch.talkShortcut.trim())) {
-                const failed = shortcutError ?? 'Atalho recusado pelo sistema.';
-                applyTalkShortcut(before.talkShortcut);
-                throw new LocalSettingsError('talkShortcut', failed);
-              }
-            }
             // Os segredos gravados seguem a URL do servidor: o token admin e o
             // segredo do satélite passam a ir para o host novo. Um renderer do
             // painel comprometido poderia mudar a URL para exfiltrá-los — a
@@ -429,6 +422,18 @@ if (!gotLock) {
               if (response !== 0) throw new LocalSettingsError('serverUrl', 'Troca de servidor cancelada.');
             }
             local = saveLocalSettings(patch);
+            // Atalho: registra DEPOIS de gravar, porque `saveLocalSettings`
+            // é quem valida o formato — registrar antes deixava uma tecla
+            // solta ("K") capturada no Windows inteiro mesmo com o erro na
+            // tela. Se o sistema recusar, o gravado volta ao anterior.
+            if (local.talkShortcut !== registeredShortcut) {
+              if (!applyTalkShortcut(local.talkShortcut)) {
+                const failed = shortcutError ?? 'Atalho recusado pelo sistema.';
+                local = saveLocalSettings({ talkShortcut: before.talkShortcut });
+                applyTalkShortcut(before.talkShortcut);
+                throw new LocalSettingsError('talkShortcut', failed);
+              }
+            }
             if (patch.wakeThreshold !== undefined) {
               wakeword?.setThreshold(local.wakeThreshold ?? envWakeThreshold);
             }

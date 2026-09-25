@@ -39,6 +39,9 @@ describe('preferências do painel v2', () => {
     stored = applyLocalPatch(stored, { talkShortcut: 'F9' }, codec);
     assert.equal(stored.talkShortcut, 'F9');
     assert.throws(() => applyLocalPatch({}, { talkShortcut: 'A' }, codec), LocalSettingsError);
+    assert.throws(() => applyLocalPatch({}, { talkShortcut: 'Shift+!' }, codec), LocalSettingsError);
+    assert.throws(() => applyLocalPatch({}, { talkShortcut: 'Control+Alt+AltRight' }, codec), LocalSettingsError);
+    assert.equal(applyLocalPatch({}, { talkShortcut: 'Control+Up' }, codec).talkShortcut, 'Control+Up');
     stored = applyLocalPatch(stored, { talkShortcut: '' }, codec);
     assert.equal(resolveLocalSettings({}, stored, codec).talkShortcut, '');
   });

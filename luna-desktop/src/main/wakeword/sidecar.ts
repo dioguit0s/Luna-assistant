@@ -151,12 +151,20 @@ export class WakewordSidecar extends EventEmitter {
     // Python — o console do Windows tende a cp1252/cp850, então o lado Node
     // precisa decodificar como UTF-8 explicitamente também, senão acentos em
     // pt-BR (ex. "inferências", "detecção") saem como lixo no log.
+    // Reiniciar pelo painel (`setThreshold`) mata o processo com o microfone
+    // ainda escrevendo: EPIPE sem listener viraria uncaughtException no main.
+    child.stdin.on('error', (err) => {
+      if (this.child === child) console.warn(`[wakeword-sidecar] stdin: ${err.message}`);
+    });
+
     child.stderr.setEncoding('utf8');
     createInterface({ input: child.stderr }).on('line', (line) => {
       console.warn(`[wakeword-sidecar] ${line}`);
     });
 
     child.on('error', (err) => {
+      // Processo já substituído (reinício pelo painel): não é deste filho.
+      if (this.child !== child) return;
       // Falha do próprio spawn (ex. python.exe não existe porque o venv não
       // foi criado) — não passa por 'exit', precisa de handler próprio.
       console.error(`[wakeword-sidecar] falha ao iniciar processo: ${err.message}`);

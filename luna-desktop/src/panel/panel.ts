@@ -546,8 +546,15 @@ function buildNoSignal(): void {
 let local: any = null;
 let micLevel = 0;
 
+/** Linha "EM VIGOR" da sensibilidade: repintada a cada evento `local` (o `ready` do sidecar reiniciado). */
+function wakeActiveText(view: any): string {
+  return `EM VIGOR: ${view?.wakeThresholdActive != null ? view.wakeThresholdActive.toFixed(2) : '—'} · MAIS BAIXO ACORDA MAIS FÁCIL, E ACORDA SEM QUERER`;
+}
+
 function paintLocal(): void {
   if (!local) return;
+  const active = document.getElementById('wake-active');
+  if (active) active.textContent = wakeActiveText(local);
   $('cmd-meta').textContent = `NÚCLEO ${hostOf(local.serverUrl).toUpperCase()} · OPERADOR ÚNICO`;
   paintVoice();
 }
@@ -2193,16 +2200,26 @@ pages.push({
         shortcut.value = '';
         return;
       }
-      if (['Control', 'Shift', 'Alt', 'Meta'].includes(e.key)) return;
-      const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.shiftKey && 'Shift', e.metaKey && 'Super'].filter(Boolean) as string[];
-      const key = e.key === ' ' ? 'Space' : /^F\d{1,2}$/.test(e.key) ? e.key : e.key.length === 1 ? e.key.toUpperCase() : e.code.replace(/^Key|^Digit/, '');
+      // Pela tecla FÍSICA (`e.code`), não pelo caractere: no ABNT2 Shift+1
+      // vira "!", AltGr vira Control+Alt e acento é tecla morta — nada disso
+      // é accelerator que o Electron entenda.
+      if (['Control', 'Shift', 'Alt', 'Meta', 'AltGraph', 'Dead', 'Tab'].includes(e.key)) return;
+      const code = e.code;
+      const named: Record<string, string> = { Space: 'Space', ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right', Home: 'Home', End: 'End', PageUp: 'PageUp', PageDown: 'PageDown', Insert: 'Insert' };
+      const key = /^Key[A-Z]$/.test(code) ? code.slice(3) : /^Digit\d$/.test(code) ? code.slice(5) : /^F\d{1,2}$/.test(code) ? code : named[code];
+      if (!key) {
+        say('ATALHO ... TECLA NÃO SUPORTADA: USE LETRA, NÚMERO, F1–F24, ESPAÇO OU SETA', 'warn');
+        return;
+      }
+      // Win+tecla é quase todo reservado pelo Windows: nem oferece.
+      const mods = [e.ctrlKey && 'Control', e.altKey && 'Alt', e.shiftKey && 'Shift'].filter(Boolean) as string[];
       shortcut.value = [...mods, key].join('+');
     });
     const prefs = frame(
       'PREFERÊNCIAS',
       { style: 'gap:10px' },
       field('SENSIBILIDADE', thresholdCycler, 'IMEDIATO (REINICIA A WAKE WORD)', 118, true),
-      h('div', { class: 'small' }, `EM VIGOR: ${view.wakeThresholdActive !== null ? view.wakeThresholdActive.toFixed(2) : '—'} · MAIS BAIXO ACORDA MAIS FÁCIL, E ACORDA SEM QUERER`),
+      h('div', { class: 'small', id: 'wake-active' }, wakeActiveText(view)),
       field('ATALHO FALAR', shortcut, 'IMEDIATO', 118, true),
       view.talkShortcutError ? h('div', { class: 'amber small' }, `◈ ${String(view.talkShortcutError).toUpperCase()}`) : null,
       h(
