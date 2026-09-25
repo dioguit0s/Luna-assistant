@@ -58,7 +58,15 @@ Ou etapa por etapa (útil para rodar o treino em background sem travar o termina
 ./run.sh export              # copia o .tflite final e escreve o manifesto JSON
 ```
 
-Cada etapa pula sozinha se a saída já existir — pode interromper e retomar.
+Cada etapa pula sozinha se a saída já existir — pode interromper e retomar (exceto
+`custom_negatives`, que sempre regenera a partir dos WAVs).
+
+Rodando numa máquina que também serve produção (ex. o servidor do `luna-server`), limite o
+container para que um OOM do treino mate só ele, e não um processo do host:
+
+```bash
+MWW_DOCKER_ARGS="--memory=8g --cpus=3" ./run.sh train
+```
 
 ## Depois do treino
 
@@ -111,13 +119,21 @@ Ordem recomendada (mais barato → mais caro):
      comum em português: TV, conversa de fundo, e principalmente **palavras parecidas
      com "hey luna"** — "lua", "uma", "luna" sem o "hey", "e aí, Luna?" — as que mais
      provavelmente cruzam o cutoff por acidente.
-   - Salve cada clipe como `.wav` (mono, qualquer sample rate) em
-     `wake-training/work/custom_negatives_wav/`.
+   - Salve cada clipe como `.wav` (mono ou estéreo, qualquer sample rate) em uma de duas
+     subpastas de `wake-training/work/custom_negatives_wav/` (fora do git):
+     - `fundo/` — TV, rádio, conversa. Recortado em janelas de 3 s; mínimo ~30 s de áudio.
+     - `confundiveis/` — as frases parecidas com "hey luna". Janelas de 1,5 s com
+       sobreposição de 1 s; mínimo ~6 s de áudio.
+
+     Separados porque os volumes são muito diferentes: num grupo só, 20 min de TV virariam
+     ~99% das amostras e as frases confundíveis quase nunca seriam sorteadas. Abaixo do
+     mínimo, a etapa falha com uma mensagem explicando.
    - `./run.sh custom_negatives` gera as features em
-     `work/negative_datasets/custom_ptbr/`; `05_write_training_config.py` inclui esse
-     diretório como negativo (`sampling_weight` alto, 15.0, porque tende a ter bem menos
-     amostras que os negativos em inglês) automaticamente se a pasta existir — nenhuma
-     mudança manual de config necessária.
+     `work/negative_datasets/custom_ptbr_{fundo,confundiveis}/`;
+     `05_write_training_config.py` inclui cada grupo como negativo automaticamente se as
+     features existirem (`CUSTOM_PTBR_GROUPS`: fundo 10.0, igual ao `speech` em inglês;
+     confundiveis 5.0) — nenhuma mudança manual de config necessária. Apagar os WAVs e rodar a etapa de novo
+     remove as features, e o próximo treino volta a não usá-las.
    - Retreine (`./run.sh train`) e reexporte (`./run.sh export`).
 3. **Se ainda disparar**: considerar ligar `time_mask_*`/`freq_mask_*` (SpecAugment,
    hoje zerados em `05_write_training_config.py`) ou subir `negative_class_weight`

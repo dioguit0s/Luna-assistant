@@ -61,26 +61,36 @@ config["features"] = [
 ]
 
 # Negativos pt-BR opcionais (ver 04b_generate_custom_negatives.py e "Se o
-# modelo dispara demais" no README) — só entra se alguém rodou aquela etapa.
-# `sampling_weight` alto de propósito: são poucas amostras comparado aos
-# negativos em inglês baixados prontos, e são exatamente as frases que o
-# treino atual nunca viu como negativo (a causa mais provável de disparo em
-# frase aleatória em pt-BR).
-_custom_ptbr = "negative_datasets/custom_ptbr"
-if os.path.isdir(_custom_ptbr):
+# modelo dispara demais" no README) — cada grupo só entra se alguém rodou
+# aquela etapa com WAVs nele. Grupos separados porque têm volumes muito
+# diferentes (minutos de TV vs. segundos de frases): num diretório só, o
+# sorteio quase nunca pegaria as frases confundíveis.
+# - fundo: fala pt-BR comum, mesmo peso do `speech` em inglês.
+# - confundiveis: "lua", "uma", "luna" sem "hey"... — são o motivo desta
+#   etapa (a causa mais provável de disparo em frase aleatória em pt-BR), mas
+#   vêm de poucos segundos de áudio repetidos à exaustão; peso alto demais
+#   ensina o modelo a rejeitar "luna" em si e derruba o recall. É o primeiro
+#   parâmetro a baixar se o modelo ficar "surdo".
+# Checa o mmap de treino, não só a pasta: o 04b gera num .tmp e só renomeia no
+# fim, mas uma pasta criada à mão (ou por uma execução quebrada de uma versão
+# antiga) quebraria o carregamento no treino.
+CUSTOM_PTBR_GROUPS = {"fundo": 10.0, "confundiveis": 5.0}
+for _group, _weight in CUSTOM_PTBR_GROUPS.items():
+    _dir = f"negative_datasets/custom_ptbr_{_group}"
+    if not os.path.isdir(os.path.join(_dir, "training", "wakeword_mmap")):
+        print(f"[config] {_dir} sem features de treino — pulando (etapa opcional, ver README)")
+        continue
     config["features"].append(
         {
-            "features_dir": _custom_ptbr,
-            "sampling_weight": 15.0,
+            "features_dir": _dir,
+            "sampling_weight": _weight,
             "penalty_weight": 1.0,
             "truth": False,
             "truncation_strategy": "random",
             "type": "mmap",
         }
     )
-    print(f"[config] incluindo negativos customizados de {_custom_ptbr}")
-else:
-    print(f"[config] {_custom_ptbr} não existe — pulando negativos pt-BR (etapa opcional, ver README)")
+    print(f"[config] incluindo negativos pt-BR de {_dir} (sampling_weight={_weight})")
 
 config["training_steps"] = [5000]  # reduzido de 10000: treino em CPU vaza memória e
 # precisa de reinícios periódicos (ver scripts/06b_train_loop.sh); menos passos
