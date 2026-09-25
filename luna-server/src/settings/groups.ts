@@ -68,6 +68,12 @@ export interface RoomsSettings {
 export interface SatellitesSettings {
   /** `device_id` → nome amigável. */
   names: Record<string, string>;
+  /**
+   * `device_id`s recusados no handshake (aparelho perdido, v2). O segredo é um
+   * só para todos os satélites (HMAC por `device_id`), então bloquear é a
+   * única forma de cortar um aparelho sem trocar o segredo de todos.
+   */
+  blocked: string[];
 }
 
 export interface SettingsGroups {
@@ -330,16 +336,27 @@ export const VALIDATORS: { [G in GroupName]: Validator<G> } = {
 
   satellites: (current, raw) => {
     const patch = asObject(raw, 'satellites');
-    if (patch.names === undefined) return current;
-    return {
-      names: stringMap(
-        patch.names,
-        'names',
-        (key) => key.length > 0 && key.length <= 128,
-        (value) => value.length > 0 && value.length <= 64,
-        'nome de 1 a 64 caracteres',
-      ),
-    };
+    // Campo a campo: um banco da v1 só tem `names`, e validar por cima da
+    // semente precisa manter o `blocked` vazio dela, não perder os nomes.
+    const names =
+      patch.names === undefined
+        ? current.names
+        : stringMap(
+            patch.names,
+            'names',
+            (key) => key.length > 0 && key.length <= 128,
+            (value) => value.length > 0 && value.length <= 64,
+            'nome de 1 a 64 caracteres',
+          );
+    let blocked = current.blocked ?? [];
+    if (patch.blocked !== undefined) {
+      if (!Array.isArray(patch.blocked) || patch.blocked.some((d) => typeof d !== 'string' || d.length === 0 || d.length > 128)) {
+        throw new SettingsValidationError('blocked', '"blocked" deve ser uma lista de device_id.');
+      }
+      if (patch.blocked.length > 256) throw new SettingsValidationError('blocked', 'satélites bloqueados demais.');
+      blocked = [...new Set(patch.blocked as string[])];
+    }
+    return { names, blocked };
   },
 };
 
@@ -375,7 +392,7 @@ export function seedFromConfig(
     calendar: { url: env.CALENDAR_URL?.trim() ?? '', token: env.CALENDAR_TOKEN?.trim() ?? '' },
     devices,
     rooms: { areas: {} },
-    satellites: { names: {} },
+    satellites: { names: {}, blocked: [] },
     voice: {
       geminiVadSilenceMs: base.geminiVadSilenceMs,
       geminiVadEndSensitivity: base.geminiVadEndSensitivity,

@@ -12,6 +12,8 @@
 // Primeiro de tudo: troca o userData antes de config.ts lê-lo (ver profile.ts).
 import './profile.js';
 import { app, dialog, shell } from 'electron';
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import { createTray, type TrayController } from './tray.js';
 import { isAutostartEnabled, setAutostart, wasAutoLaunched } from './autostart.js';
@@ -321,6 +323,30 @@ if (!gotLock) {
       createPanelMethods({
         admin,
         logs: logStream,
+        files: {
+          async saveJson(defaultName, data) {
+            const { canceled, filePath } = await dialog.showSaveDialog({
+              title: 'Luna — salvar backup',
+              defaultPath: join(app.getPath('documents'), defaultName),
+              filters: [{ name: 'Backup da Luna', extensions: ['json'] }],
+            });
+            if (canceled || !filePath) return null;
+            await writeFile(filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf8');
+            return filePath;
+          },
+          async openJson() {
+            const { canceled, filePaths } = await dialog.showOpenDialog({
+              title: 'Luna — restaurar backup',
+              properties: ['openFile'],
+              filters: [{ name: 'Backup da Luna', extensions: ['json'] }],
+            });
+            if (canceled || !filePaths[0]) return null;
+            const raw = await readFile(filePaths[0], 'utf8');
+            // Teto de sanidade: o servidor aceita até 1 MB.
+            if (raw.length > 1024 * 1024) throw new Error('Arquivo grande demais para ser um backup da Luna.');
+            return JSON.parse(raw) as unknown;
+          },
+        },
         local: {
           view: localView,
           async save(patch) {

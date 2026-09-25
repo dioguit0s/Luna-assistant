@@ -45,6 +45,17 @@ export interface LocalControls {
   listAudioDevices(): Promise<AudioDeviceInfo[]>;
 }
 
+/**
+ * Arquivo no disco, sempre por diálogo nativo: o painel nunca escolhe caminho
+ * nem lê arquivo sozinho — quem escolhe é a pessoa, na janela do sistema.
+ */
+export interface FileControls {
+  /** `null` = cancelado. Devolve o caminho gravado. */
+  saveJson(defaultName: string, data: unknown): Promise<string | null>;
+  /** `null` = cancelado. Lança em arquivo ilegível ou JSON inválido. */
+  openJson(): Promise<unknown | null>;
+}
+
 /** Log ao vivo do servidor; as linhas chegam ao painel como evento, não como resposta. */
 export interface LogControls {
   start(filter: LogFilter): void;
@@ -55,6 +66,7 @@ export interface PanelDeps {
   admin: AdminClient;
   local: LocalControls;
   logs: LogControls;
+  files: FileControls;
 }
 
 export type PanelResult = AdminResult;
@@ -102,7 +114,7 @@ function ok(body: unknown): PanelResult {
 }
 
 export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
-  const { admin, local, logs } = deps;
+  const { admin, local, logs, files } = deps;
   const methods: Record<string, (...args: unknown[]) => Promise<PanelResult> | PanelResult> = {
     // ─── servidor (API admin) ───
     'server.status': () => admin.request('GET', 'status'),
@@ -112,6 +124,9 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
       admin.request('PUT', `satellites/${seg(str(deviceId, 'device_id'))}`, {
         name: name === null ? null : String(name ?? ''),
       }),
+    'server.blockSatellite': (deviceId, blocked) =>
+      admin.request('PUT', `satellites/${seg(str(deviceId, 'device_id'))}`, { blocked: bool(blocked, 'blocked') }),
+    'server.disconnectSatellite': (deviceId) => admin.request('POST', `satellites/${seg(str(deviceId, 'device_id'))}/disconnect`),
     'server.rooms': () => admin.request('GET', 'rooms'),
     'server.mapRoom': (roomId, area) =>
       admin.request('PUT', `rooms/${seg(str(roomId, 'room_id'))}`, {
@@ -149,6 +164,21 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
     'server.testConnection': (g, patch) =>
       admin.request('POST', `settings/${group(g)}/test`, obj(patch ?? {}, 'patch')),
     'server.restart': () => admin.request('POST', 'restart'),
+    // Backup: o JSON vai direto do servidor para o disco pelo processo
+    // principal, sem passar pela janela do painel.
+    'server.saveBackup': async () => {
+      const result = await admin.request('GET', 'backup');
+      if (!result.ok) return result;
+      const stamp = new Date().toISOString().slice(0, 10);
+      const path = await files.saveJson(`luna-backup-${stamp}.json`, result.body);
+      return ok({ saved: path !== null, path });
+    },
+    'server.restoreBackup': async (mode) => {
+      if (mode !== 'keep' && mode !== 'replace') throw new TypeError('modo inválido');
+      const backup = await files.openJson();
+      if (backup === null) return ok({ cancelled: true });
+      return admin.request('POST', 'restore', { backup, reminders: mode });
+    },
     'server.geocode': (city) => admin.request('POST', 'settings/weather/geocode', { city: str(city, 'cidade') }),
     'server.latency': (hours) => admin.request('GET', `diagnostics/latency?hours=${int(hours ?? 24, 'hours', 1, 720)}`),
     'server.errors': (limit) => admin.request('GET', `diagnostics/errors?limit=${int(limit ?? 20, 'limit', 1, 200)}`),

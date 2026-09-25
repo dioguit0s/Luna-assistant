@@ -15,6 +15,9 @@ import { Diagnostics } from '../diagnostics/Diagnostics.js';
 import { DiagnosticsStore } from '../diagnostics/DiagnosticsStore.js';
 import type { LogRecord } from '../logging/logTap.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
+import WebSocket from 'ws';
+import { computeAuthToken } from '../ws/auth.js';
+import { createEnvelope, serializeControlMessage } from '../ws/protocol.js';
 
 const TOKEN = 'token-admin-de-teste';
 
@@ -147,11 +150,13 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
           daily: { time: ['2026-09-25'], weather_code: [1], temperature_2m_max: [28], temperature_2m_min: [18], precipitation_probability_max: [10] },
         }));
       }) as unknown as typeof fetch,
+      disconnectSatellite: (deviceId) => server.disconnectDevice(deviceId, 'desconectado pelo painel'),
       onRestart: () => {
         harness.restarts += 1;
       },
     }).handle,
   );
+  server.setBlockedSource((deviceId) => settings.get('satellites').blocked.includes(deviceId));
   server.start();
   while (server.port === null) await new Promise((r) => setTimeout(r, 10));
   harness.baseUrl = `http://127.0.0.1:${server.port}`;
@@ -547,6 +552,95 @@ describe('API admin', () => {
     assert.equal((await call(h, 'GET', '/admin/v1/logs/stream?level=barulho')).status, 422);
   });
 
+  it('bloquear derruba a conexão aberta e recusa a reconexão no handshake', async () => {
+    const deviceId = 'esp32-perdido';
+    const open = await authenticate(h, deviceId);
+    assert.equal(open.reply.type, 'auth_ok');
+
+    const closed = new Promise<number>((r) => open.ws.once('close', (code) => r(code)));
+    const res = await call(h, 'PUT', `/admin/v1/satellites/${deviceId}`, { blocked: true });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.blocked, true);
+    assert.equal(await closed, 1000);
+
+    const again = await authenticate(h, deviceId);
+    assert.equal(again.reply.type, 'auth_error');
+    assert.equal(again.reply.reason, 'satélite bloqueado');
+    again.ws.terminate();
+
+    const list = await call(h, 'GET', '/admin/v1/satellites');
+    assert.equal(list.body.satellites.find((s: { device_id: string }) => s.device_id === deviceId).blocked, true);
+
+    await call(h, 'PUT', `/admin/v1/satellites/${deviceId}`, { blocked: false });
+    const back = await authenticate(h, deviceId);
+    assert.equal(back.reply.type, 'auth_ok');
+    back.ws.terminate();
+  });
+
+  it('desconectar fecha a conexão; satélite desconhecido fecha zero', async () => {
+    const s = await authenticate(h, 'esp32-desconectar');
+    const closed = new Promise<void>((r) => s.ws.once('close', () => r()));
+    const res = await call(h, 'POST', '/admin/v1/satellites/esp32-desconectar/disconnect');
+    assert.equal(res.body.closed, 1);
+    await closed;
+    assert.equal((await call(h, 'POST', '/admin/v1/satellites/ninguem/disconnect')).body.closed, 0);
+  });
+
+  it('backup não leva segredo nenhum, nem mascarado', async () => {
+    const res = await call(h, 'GET', '/admin/v1/backup');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.format, 'luna-backup');
+    const text = JSON.stringify(res.body);
+    assert.ok(!text.includes('gemini-chave-secreta'));
+    assert.ok(!text.includes('um-token-longo-do-ha'));
+    assert.equal('geminiApiKey' in res.body.settings.provider, false);
+    assert.equal('token' in res.body.settings.ha, false);
+    assert.ok(Array.isArray(res.body.reminders));
+  });
+
+  it('restaurar: valida tudo antes, aplica como patch e mantém os segredos gravados', async () => {
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    const tokenAntes = h.settings.current().haToken;
+
+    // Mexe depois do backup; a restauração tem de voltar.
+    await call(h, 'PUT', '/admin/v1/devices', { aliases: { outro: 'luz_bancada' } });
+    let res = await call(h, 'POST', '/admin/v1/restore', { backup });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(h.settings.get('devices').aliases, backup.settings.devices.aliases);
+    assert.equal(h.settings.current().haToken, tokenAntes, 'segredo ausente do arquivo = mantém');
+
+    // Um grupo inválido recusa tudo, sem meio aplicar.
+    const bad = structuredClone(backup);
+    bad.settings.devices.aliases = { mudou: 'luz_bancada' };
+    bad.settings.weather = { latitude: 10, longitude: null };
+    res = await call(h, 'POST', '/admin/v1/restore', { backup: bad });
+    assert.equal(res.status, 422);
+    assert.match(res.body.field, /^weather\./);
+    assert.deepEqual(h.settings.get('devices').aliases, backup.settings.devices.aliases, 'nada foi gravado');
+
+    assert.equal((await call(h, 'POST', '/admin/v1/restore', { backup: { format: 'outro' } })).status, 422);
+  });
+
+  it('restaurar com reminders=replace recria os lembretes e pula o que já passou', async () => {
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    backup.reminders = [
+      { room_id: 'quarto', label: 'futuro', kind: 'once', due_at_utc: Date.now() + 7_200_000, local_hour: null, local_minute: null, repeat_rule: null },
+      { room_id: 'quarto', label: 'passado', kind: 'once', due_at_utc: Date.now() - 60_000, local_hour: null, local_minute: null, repeat_rule: null },
+      { room_id: 'sala', label: null, kind: 'recurring', due_at_utc: null, local_hour: 6, local_minute: 30, repeat_rule: 'weekdays' },
+    ];
+    const res = await call(h, 'POST', '/admin/v1/restore', { backup, reminders: 'replace' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.reminders.created, 2);
+    assert.equal(res.body.reminders.skipped, 1);
+    const labels = h.reminderStore.listLive().map((r) => r.label).sort();
+    assert.deepEqual(labels, [null, 'futuro'].sort());
+  });
+
+  it('status e bootstrap trazem a release (null em dev)', async () => {
+    assert.ok('release' in (await call(h, 'GET', '/admin/v1/status')).body);
+    assert.ok('release' in (await call(h, 'GET', '/admin/v1/bootstrap')).body);
+  });
+
   it('reiniciar responde 202 e só depois chama o shutdown', async () => {
     const res = await call(h, 'POST', '/admin/v1/restart');
     assert.equal(res.status, 202);
@@ -554,6 +648,24 @@ describe('API admin', () => {
     assert.equal(h.restarts, 1);
   });
 });
+
+/** Abre um WebSocket de satélite de verdade contra o harness e manda `auth`. */
+async function authenticate(h: Harness, deviceId: string): Promise<{ ws: WebSocket; reply: any }> {
+  const ws = new WebSocket(h.baseUrl.replace('http', 'ws'));
+  await new Promise<void>((resolve, reject) => {
+    ws.once('open', () => resolve());
+    ws.once('error', reject);
+  });
+  const reply = new Promise<any>((resolve) => ws.once('message', (data) => resolve(JSON.parse(data.toString()))));
+  ws.send(
+    serializeControlMessage({
+      ...createEnvelope('auth', 'quarto', {}),
+      device_id: deviceId,
+      token: computeAuthToken(config.wsAuthSecret, deviceId),
+    } as never),
+  );
+  return { ws, reply: await reply };
+}
 
 let recordSeq = 1_000_000;
 function record(partial: Partial<LogRecord>): LogRecord {

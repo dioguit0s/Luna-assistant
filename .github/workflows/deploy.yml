@@ -62,6 +62,9 @@ jobs:
           # silenciosamente, porque arquivo ausente e caso valido.
           cp -r config "$RELEASE_DIR/"
           cp package.json package-lock.json "$RELEASE_DIR/"
+          # Versão implantada e data, para a tela Servidor do painel
+          # (SERVER_RELEASE em ws/WsServer.ts). Sem segredo nenhum.
+          printf '{"sha":"%s","deployed_at":"%s"}\n' "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$RELEASE_DIR/release.json"
           npm ci --omit=dev --prefix "$RELEASE_DIR"
 
       - name: Ativar release

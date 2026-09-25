@@ -642,6 +642,8 @@ async function show(id: string): Promise<void> {
     pendingConfirm = null;
     pendingEscape = null;
     confirmingReminder = null;
+    confirmingBlock = null;
+    restoreState.confirming = false;
     if (restart.phase === 'confirm') restart.phase = 'idle';
     typeInto($('screen-title'), page.title, { cps: 45, cursor: 'hi' });
     setMeta('');
@@ -829,6 +831,8 @@ pages.push({
 
 let selectedSatellite: string | null = null;
 let editingSatellite: string | null = null;
+/** `device_id` com o S/N de bloqueio aberto. */
+let confirmingBlock: string | null = null;
 
 pages.push({
   id: 'satellites',
@@ -903,7 +907,7 @@ pages.push({
         h('span', { class: 'raw nowrap ellipsis' }, `${selected ? '►' : ' '} ${s.device_id}`),
         nameCell,
         h('span', { class: 'ellipsis' }, s.room_id ?? '—'),
-        h('span', { class: s.online ? 'hi' : 'fg' }, s.online ? '▣ ONLINE' : '— OFFLINE'),
+        h('span', { class: s.blocked ? 'amber' : s.online ? 'hi' : 'fg' }, s.blocked ? '⊘ BLOQUEADO' : s.online ? '▣ ONLINE' : '— OFFLINE'),
         h('span', {}, s.online ? formatStamp(s.connected_since) : '—'),
         h('span', {}, formatAgo(s.last_seen_at)),
       );
@@ -925,13 +929,40 @@ pages.push({
 
     const sel = sats.find((s) => s.device_id === selectedSatellite)!;
     const future = (label: string): HTMLElement => grid('96px 1fr', { class: 'grid dim', style: 'align-items:start' }, h('span', {}, label), h('span', {}, 'INDISPONÍVEL NESTA VERSÃO'));
+    // Bloquear pede S/N: corta o aparelho até alguém desbloquear aqui.
+    const blockControls: HTMLElement = (() => {
+      if (sel.blocked) {
+        return cmd('DESBLOQUEAR', async () => {
+          if (await run(`DESBLOQUEAR ${sel.device_id}`, 'server.blockSatellite', sel.device_id, false)) void renderCurrent();
+        }, { first: true });
+      }
+      if (confirmingBlock === sel.device_id) {
+        return confirmLine(
+          'BLOQUEAR ESTE SATÉLITE? (S/N)',
+          { yes: '[ S ]', no: '[ N ]' },
+          async () => {
+            confirmingBlock = null;
+            await run(`BLOQUEAR ${sel.device_id} · CONEXÃO DERRUBADA`, 'server.blockSatellite', sel.device_id, true);
+            void renderCurrent();
+          },
+          () => {
+            confirmingBlock = null;
+            void renderCurrent();
+          },
+        );
+      }
+      return cmd('BLOQUEAR', () => {
+        confirmingBlock = sel.device_id;
+        void renderCurrent();
+      }, { tone: 'amber', first: true });
+    })();
     const detail = frame(
       'DETALHE',
       { style: 'width:260px;flex-shrink:0;align-self:flex-start;margin-top:8px;gap:8px' },
       h('div', { class: 'display', style: 'font-size:26px;letter-spacing:.06em' }, sel.name ?? '— SEM NOME —'),
       kv('DEVICE_ID', h('span', { class: 'raw' }, sel.device_id)),
       kv('SALA', sel.room_id ?? '—'),
-      kv('ESTADO', sel.online ? '▣ ONLINE' : '— OFFLINE', sel.online ? '' : 'fg'),
+      kv('ESTADO', sel.blocked ? '⊘ BLOQUEADO' : sel.online ? '▣ ONLINE' : '— OFFLINE', sel.blocked ? 'amber' : sel.online ? '' : 'fg'),
       kv('CONECTADO DESDE', sel.online ? formatStamp(sel.connected_since) : '—'),
       kv('ÚLTIMO SINAL', formatAgo(sel.last_seen_at)),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── RECURSOS FUTUROS ──────────'),
@@ -939,6 +970,18 @@ pages.push({
       future('IP'),
       future('SINAL WI-FI'),
       cmd('IDENTIFICAR', () => undefined, { disabled: true, first: true }),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, '── ACESSO ─────────────────────'),
+      h(
+        'div',
+        { style: 'display:flex;flex-direction:column;gap:6px;align-items:flex-start' },
+        cmd('DESCONECTAR', async () => {
+          const body = await run(`DESCONECTAR ${sel.device_id}`, 'server.disconnectSatellite', sel.device_id);
+          if (body && body.closed === 0) say(`DESCONECTAR ${sel.device_id} ... NENHUMA CONEXÃO ABERTA`, 'warn');
+          void renderCurrent();
+        }, { disabled: !sel.online || sel.blocked, first: true }),
+        blockControls,
+        h('span', { class: 'small', style: 'line-height:1.6' }, sel.blocked ? 'RECUSADO NO HANDSHAKE ATÉ DESBLOQUEAR.' : 'DESCONECTAR: ELE RECONECTA SOZINHO. BLOQUEAR: APARELHO PERDIDO.'),
+      ),
     );
 
     root.append(h('div', { style: 'display:flex;gap:18px;flex:1;min-height:0' }, table, detail));
@@ -2172,6 +2215,9 @@ pages.push({
 const RESTART_ESTIMATE_MS = 12000;
 const RESTART_GIVE_UP_MS = 60000;
 
+/** Restauração: modo escolhido e o S/N em curso. */
+const restoreState = { mode: 'keep' as 'keep' | 'replace', confirming: false, result: null as string | null };
+
 const restart = {
   phase: 'idle' as 'idle' | 'confirm' | 'count' | 'back' | 'lost',
   at: 0,
@@ -2302,6 +2348,8 @@ pages.push({
     const rows: Array<[string, string]> = b
       ? [
           ['VERSION', `v${b.version}`],
+          ['RELEASE', b.release ? b.release.sha.slice(0, 12) : '— (DEV OU RELEASE ANTIGA)'],
+          ['DEPLOYED_AT', b.release ? formatStamp(Date.parse(b.release.deployed_at)) : '—'],
           ['WS_PORT', String(b.ws_port)],
           ['DB_PATH', b.db_path],
           ['LOG_LEVEL', b.log_level],
@@ -2328,8 +2376,66 @@ pages.push({
       h('div', { class: 'small', style: 'margin-top:8px' }, `FIM DO DUMP · ${rows.length} REGISTROS · ALTERAR EXIGE EDITAR O .ENV DO SERVIDOR E REINICIAR`),
     );
 
+    const modeCycler = cycler(
+      [
+        { value: 'keep' as const, label: 'MANTER OS LEMBRETES DE AGORA' },
+        { value: 'replace' as const, label: 'SUBSTITUIR PELOS DO ARQUIVO' },
+      ],
+      restoreState.mode === 'replace' ? 1 : 0,
+      (v) => (restoreState.mode = v),
+      'modo',
+    );
+    const doRestore = async (): Promise<void> => {
+      const result = await window.panel.call('server.restoreBackup', restoreState.mode);
+      if (!result.ok) {
+        restoreState.result = `◈ ${errorOf(result).toUpperCase()}`;
+        say(`RESTAURAR BACKUP ... FALHA: ${errorOf(result)}`, 'warn');
+      } else if (result.body?.cancelled) {
+        restoreState.result = null;
+        say('RESTAURAR BACKUP ... CANCELADO', 'warn');
+      } else {
+        const r = result.body.reminders;
+        restoreState.result = `▣ ${result.body.groups.length} GRUPOS RESTAURADOS${r.mode === 'replace' ? ` · ${r.created} LEMBRETES RECRIADOS, ${r.skipped} PULADOS` : ''}`;
+        say('RESTAURAR BACKUP ... OK');
+      }
+      void renderCurrent();
+    };
+    const backupBox = frame(
+      'BACKUP // SEM SEGREDOS',
+      { style: 'gap:12px' },
+      h('div', { style: 'font-size:12px;line-height:1.7;max-width:720px' }, 'O ARQUIVO LEVA A CONFIGURAÇÃO DO PAINEL E OS LEMBRETES ATIVOS. TOKENS, CHAVES E SENHAS FICAM DE FORA: AO RESTAURAR, OS GRAVADOS NO NÚCLEO CONTINUAM VALENDO.'),
+      h(
+        'div',
+        { class: 'row', style: 'gap:10px' },
+        cmd('EXPORTAR BACKUP', async () => {
+          const body = await run('EXPORTAR BACKUP', 'server.saveBackup');
+          if (body && !body.saved) say('EXPORTAR BACKUP ... CANCELADO', 'warn');
+        }, { first: true }),
+      ),
+      grid('110px minmax(0,1fr)', { class: 'grid', style: 'align-items:center' }, h('span', {}, 'LEMBRETES'), modeCycler),
+      restoreState.confirming
+        ? confirmLine(
+            restoreState.mode === 'replace' ? 'RESTAURAR E SUBSTITUIR OS LEMBRETES? (S/N)' : 'RESTAURAR A CONFIGURAÇÃO? (S/N)',
+            { yes: '[ S ] ESCOLHER ARQUIVO', no: '[ N ]' },
+            () => {
+              restoreState.confirming = false;
+              void doRestore();
+            },
+            () => {
+              restoreState.confirming = false;
+              void renderCurrent();
+            },
+          )
+        : cmd('RESTAURAR…', () => {
+            restoreState.confirming = true;
+            restoreState.result = null;
+            void renderCurrent();
+          }, { tone: 'amber', first: true }),
+      restoreState.result ? h('div', { class: restoreState.result.startsWith('◈') ? 'amber' : 'hi' }, restoreState.result) : null,
+    );
+
     restartBox = frame('ZONA DE PERIGO', { tone: 'danger', style: 'gap:12px' });
-    root.append(h('div', { class: 'stack', style: 'gap:28px' }, dump, restartBox));
+    root.append(h('div', { class: 'stack', style: 'gap:28px' }, dump, backupBox, restartBox));
     paintRestart(true);
   },
 });

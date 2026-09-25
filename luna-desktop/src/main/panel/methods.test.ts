@@ -40,6 +40,16 @@ function localStub(calls: string[]): LocalControls {
   };
 }
 
+const saved: Array<{ name: string; data: unknown }> = [];
+let toOpen: unknown | null = null;
+const filesStub = {
+  saveJson: async (name: string, data: unknown) => {
+    saved.push({ name, data });
+    return `C:/tmp/${name}`;
+  },
+  openJson: async () => toOpen,
+};
+
 function setup(status = 200, body: unknown = { ok: true }, token = 'tok') {
   const recorded: Recorded[] = [];
   const calls: string[] = [];
@@ -51,7 +61,7 @@ function setup(status = 200, body: unknown = { ok: true }, token = 'tok') {
     start: (f: { level: string; room: string | null }) => calls.push(`logs:${f.level}:${f.room}`),
     stop: () => calls.push('logs:stop'),
   };
-  return { methods: createPanelMethods({ admin, local: localStub(calls), logs }), recorded, calls };
+  return { methods: createPanelMethods({ admin, local: localStub(calls), logs, files: filesStub }), recorded, calls };
 }
 
 describe('métodos do painel', () => {
@@ -113,7 +123,7 @@ describe('métodos do painel', () => {
         throw new Error('ECONNREFUSED');
       }) as unknown as typeof fetch,
     );
-    const methods = createPanelMethods({ admin, local: localStub([]), logs: { start() {}, stop() {} } });
+    const methods = createPanelMethods({ admin, local: localStub([]), logs: { start() {}, stop() {} }, files: filesStub });
     const result = await methods['server.status']!();
     assert.equal(result.ok, false);
     assert.match((result.body as { error: string }).error, /inacessível/);
@@ -155,6 +165,23 @@ describe('métodos do painel', () => {
     assert.deepEqual(recorded[1]!.body, { entity_id: 'light.abajur', action: 'on' });
     assert.equal((await methods['server.testDevice']!('light.abajur', 'toggle')).ok, false);
     assert.equal(recorded.length, 2);
+  });
+
+  it('backup: o corpo do servidor vai para o arquivo; restaurar cancelado não chama o servidor', async () => {
+    const { methods, recorded } = setup(200, { format: 'luna-backup' });
+    const res = await methods['server.saveBackup']!();
+    assert.equal(res.ok, true);
+    assert.deepEqual(saved.at(-1)!.data, { format: 'luna-backup' });
+    assert.match(saved.at(-1)!.name, /^luna-backup-\d{4}-\d{2}-\d{2}\.json$/);
+
+    toOpen = null;
+    assert.deepEqual((await methods['server.restoreBackup']!('keep')).body, { cancelled: true });
+    assert.equal(recorded.length, 1, 'só o GET do backup');
+
+    toOpen = { format: 'luna-backup' };
+    await methods['server.restoreBackup']!('replace');
+    assert.deepEqual(recorded[1]!.body, { backup: { format: 'luna-backup' }, reminders: 'replace' });
+    assert.equal((await methods['server.restoreBackup']!('tudo')).ok, false);
   });
 
   it('log ao vivo: filtro validado no processo principal', async () => {

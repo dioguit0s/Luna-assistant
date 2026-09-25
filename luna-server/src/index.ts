@@ -166,6 +166,7 @@ async function main(): Promise<void> {
   wsServer.setReminderScheduler(reminderScheduler);
   wsServer.setProviderNameSource(() => settings.current().audioProvider);
   wsServer.setRuntimeConfigSource(() => settings.current());
+  wsServer.setBlockedSource((deviceId) => settings.get('satellites').blocked.includes(deviceId));
 
   // `shutdown` só existe mais abaixo; o reinício pelo painel chega por aqui.
   let requestRestart: () => void = () => {};
@@ -192,6 +193,7 @@ async function main(): Promise<void> {
       },
       weatherSource,
       diagnostics,
+      disconnectSatellite: (deviceId) => wsServer.disconnectDevice(deviceId, 'desconectado pelo painel'),
       onRestart: () => requestRestart(),
     }).handle,
   );

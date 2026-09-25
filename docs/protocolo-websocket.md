@@ -109,7 +109,7 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 | Tipo | Frame | Quando |
 |---|---|---|
 | `auth_ok` | texto | Token validado. O firmware chama `StateMachine::reset()` ao recebê-la |
-| `auth_error` | texto | Token, `device_id` ou `room_id` inválidos. Traz `reason` |
+| `auth_error` | texto | Token, `device_id` ou `room_id` inválidos, ou satélite bloqueado pelo painel (`reason: "satélite bloqueado"`, v2 — mesmo close 4001, o cliente não precisa distinguir). Traz `reason` |
 | `speaking_start` | texto | **Antes** do primeiro chunk de resposta — ativa a AEC no satélite |
 | `audio_response` | **binário** | Chunk de áudio da resposta, paceado (ver abaixo) |
 | `speaking_end` | texto | Fim da fala. O satélite espera 150 ms (`AEC_RESUME_DELAY_MS`) e reativa a captura |

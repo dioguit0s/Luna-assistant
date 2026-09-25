@@ -10,13 +10,20 @@ import type { RoomManager } from '../rooms/RoomManager.js';
 import type { WeatherSource } from '../weather/WeatherSource.js';
 import type { RuntimeSettings } from '../settings/RuntimeSettings.js';
 import {
+  GROUP_NAMES,
   ROOM_ID_PATTERN,
+  SECRET_FIELDS,
   SettingsValidationError,
+  VALIDATORS,
   maskGroup,
+  toStored,
   type GroupName,
 } from '../settings/groups.js';
+import { sanitizeLabel } from '../orchestrator/tools/setReminder.js';
+import { nextOccurrenceAfter } from '../reminders/recurrence.js';
+import type { RepeatRule } from '../reminders/ReminderStore.js';
 import type { SatelliteInfo } from '../ws/WsServer.js';
-import { SERVER_VERSION } from '../ws/WsServer.js';
+import { SERVER_RELEASE, SERVER_VERSION } from '../ws/WsServer.js';
 import { getLogger } from '../logging/logger.js';
 import { LEVEL_VALUES, type LogLevelName, type LogRecord } from '../logging/logTap.js';
 import type { Diagnostics, LogFilter } from '../diagnostics/Diagnostics.js';
@@ -46,6 +53,8 @@ export interface AdminApiDeps {
   weatherSource: WeatherSource | null;
   /** Série de TTFAB, últimos erros e log ao vivo (v2). */
   diagnostics: Diagnostics;
+  /** Fecha as conexões de um `device_id` — ver `WsServer.disconnectDevice`. */
+  disconnectSatellite: (deviceId: string) => number;
   /** Shutdown gracioso; o `Restart=always` da unit traz o processo de volta. */
   onRestart: () => void;
   fetchImpl?: typeof fetch;
@@ -57,6 +66,10 @@ export type Light = 'ok' | 'error' | 'unknown' | 'off';
 
 const PREFIX = '/admin/v1/';
 const MAX_BODY_BYTES = 64 * 1024;
+/** Restauração carrega o backup inteiro (configuração + lembretes). */
+const MAX_RESTORE_BYTES = 1024 * 1024;
+export const BACKUP_FORMAT = 'luna-backup';
+export const BACKUP_VERSION = 1;
 const CALENDAR_TEST_TIMEOUT_MS = 3000;
 /**
  * Domínios que o painel aciona ("testar") e aceita em dispositivo manual novo:
@@ -184,7 +197,14 @@ export class AdminApi {
       case 'GET satellites':
         return { body: { satellites: this.satellites() } };
       case 'PUT satellites/:id':
-        return { body: this.renameSatellite(id!, await readJson(req)) };
+        return { body: this.updateSatellite(id!, await readJson(req)) };
+      case 'POST satellites/:id/:action':
+        if (action === 'disconnect') return { body: this.disconnectSatellite(id!) };
+        break;
+      case 'GET backup':
+        return { body: this.backup() };
+      case 'POST restore':
+        return { body: this.restore(await readJson(req, MAX_RESTORE_BYTES)) };
       case 'GET rooms':
         return { body: this.rooms() };
       case 'PUT rooms/:id':
@@ -233,6 +253,7 @@ export class AdminApi {
     const satellites = this.deps.satellites();
     return {
       version: SERVER_VERSION,
+      release: releaseWire(),
       uptime_s: Math.floor(process.uptime()),
       started_at: now - Math.floor(process.uptime() * 1000),
       satellites_online: satellites.filter((s) => s.online).length,
@@ -286,12 +307,12 @@ export class AdminApi {
   // ─── Satélites ─────────────────────────────────────────────────────────
 
   private satellites(): unknown[] {
-    const { names } = this.deps.settings.get('satellites');
+    const { names, blocked } = this.deps.settings.get('satellites');
     const listed = this.deps.satellites();
     const known = new Set(listed.map((s) => s.deviceId));
-    // Satélite com nome dado pelo painel mas não visto desde o boot continua
-    // na lista — offline e sem sala, que é tudo que se sabe dele.
-    const offlineNamed = Object.keys(names)
+    // Satélite com nome dado pelo painel (ou bloqueado) mas não visto desde o
+    // boot continua na lista — offline e sem sala, que é tudo que se sabe dele.
+    const offlineNamed = [...new Set([...Object.keys(names), ...blocked])]
       .filter((deviceId) => !known.has(deviceId))
       .map((deviceId) => ({
         deviceId,
@@ -304,24 +325,54 @@ export class AdminApi {
       device_id: s.deviceId,
       room_id: s.roomId,
       name: names[s.deviceId] ?? null,
+      blocked: blocked.includes(s.deviceId),
       online: s.online,
       connected_since: s.connectedSince,
       last_seen_at: s.lastSeenAt,
     }));
   }
 
-  private renameSatellite(deviceId: string, body: unknown): unknown {
+  /** `{ name }` e/ou `{ blocked }`: renomear e bloquear (v2) pela mesma rota. */
+  private updateSatellite(deviceId: string, body: unknown): unknown {
     const name = field(body, 'name');
-    const names = { ...this.deps.settings.get('satellites').names };
-    if (name === null || (typeof name === 'string' && name.trim() === '')) {
-      delete names[deviceId];
-    } else if (typeof name === 'string') {
-      names[deviceId] = name;
-    } else {
-      throw new HttpError(422, '"name" deve ser texto ou null', 'name');
+    const block = field(body, 'blocked');
+    if (name === undefined && block === undefined) {
+      throw new HttpError(422, 'envie "name" ou "blocked"', 'name');
     }
-    this.deps.settings.update('satellites', { names });
-    return { device_id: deviceId, name: names[deviceId] ?? null };
+    const current = this.deps.settings.get('satellites');
+    const patch: Record<string, unknown> = {};
+    if (name !== undefined) {
+      const names = { ...current.names };
+      if (name === null || (typeof name === 'string' && name.trim() === '')) {
+        delete names[deviceId];
+      } else if (typeof name === 'string') {
+        names[deviceId] = name;
+      } else {
+        throw new HttpError(422, '"name" deve ser texto ou null', 'name');
+      }
+      patch.names = names;
+    }
+    if (block !== undefined) {
+      if (typeof block !== 'boolean') throw new HttpError(422, '"blocked" deve ser booleano', 'blocked');
+      const set = new Set(current.blocked);
+      if (block) set.add(deviceId);
+      else set.delete(deviceId);
+      patch.blocked = [...set];
+    }
+    const next = this.deps.settings.update('satellites', patch);
+    // Bloqueio vale na hora: a conexão aberta cai, e a reconexão é recusada.
+    if (block === true) this.deps.disconnectSatellite(deviceId);
+    if (block !== undefined) {
+      getLogger().warn(
+        { event: block ? 'satellite_blocked' : 'satellite_unblocked', device_id: deviceId, via: 'admin' },
+        `Satélite ${deviceId} ${block ? 'bloqueado' : 'desbloqueado'} pelo painel`,
+      );
+    }
+    return { device_id: deviceId, name: next.names[deviceId] ?? null, blocked: next.blocked.includes(deviceId) };
+  }
+
+  private disconnectSatellite(deviceId: string): unknown {
+    return { device_id: deviceId, closed: this.deps.disconnectSatellite(deviceId) };
   }
 
   // ─── Salas e dispositivos ──────────────────────────────────────────────
@@ -893,7 +944,161 @@ export class AdminApi {
       ws_auth_secret: { set: Boolean(config.wsAuthSecret), last4: null },
       admin_token: { set: Boolean(config.adminToken), last4: null },
       version: SERVER_VERSION,
+      release: releaseWire(),
     };
+  }
+
+  /**
+   * Backup para guardar fora do servidor (v2). **Sem segredo nenhum**: os
+   * campos de `SECRET_FIELDS` saem do arquivo, não mascarados — o arquivo vai
+   * parar num disco qualquer, e um `last4` ali não serve para nada. Leva a
+   * configuração de runtime e os lembretes vivos; não leva histórico,
+   * diagnóstico nem fala gravada.
+   */
+  private backup(): unknown {
+    const settings: Record<string, unknown> = {};
+    for (const group of GROUP_NAMES) {
+      const stored = { ...(toStored(group, this.deps.settings.get(group)) as Record<string, unknown>) };
+      for (const secret of SECRET_FIELDS[group] ?? []) delete stored[secret];
+      settings[group] = stored;
+    }
+    return {
+      format: BACKUP_FORMAT,
+      version: BACKUP_VERSION,
+      created_at: new Date(this.now()).toISOString(),
+      server_version: SERVER_VERSION,
+      release: releaseWire(),
+      settings,
+      reminders: this.deps.reminderStore.listLive().map((r) => ({
+        room_id: r.roomId,
+        label: r.label,
+        kind: r.kind,
+        due_at_utc: r.dueAtUtc,
+        local_hour: r.localHour,
+        local_minute: r.localMinute,
+        repeat_rule: r.repeatRule,
+      })),
+    };
+  }
+
+  /**
+   * Restaura um backup: `{ backup, reminders: "keep" | "replace" }`.
+   *
+   * Configuração: cada grupo do arquivo é aplicado como **patch** — segredo
+   * ausente mantém o gravado (a regra de sempre). Tudo é validado antes de
+   * gravar qualquer coisa: um grupo inválido recusa a restauração inteira,
+   * sem deixar meio aplicado. Isso inclui a regra de origem do HA: backup com
+   * outra URL de HA sem token é 422 no `ha.token`, como pela tela.
+   *
+   * Lembretes com `replace`: cancela os vivos e recria os do arquivo — único
+   * que já passou é pulado, recorrente ganha a próxima ocorrência de agora.
+   */
+  private restore(body: unknown): unknown {
+    const b = asRecord(body, 'body');
+    const backup = asRecord(b.backup, 'backup');
+    if (backup.format !== BACKUP_FORMAT) throw new HttpError(422, 'arquivo não é um backup da Luna', 'backup');
+    if (backup.version !== BACKUP_VERSION) throw new HttpError(422, `versão de backup ${String(backup.version)} desconhecida`, 'backup');
+    const mode = b.reminders ?? 'keep';
+    if (mode !== 'keep' && mode !== 'replace') throw new HttpError(422, '"reminders" deve ser keep ou replace', 'reminders');
+
+    const settings = asRecord(backup.settings ?? {}, 'settings');
+    const groups = GROUP_NAMES.filter((g) => settings[g] !== undefined);
+    // Segredo no arquivo (backup editado à mão, ou de outra ferramenta) não
+    // entra: restaurar não é caminho para trocar chave.
+    const patches = new Map<GroupName, Record<string, unknown>>();
+    for (const group of groups) {
+      const patch = { ...asRecord(settings[group], `settings.${group}`) };
+      for (const secret of SECRET_FIELDS[group] ?? []) delete patch[secret];
+      try {
+        VALIDATORS[group](this.deps.settings.get(group) as never, patch);
+      } catch (err) {
+        if (err instanceof SettingsValidationError) {
+          throw new HttpError(422, `${group}: ${err.message}`, `${group}.${err.field}`);
+        }
+        throw err;
+      }
+      patches.set(group, patch);
+    }
+
+    const reminders = mode === 'replace' ? this.planReminders(backup.reminders) : null;
+
+    for (const [group, patch] of patches) this.deps.settings.update(group, patch);
+
+    let created = 0;
+    let cancelled = 0;
+    if (reminders) {
+      for (const r of this.deps.reminderStore.listLive()) {
+        this.deps.cancelReminder(r);
+        cancelled += 1;
+      }
+      for (const r of reminders.valid) {
+        const saved =
+          r.kind === 'once'
+            ? this.deps.reminderStore.insertOnce({ roomId: r.roomId, label: r.label, dueAtUtc: r.dueAtUtc! }, this.now())
+            : this.deps.reminderStore.insertRecurring(
+                { roomId: r.roomId, label: r.label, localHour: r.localHour!, localMinute: r.localMinute!, repeatRule: r.repeatRule!, nextDueUtc: r.nextDueUtc },
+                this.now(),
+              );
+        this.deps.onReminderSaved(saved, saved.label !== null);
+        created += 1;
+      }
+    }
+
+    getLogger().warn(
+      { event: 'admin_restore', groups: groups.join(','), reminders: mode, created, cancelled },
+      `Backup restaurado pelo painel (${groups.length} grupos, lembretes: ${mode})`,
+    );
+    return {
+      ok: true,
+      groups,
+      reminders: { mode, cancelled, created, skipped: reminders?.skipped ?? 0 },
+    };
+  }
+
+  /** Valida os lembretes do arquivo antes de tocar em qualquer coisa. */
+  private planReminders(raw: unknown): {
+    valid: Array<{ roomId: string; label: string | null; kind: 'once' | 'recurring'; dueAtUtc: number | null; localHour: number | null; localMinute: number | null; repeatRule: RepeatRule | null; nextDueUtc: number }>;
+    skipped: number;
+  } {
+    if (!Array.isArray(raw)) throw new HttpError(422, '"reminders" do backup deve ser uma lista', 'backup.reminders');
+    const now = this.now();
+    const perRoom = new Map<string, number>();
+    const valid: ReturnType<AdminApi['planReminders']>['valid'] = [];
+    let skipped = 0;
+    raw.forEach((row, i) => {
+      const r = asRecord(row, `reminders[${i}]`);
+      const where = `backup.reminders[${i}]`;
+      if (typeof r.room_id !== 'string' || !ROOM_ID_PATTERN.test(r.room_id)) throw new HttpError(422, `${where}: sala inválida`, where);
+      const label = sanitizeLabel(typeof r.label === 'string' ? r.label : undefined);
+      if (label.ok === false) throw new HttpError(422, `${where}: ${label.error}`, where);
+      const count = perRoom.get(r.room_id) ?? 0;
+      if (count >= this.deps.config.reminderMaxPerRoom) {
+        skipped += 1;
+        return;
+      }
+      if (r.kind === 'once') {
+        if (typeof r.due_at_utc !== 'number') throw new HttpError(422, `${where}: sem horário`, where);
+        // Já passou: o scheduler o daria como perdido na hora. Pula.
+        if (r.due_at_utc <= now + 10_000) {
+          skipped += 1;
+          return;
+        }
+        valid.push({ roomId: r.room_id, label: label.value, kind: 'once', dueAtUtc: r.due_at_utc, localHour: null, localMinute: null, repeatRule: null, nextDueUtc: r.due_at_utc });
+      } else if (r.kind === 'recurring') {
+        const rules = ['daily', 'weekdays', 'weekend', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'];
+        const h = r.local_hour;
+        const m = r.local_minute;
+        if (typeof r.repeat_rule !== 'string' || !rules.includes(r.repeat_rule) || !Number.isInteger(h) || !Number.isInteger(m) || (h as number) < 0 || (h as number) > 23 || (m as number) < 0 || (m as number) > 59) {
+          throw new HttpError(422, `${where}: recorrência inválida`, where);
+        }
+        const rule = r.repeat_rule as RepeatRule;
+        valid.push({ roomId: r.room_id, label: label.value, kind: 'recurring', dueAtUtc: null, localHour: h as number, localMinute: m as number, repeatRule: rule, nextDueUtc: nextOccurrenceAfter(rule, h as number, m as number, now) });
+      } else {
+        throw new HttpError(422, `${where}: tipo desconhecido`, where);
+      }
+      perRoom.set(r.room_id, count + 1);
+    });
+    return { valid, skipped };
   }
 
   private restart(): unknown {
@@ -902,6 +1107,17 @@ export class AdminApi {
     setTimeout(() => this.deps.onRestart(), 200).unref();
     return { restarting: true };
   }
+}
+
+function releaseWire(): { sha: string; deployed_at: string } | null {
+  return SERVER_RELEASE ? { sha: SERVER_RELEASE.sha, deployed_at: SERVER_RELEASE.deployedAt } : null;
+}
+
+function asRecord(value: unknown, name: string): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new HttpError(422, `"${name}" deve ser um objeto`, name);
+  }
+  return value as Record<string, unknown>;
 }
 
 function localWire(instantUtc: number): { local_date: string; local_time: string } {
@@ -959,13 +1175,13 @@ function field(body: unknown, key: string): unknown {
   return (body as Record<string, unknown>)[key];
 }
 
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     size += buf.length;
-    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'corpo grande demais');
+    if (size > limit) throw new HttpError(413, 'corpo grande demais');
     chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString('utf8').trim();

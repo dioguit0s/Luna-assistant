@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6–M9 feitos: Diagnóstico, Lembretes, Dispositivos, Integrações avançadas)
+**Status:** v1 implementada (marcos 1–5) — falta validação manual no app instalado e no servidor de produção; v2 em andamento (M6–M10 feitos: Diagnóstico, Lembretes, Dispositivos, Integrações avançadas, Satélites e servidor)
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -55,7 +55,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 |---|---|---|
 | Lista: `device_id`, sala, online/offline, conectado desde, último ping | API | v1 |
 | Nome amigável por satélite | API + Persist | v1 |
-| Desconectar ou bloquear um satélite (aparelho perdido) | API + Persist | v2 |
+| Desconectar ou bloquear um satélite (aparelho perdido) | API + Persist | v2 ✔ |
 | "Tocar som / piscar LED" para identificar | Proto + FW | depois |
 | Versão do firmware, IP, sinal do Wi-Fi | Proto + FW | depois |
 | Trocar a sala sem recompilar (hoje `ROOM_ID` é compilado) | Proto + FW | depois |
@@ -132,8 +132,8 @@ atrito.
 |---|---|---|
 | Configuração de bootstrap (porta, caminho do banco), só leitura | API | v1 |
 | Reiniciar o servidor (saída de emergência) | API | v1 |
-| Backup e restauração do banco, **sem segredos** | API | v2 |
-| Versão implantada e data do último deploy | API | v2 |
+| Backup e restauração do banco, **sem segredos** | API | v2 ✔ |
+| Versão implantada e data do último deploy | API | v2 ✔ |
 
 ### 10. Comportamento da Luna
 
@@ -153,10 +153,13 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 
 | Rota | O que faz |
 |---|---|
-| `GET status` | Versão, uptime, satélites online, semáforo por conexão (`ha`, `provider`, `weather`, `calendar`: `ok`/`error`/`unknown`/`off`) e os 5 próximos lembretes |
+| `GET status` | Versão, `release` (`{ sha, deployed_at }` do `release.json` que o CI grava, ou `null`), uptime, satélites online, semáforo por conexão (`ha`, `provider`, `weather`, `calendar`: `ok`/`error`/`unknown`/`off`) e os 5 próximos lembretes |
 | `GET bootstrap` | Porta, caminho do banco, nível de log — só leitura, sem segredo |
 | `GET satellites` | Conectados agora + vistos desde o boot + nomeados; `online`, `connected_since`, `last_seen_at` |
-| `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove |
+| `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove; `{ "blocked": true }` recusa o satélite no handshake e derruba a conexão aberta (v2) |
+| `POST satellites/:device_id/disconnect` | Fecha as conexões do satélite; ele reconecta sozinho — v2 |
+| `GET backup` | Configuração de runtime (sem nenhum campo de segredo) e lembretes vivos, `format: "luna-backup"`, `version: 1` — v2 |
+| `POST restore` | `{ backup, reminders: "keep" \| "replace" }`, até 1 MB. Valida todos os grupos antes de gravar; cada um entra como patch (segredo ausente mantém o gravado). `replace` cancela os lembretes vivos e recria os do arquivo, pulando único que já passou — v2 |
 | `GET rooms` | Salas (de satélite, áreas do HA, mapeadas), área efetiva e o que o `list_devices` veria nelas |
 | `PUT rooms/:room_id` | `{ "area": "escritorio" }` — `null` remove o mapeamento |
 | `GET devices` / `PUT devices` | Overrides. `PUT` é patch de `aliases`, `exclude` e `devices` (entradas manuais no formato do `devices.json`); campo ausente mantém. `GET` traz também `ha_entities` (o que o HA descobriu, com `excluded`) e o estado do último refresh — v2 |
