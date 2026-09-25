@@ -12,7 +12,7 @@
 // Primeiro de tudo: troca o userData antes de config.ts lê-lo (ver profile.ts).
 import './profile.js';
 import { app, dialog, globalShortcut, Notification, shell } from 'electron';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { createTray, type TrayController } from './tray.js';
@@ -386,10 +386,11 @@ if (!gotLock) {
               filters: [{ name: 'Backup da Luna', extensions: ['json'] }],
             });
             if (canceled || !filePaths[0]) return null;
-            const raw = await readFile(filePaths[0], 'utf8');
-            // Teto de sanidade: o servidor aceita até 1 MB.
-            if (raw.length > 1024 * 1024) throw new Error('Arquivo grande demais para ser um backup da Luna.');
-            return JSON.parse(raw) as unknown;
+            // Tamanho em bytes ANTES de ler: um arquivo de GB escolhido por
+            // engano travaria o processo principal. O servidor aceita até 1 MB.
+            const { size } = await stat(filePaths[0]);
+            if (size > 1024 * 1024) throw new Error('Arquivo grande demais para ser um backup da Luna.');
+            return JSON.parse(await readFile(filePaths[0], 'utf8')) as unknown;
           },
         },
         local: {

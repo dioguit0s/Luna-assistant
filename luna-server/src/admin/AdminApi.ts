@@ -21,6 +21,7 @@ import {
 } from '../settings/groups.js';
 import { sanitizeLabel } from '../orchestrator/tools/setReminder.js';
 import { nextOccurrenceAfter } from '../reminders/recurrence.js';
+import { MAX_IN_SECONDS, MIN_IN_SECONDS } from '../reminders/resolveOnce.js';
 import type { RepeatRule } from '../reminders/ReminderStore.js';
 import type { SatelliteInfo } from '../ws/WsServer.js';
 import { SERVER_RELEASE, SERVER_VERSION } from '../ws/WsServer.js';
@@ -960,6 +961,11 @@ export class AdminApi {
     for (const group of GROUP_NAMES) {
       const stored = { ...(toStored(group, this.deps.settings.get(group)) as Record<string, unknown>) };
       for (const secret of SECRET_FIELDS[group] ?? []) delete stored[secret];
+      // `https://user:senha@host` também é segredo, mesmo fora dos SECRET_FIELDS.
+      if (typeof stored.url === 'string') stored.url = withoutUserinfo(stored.url);
+      // Bloqueio fica fora: restaurar um arquivo antigo desbloquearia o aparelho
+      // perdido sem aviso nenhum. Bloquear e desbloquear é só pela tela.
+      if (group === 'satellites') delete stored.blocked;
       settings[group] = stored;
     }
     return {
@@ -1006,9 +1012,22 @@ export class AdminApi {
     // Segredo no arquivo (backup editado à mão, ou de outra ferramenta) não
     // entra: restaurar não é caminho para trocar chave.
     const patches = new Map<GroupName, Record<string, unknown>>();
+    const notApplied: string[] = [];
     for (const group of groups) {
       const patch = { ...asRecord(settings[group], `settings.${group}`) };
       for (const secret of SECRET_FIELDS[group] ?? []) delete patch[secret];
+      if (group === 'satellites') delete patch.blocked;
+      // O token gravado só segue URL da mesma origem, e o arquivo não traz
+      // token: uma URL que mudou de host (HA trocou de IP, agenda desligada
+      // quando o backup foi feito) recusaria a restauração inteira. Pula só a
+      // URL e diz na resposta — o resto do grupo entra.
+      if ((group === 'ha' || group === 'calendar') && typeof patch.url === 'string') {
+        const current = this.deps.settings.get(group);
+        if (!sameOrigin(patch.url, current.url) && !(patch.url === '' && current.url === '')) {
+          delete patch.url;
+          notApplied.push(`${group}.url`);
+        }
+      }
       try {
         VALIDATORS[group](this.deps.settings.get(group) as never, patch);
       } catch (err) {
@@ -1027,9 +1046,16 @@ export class AdminApi {
     let created = 0;
     let cancelled = 0;
     if (reminders) {
+      // O que toca agora fica: silenciar um alarme em curso não é o que
+      // "restaurar backup" promete.
       for (const r of this.deps.reminderStore.listLive()) {
+        if (r.status !== 'armed') continue;
         this.deps.cancelReminder(r);
         cancelled += 1;
+        getLogger().info(
+          { event: 'reminder_cancelled', room_id: r.roomId, reminder_id: r.id, short_id: r.shortId, via: 'restore' },
+          `Lembrete ${r.shortId} cancelado pela restauração`,
+        );
       }
       for (const r of reminders.valid) {
         const saved =
@@ -1040,6 +1066,10 @@ export class AdminApi {
                 this.now(),
               );
         this.deps.onReminderSaved(saved, saved.label !== null);
+        getLogger().info(
+          { event: 'reminder_set', room_id: saved.roomId, reminder_id: saved.id, short_id: saved.shortId, kind: saved.kind, via: 'restore' },
+          `Lembrete ${saved.shortId} recriado pela restauração`,
+        );
         created += 1;
       }
     }
@@ -1051,6 +1081,7 @@ export class AdminApi {
     return {
       ok: true,
       groups,
+      not_applied: notApplied,
       reminders: { mode, cancelled, created, skipped: reminders?.skipped ?? 0 },
     };
   }
@@ -1077,9 +1108,13 @@ export class AdminApi {
         return;
       }
       if (r.kind === 'once') {
-        if (typeof r.due_at_utc !== 'number') throw new HttpError(422, `${where}: sem horário`, where);
-        // Já passou: o scheduler o daria como perdido na hora. Pula.
-        if (r.due_at_utc <= now + 10_000) {
+        if (typeof r.due_at_utc !== 'number' || !Number.isSafeInteger(r.due_at_utc)) {
+          throw new HttpError(422, `${where}: horário inválido`, where);
+        }
+        // Mesma janela do painel (`panelInput.ts`): já passou ou além de 30
+        // dias é pulado. Um instante absurdo no arquivo viraria `Invalid time
+        // value` em toda listagem de lembretes.
+        if (r.due_at_utc <= now + MIN_IN_SECONDS * 1000 || r.due_at_utc > now + MAX_IN_SECONDS * 1000) {
           skipped += 1;
           return;
         }
@@ -1106,6 +1141,18 @@ export class AdminApi {
     // Depois de a resposta sair: o shutdown fecha o servidor HTTP.
     setTimeout(() => this.deps.onRestart(), 200).unref();
     return { restarting: true };
+  }
+}
+
+function withoutUserinfo(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (!parsed.username && !parsed.password) return url;
+    parsed.username = '';
+    parsed.password = '';
+    return parsed.toString().replace(/\/$/, url.endsWith('/') ? '/' : '');
+  } catch {
+    return url;
   }
 }
 

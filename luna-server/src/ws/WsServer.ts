@@ -91,6 +91,9 @@ export const SERVER_RELEASE: { sha: string; deployedAt: string } | null = (() =>
 // `sendToClient` da conexão morta — o satélite novo, reconectado, nunca ouve
 // nada. 2.5x o intervalo de ping tolera um ciclo perdido sem falso positivo.
 const STALE_CONNECTION_TIMEOUT_MS = 25_000;
+
+/** Um `ws_auth_blocked` por aparelho a cada tanto — ver `blockedLoggedAt`. */
+const BLOCKED_LOG_INTERVAL_MS = 10 * 60_000;
 const STALE_CHECK_INTERVAL_MS = 5_000;
 
 // Teto para o handshake de auth: sem isto, um socket que conecta e nunca
@@ -158,6 +161,12 @@ export class WsServer {
 
   /** `device_id`s bloqueados pelo painel — lido a cada handshake. */
   private isBlocked: (deviceId: string) => boolean = () => false;
+  /**
+   * Último `ws_auth_blocked` logado por aparelho. O firmware reconecta a cada
+   * 2 s sem backoff depois de `auth_error`: sem limite, um satélite bloqueado
+   * vira 43 mil warns por dia no journal e no log ao vivo do painel.
+   */
+  private readonly blockedLoggedAt = new Map<string, number>();
 
   setBlockedSource(source: (deviceId: string) => boolean): void {
     this.isBlocked = source;
@@ -563,10 +572,15 @@ export class WsServer {
     // existem para quem nem tem o segredo. Mesma mensagem e código de close de
     // qualquer auth recusada — o contrato WS (quatro cópias) não muda.
     if (this.isBlocked(device_id)) {
-      getLogger().warn(
-        { event: 'ws_auth_blocked', room_id, device_id },
-        `Satélite bloqueado tentou conectar: ${device_id}`,
-      );
+      const now = Date.now();
+      const last = this.blockedLoggedAt.get(device_id) ?? 0;
+      if (now - last >= BLOCKED_LOG_INTERVAL_MS) {
+        this.blockedLoggedAt.set(device_id, now);
+        getLogger().warn(
+          { event: 'ws_auth_blocked', room_id, device_id },
+          `Satélite bloqueado tentou conectar: ${device_id} (próximo aviso em ${BLOCKED_LOG_INTERVAL_MS / 60_000} min)`,
+        );
+      }
       ws.send(
         serializeControlMessage(
           createEnvelope('auth_error', room_id, { reason: 'satélite bloqueado' }),

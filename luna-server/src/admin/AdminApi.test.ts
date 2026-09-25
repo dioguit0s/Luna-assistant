@@ -636,6 +636,32 @@ describe('API admin', () => {
     assert.deepEqual(labels, [null, 'futuro'].sort());
   });
 
+  it('backup e restauração deixam o bloqueio de fora; URL de outra origem é pulada, não recusa tudo', async () => {
+    await call(h, 'PUT', '/admin/v1/satellites/esp32-sumido', { blocked: true });
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    assert.equal('blocked' in backup.settings.satellites, false);
+
+    backup.settings.satellites.blocked = [];
+    backup.settings.calendar = { url: 'https://agenda.outro-host.example' };
+    const res = await call(h, 'POST', '/admin/v1/restore', { backup });
+    assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.deepEqual(res.body.not_applied, ['calendar.url']);
+    assert.ok(h.settings.get('satellites').blocked.includes('esp32-sumido'), 'restaurar desbloqueou');
+    await call(h, 'PUT', '/admin/v1/satellites/esp32-sumido', { blocked: false });
+  });
+
+  it('restaurar pula instante fora da janela e recusa horário não inteiro', async () => {
+    const backup = (await call(h, 'GET', '/admin/v1/backup')).body;
+    backup.reminders = [{ room_id: 'quarto', label: 'x', kind: 'once', due_at_utc: 1e15, local_hour: null, local_minute: null, repeat_rule: null }];
+    let res = await call(h, 'POST', '/admin/v1/restore', { backup, reminders: 'replace' });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.reminders.skipped, 1);
+    assert.equal((await call(h, 'GET', '/admin/v1/reminders')).status, 200);
+    backup.reminders[0].due_at_utc = 1e300;
+    res = await call(h, 'POST', '/admin/v1/restore', { backup, reminders: 'replace' });
+    assert.equal(res.status, 422);
+  });
+
   it('status e bootstrap trazem a release (null em dev)', async () => {
     assert.ok('release' in (await call(h, 'GET', '/admin/v1/status')).body);
     assert.ok('release' in (await call(h, 'GET', '/admin/v1/bootstrap')).body);

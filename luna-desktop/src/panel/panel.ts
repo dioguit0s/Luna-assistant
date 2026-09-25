@@ -2450,7 +2450,10 @@ pages.push({
         say('RESTAURAR BACKUP ... CANCELADO', 'warn');
       } else {
         const r = result.body.reminders;
-        restoreState.result = `▣ ${result.body.groups.length} GRUPOS RESTAURADOS${r.mode === 'replace' ? ` · ${r.created} LEMBRETES RECRIADOS, ${r.skipped} PULADOS` : ''}`;
+        const skippedUrls = (result.body.not_applied ?? []) as string[];
+        restoreState.result =
+          `▣ ${result.body.groups.length} GRUPOS RESTAURADOS${r.mode === 'replace' ? ` · ${r.created} LEMBRETES RECRIADOS, ${r.skipped} PULADOS` : ''}` +
+          (skippedUrls.length ? ` · MANTIDOS OS DE AGORA (OUTRA ORIGEM, SEM TOKEN NO ARQUIVO): ${skippedUrls.join(', ').toUpperCase()}` : '');
         say('RESTAURAR BACKUP ... OK');
       }
       void renderCurrent();
@@ -2458,7 +2461,7 @@ pages.push({
     const backupBox = frame(
       'BACKUP // SEM SEGREDOS',
       { style: 'gap:12px' },
-      h('div', { style: 'font-size:12px;line-height:1.7;max-width:720px' }, 'O ARQUIVO LEVA A CONFIGURAÇÃO DO PAINEL E OS LEMBRETES ATIVOS. TOKENS, CHAVES E SENHAS FICAM DE FORA: AO RESTAURAR, OS GRAVADOS NO NÚCLEO CONTINUAM VALENDO.'),
+      h('div', { style: 'font-size:12px;line-height:1.7;max-width:720px' }, 'O ARQUIVO LEVA A CONFIGURAÇÃO DO PAINEL E OS LEMBRETES ATIVOS. TOKENS, CHAVES E SENHAS FICAM DE FORA: AO RESTAURAR, OS GRAVADOS NO NÚCLEO CONTINUAM VALENDO. SATÉLITES BLOQUEADOS TAMBÉM NÃO ENTRAM NEM SAEM POR AQUI; ALARME TOCANDO AGORA NÃO É CANCELADO.'),
       h(
         'div',
         { class: 'row', style: 'gap:10px' },
