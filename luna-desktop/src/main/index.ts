@@ -9,6 +9,8 @@
 // avaliado de forma assíncrona e o evento 'ready' pode passar antes de os
 // listeners serem registrados.
 
+// Primeiro de tudo: troca o userData antes de config.ts lê-lo (ver profile.ts).
+import './profile.js';
 import { app, dialog, shell } from 'electron';
 
 import { createTray, type TrayController } from './tray.js';

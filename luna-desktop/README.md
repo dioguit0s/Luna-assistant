@@ -42,6 +42,11 @@ sala (`room_id`), segredo do satélite (idêntico ao `WS_AUTH_SECRET` do
 telas do servidor no painel). Grava em `userData/settings.json`, com os dois
 segredos cifrados pelo `safeStorage` (DPAPI) — nunca em claro.
 
+**Perfil de teste isolado:** `LUNA_USER_DATA_DIR=<pasta>` troca o `userData`
+(settings.json, device.json) — dá para apontar o app para um `luna-server` local
+com outra identidade sem mexer no perfil real, e sem brigar com o app aberto
+(o lock de instância única é por perfil).
+
 O `.env` continua funcionando como **semente opcional** (`copy .env.example .env`):
 o que o painel grava vence o que está nele. Ver
 [`docs/painel-de-controle.md`](../docs/painel-de-controle.md).
