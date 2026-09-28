@@ -30,14 +30,14 @@ const SIDECAR_DIR = app.isPackaged
   : join(PROJECT_ROOT, 'wakeword-sidecar');
 const DEFAULT_PYTHON_PATH = join(SIDECAR_DIR, '.venv', 'Scripts', 'python.exe');
 
-// Em dev, wake_sidecar.py resolve seu próprio default (hey_luna_trained.tflite)
+// Em dev, wake_sidecar.py resolve seu próprio default (hey_luna_ptbr.tflite)
 // relativo ao checkout do monorepo (luna-firmware/models/, fora de
 // luna-desktop/) — não existe empacotado, porque só luna-desktop/ vai pro
 // instalador. extraResources também copia os .tflite vendorizados pra
 // SIDECAR_DIR/models/; aqui fixamos o caminho explícito só nesse caso, sem
 // mudar o default do próprio script em dev.
 const DEFAULT_MODEL_PATH = app.isPackaged
-  ? join(SIDECAR_DIR, 'models', 'hey_luna_trained.tflite')
+  ? join(SIDECAR_DIR, 'models', 'hey_luna_ptbr.tflite')
   : undefined;
 
 const RESTART_BACKOFF_INITIAL_MS = 1_000;
@@ -51,12 +51,12 @@ export interface WakewordSidecarOptions {
   /** Default: wakeword-sidecar/.venv/Scripts/python.exe */
   pythonPath?: string;
   /**
-   * --model — omitido usa hey_luna_trained.tflite: em dev, o default do
+   * --model — omitido usa hey_luna_ptbr.tflite: em dev, o default do
    * próprio wake_sidecar.py (relativo ao monorepo); empacotado, DEFAULT_MODEL_PATH
    * (resources/wakeword-sidecar/models/, ver comentário acima).
    */
   model?: string;
-  /** --threshold — omitido usa o default do próprio wake_sidecar.py (0.97) */
+  /** --threshold — omitido usa o default do próprio wake_sidecar.py (0.99) */
   threshold?: number;
   /** --score-interval-ms — eventos `score` para o teste de mic do painel. Omitido desliga. */
   scoreIntervalMs?: number;

@@ -49,10 +49,10 @@ export interface DesktopConfig {
   micDeviceId: string;
   speakerDeviceId: string;
   /** --model do sidecar de wake word. undefined = usa o default do próprio
-   * wake_sidecar.py (hey_luna_trained.tflite) — não força essa decisão aqui. */
+   * wake_sidecar.py (hey_luna_ptbr.tflite) — não força essa decisão aqui. */
   wakewordModelPath?: string;
   /** --threshold do sidecar de wake word. undefined = usa o default do
-   * próprio wake_sidecar.py (0.97). */
+   * próprio wake_sidecar.py (0.99). */
   wakewordThreshold?: number;
 }
 

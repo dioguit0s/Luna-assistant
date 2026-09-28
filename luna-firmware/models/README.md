@@ -9,28 +9,51 @@ gerados por [`../tools/tflite_to_header.py`](../tools/tflite_to_header.py). Rege
 trocar qualquer `.tflite`:
 
 ```bash
-python tools/tflite_to_header.py models/hey_luna_v3.tflite src/wake/models/hey_luna_model_data.h g_hey_luna_model_data
+python tools/tflite_to_header.py models/hey_luna_ptbr.tflite src/wake/models/hey_luna_model_data.h g_hey_luna_model_data
 ```
 
-## Estado atual: `hey_luna_trained` em validação
+## Estado atual: `hey_luna_ptbr` em validação no satélite
 
 O header compilado (`../src/wake/models/hey_luna_model_data.h`) contém hoje o
-**`hey_luna_trained.tflite`** — treinado localmente (`../../wake-training/`, ver o README lá) com
-o pipeline do microWakeWord, mesma arquitetura do `okay_nabu` (mixednet, stride 3).
+**`hey_luna_ptbr.tflite`** — treinado localmente em 2026-09-28 (`../../wake-training/`, ver o
+README lá), mesma arquitetura e mesma quantização de entrada do `okay_nabu` e do
+`hey_luna_trained` (mixednet, stride 3). Detalhes do treino e das medições em
+[`hey_luna_ptbr.json`](hey_luna_ptbr.json).
 
-⚠️ **Risco conhecido**: o treino convergiu rápido (99,9%+ de acurácia desde o passo 500), mas o
-AUC no split de teste ficou baixo (**0,536** — perto de aleatório). Isso é sinal de overfitting:
-as 2000 amostras positivas vieram todas da mesma voz sintética (Piper `en_US-libritts_r-medium`),
-então o modelo pode ter decorado essa voz específica em vez de generalizar "hey luna". As métricas
-por corte de decisão (`tflite_streaming_roc.txt`, ver `hey_luna_trained.json`) pareciam boas
-isoladamente (cutoff 0,98 → 5% de rejeição, ~1 falso-aceite/hora), mas isso não substitui o teste
-com voz humana real no microfone. **Se não disparar bem, o fallback validado é o `okay_nabu`.**
+Diferente do `hey_luna_trained`, os positivos não vieram só de uma voz sintética em inglês:
+entraram 480 amostras com vozes Piper pt-BR e 60 "hey luna" reais gravados pelo usuário, e
+conversa em pt-BR como negativo. Medido pelo sidecar do `luna-desktop` (mesmo frontend de
+features do firmware), em cutoff 0,99 contra o `hey_luna_trained` em 0,97:
+
+| Áudio | `hey_luna_trained` (0,97) | **`hey_luna_ptbr` (0,99)** |
+|---|---|---|
+| `hey-luna.wav` — mic do desktop, 11 tentativas | 3/11 | **11/11** |
+| hold-out das gravações reais (nunca treinado) | 13/14 | 13/14 |
+| 22 min de TV/conversa pt-BR (disparos falsos) | 2 | 2 |
+| `okay-nabu.wav` — outra wake word, 8x (disparos falsos) | 2 | 1 |
+
+⚠️ **Falta medir no INMP441.** Os números acima são do microfone do desktop; o cutoff do
+satélite (`WAKE_PROB_CUTOFF` em `include/config.h`, hoje 0,99) precisa ser calibrado pelo
+`raw_max` com `WAKE_DEBUG`, e o teste de ≥15 min de TV/conversa sem disparar vale de novo
+(o trecho de TV acima foi visto no treino como negativo, então é otimista).
 
 Histórico: os três `hey_luna*` da comunidade (`hey_luna.tflite`, `_v2`, `_v3`) são fracos e não
 disparam neste hardware (INMP441) — só o `okay_nabu` (modelo oficial) provou que o hardware está
-bom. Detalhes em [ADR 003](../../docs/adr/003-wake-word-engine.md) e [TRAINING.md](TRAINING.md).
+bom. O `hey_luna_trained` (2026-07-25, só positivos sintéticos em inglês) ficou com recall baixo
+em voz real (3/11 no mic do desktop). Detalhes em [ADR 003](../../docs/adr/003-wake-word-engine.md)
+e [TRAINING.md](TRAINING.md).
 
-### Reverter para `okay_nabu` se o treinado não funcionar bem
+### Reverter se o `hey_luna_ptbr` não funcionar bem no satélite
+
+Para o modelo anterior (mesma frase):
+
+```bash
+python tools/tflite_to_header.py models/hey_luna_trained.tflite src/wake/models/hey_luna_model_data.h g_hey_luna_model_data
+```
+
+E em `include/config.h`: `WAKE_PROB_CUTOFF 0.97f`.
+
+Para o `okay_nabu` (validado no hardware, muda a frase):
 
 ```bash
 python tools/tflite_to_header.py models/okay_nabu.tflite src/wake/models/hey_luna_model_data.h g_hey_luna_model_data
@@ -40,7 +63,9 @@ E em `include/config.h`: `WAKE_PHRASE "Okay Nabu"`, `WAKE_PROB_CUTOFF 0.90f`.
 
 | Arquivo | SHA-256 | Papel |
 |---|---|---|
-| **`okay_nabu.tflite`** (em uso) | `0689abe1912a95a3318a0d8cb2e67bad0cbcfe3e24dd6e050c75debddfb6f891` | provisório, validado no mic real |
+| **`hey_luna_ptbr.tflite`** (em uso) | `f54c16bf69600b9bef5b336c41c2f8bc9b9cd86a325cbf5aecf27cc35a5924d4` | treinado com voz real + pt-BR, em validação no satélite |
+| `hey_luna_trained.tflite` | `c3922993a77b782ed8a8b0acb8ec0bfa5c5e069eead6c2cd66c0f33e6c4ee698` | modelo anterior, fallback (recall baixo em voz real) |
+| `okay_nabu.tflite` | `0689abe1912a95a3318a0d8cb2e67bad0cbcfe3e24dd6e050c75debddfb6f891` | fallback validado no mic real, outra frase |
 
 ## `hey_luna*.tflite` — detector da wake word (fracos, não usar)
 
@@ -94,7 +119,7 @@ guarda o resto do histórico internamente via *variable tensors*. Os modelos ofi
 tensor no boot, então trocar por um modelo de stride 3 não exige mexer no código.
 
 A saída é **uint8 cru** (não int8 dequantizado): `probabilidade = raw / 255`. O `WAKE_PROB_CUTOFF`
-de `config.h` (0.97) é comparado contra a média dessa razão.
+de `config.h` (0.99 para o `hey_luna_ptbr`) é comparado contra a média dessa razão.
 
 Roda inteiramente sobre kernels `tflite::tflm_signal` (`WINDOW`, `FFT_AUTO_SCALE`, `RFFT`,
 `ENERGY`, `FILTER_BANK`, `FILTER_BANK_SQUARE_ROOT`, `FILTER_BANK_SPECTRAL_SUBTRACTION`, `PCAN`,

@@ -45,6 +45,7 @@ extraResources:
   - from: ../luna-firmware/models
     to: wakeword-sidecar/models
     filter:
+      - hey_luna_ptbr.tflite
       - hey_luna_trained.tflite
       - okay_nabu.tflite
 

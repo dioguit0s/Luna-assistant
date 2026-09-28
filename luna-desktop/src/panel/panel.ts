@@ -546,9 +546,14 @@ function buildNoSignal(): void {
 let local: any = null;
 let micLevel = 0;
 
+/** Limiar com 2 casas, ou 3 quando 2 arredondariam (0.995 viraria "0.99" e pareceria EQUILIBRADA). */
+function formatThreshold(value: number): string {
+  return Number(value.toFixed(2)) === value ? value.toFixed(2) : value.toFixed(3);
+}
+
 /** Linha "EM VIGOR" da sensibilidade: repintada a cada evento `local` (o `ready` do sidecar reiniciado). */
 function wakeActiveText(view: any): string {
-  return `EM VIGOR: ${view?.wakeThresholdActive != null ? view.wakeThresholdActive.toFixed(2) : '—'} · MAIS BAIXO ACORDA MAIS FÁCIL, E ACORDA SEM QUERER`;
+  return `EM VIGOR: ${view?.wakeThresholdActive != null ? formatThreshold(view.wakeThresholdActive) : '—'} · MAIS BAIXO ACORDA MAIS FÁCIL, E ACORDA SEM QUERER`;
 }
 
 function paintLocal(): void {
@@ -2081,7 +2086,7 @@ function paintMeter(): void {
     const y = 105 - meter.thresholdValue * 100;
     meter.threshold!.setAttribute('y1', String(y));
     meter.threshold!.setAttribute('y2', String(y));
-    meter.thresholdLabel!.textContent = `${meter.thresholdValue.toFixed(2)} LIMIAR`;
+    meter.thresholdLabel!.textContent = `${formatThreshold(meter.thresholdValue)} LIMIAR`;
     meter.thresholdLabel!.style.top = `${(y / 110) * 110 - 6}px`;
   }
 
@@ -2179,8 +2184,9 @@ pages.push({
       { value: null, label: 'PADRÃO' },
       { value: 0.9, label: '0.90 · SENSÍVEL' },
       { value: 0.95, label: '0.95' },
-      { value: 0.97, label: '0.97 · EQUILIBRADA' },
-      { value: 0.99, label: '0.99 · RÍGIDA' },
+      { value: 0.97, label: '0.97' },
+      { value: 0.99, label: '0.99 · EQUILIBRADA' },
+      { value: 0.995, label: '0.995 · RÍGIDA' },
     ];
     if (view.wakeThreshold !== null && !thresholds.some((t) => t.value === view.wakeThreshold)) {
       thresholds.push({ value: view.wakeThreshold, label: view.wakeThreshold.toFixed(3) });

@@ -76,7 +76,7 @@ export const DEFAULT_ROOM_ID = 'desktop_diogo';
 
 /**
  * Faixa do limiar exposta ao painel. Abaixo de 0.5 a wake word dispara com
- * qualquer conversa; o default do sidecar é 0.97.
+ * qualquer conversa; o default do sidecar é 0.99 (hey_luna_ptbr).
  */
 export const WAKE_THRESHOLD_MIN = 0.5;
 export const WAKE_THRESHOLD_MAX = 0.999;

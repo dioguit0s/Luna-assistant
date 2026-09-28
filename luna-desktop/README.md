@@ -142,18 +142,20 @@ Desde o marco 4, o Electron sobe o sidecar sozinho (`src/main/wakeword/`) e
 liga o evento `wake` à máquina de estados — ver "Estado atual" acima.
 
 **`WAKEWORD_MODEL`/`WAKEWORD_THRESHOLD` no `.env`** (opcionais — omitidos,
-o sidecar usa os próprios defaults, `hey_luna_trained.tflite` e `0.97`):
+o sidecar usa os próprios defaults, `hey_luna_ptbr.tflite` e `0.99`):
 
 ```
-WAKEWORD_MODEL=../luna-firmware/models/okay_nabu.tflite
+WAKEWORD_MODEL=../luna-firmware/models/hey_luna_trained.tflite
 WAKEWORD_THRESHOLD=0.97
 ```
 
-`hey_luna_trained.tflite` (modelo treinado da Luna) teve recall baixo (~30%)
-em voz real no M3 — dispara sem falso-positivo quando dispara, mas erra a
-maioria das tentativas. `okay_nabu.tflite` é uma alternativa provisória mais
-confiável (~100% recall no teste de controle), mas muda a frase de ativação
-para "Okay Nabu". Detalhe completo em
+`hey_luna_ptbr.tflite` (retreinado em 2026-09-28 com "hey luna" real e vozes
+pt-BR) acertou 11/11 no `fixtures/hey-luna.wav`, contra 3/11 do
+`hey_luna_trained.tflite` (o modelo anterior), com os mesmos disparos falsos
+em TV. Os dois ficam no instalador como fallback, junto do
+`okay_nabu.tflite` (muda a frase para "Okay Nabu"). A sensibilidade escolhida
+no painel vence o `.env` — se ela estava gravada em 0.97 para o modelo
+anterior, volte para "PADRÃO" ou "0.99 · EQUILIBRADA". Detalhe completo em
 [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md).
 
 ## Conexão e áudio
