@@ -74,7 +74,9 @@ config["features"] = [
 # Checa o mmap de treino, não só a pasta: o 04b gera num .tmp e só renomeia no
 # fim, mas uma pasta criada à mão (ou por uma execução quebrada de uma versão
 # antiga) quebraria o carregamento no treino.
-CUSTOM_PTBR_GROUPS = {"fundo": 10.0, "confundiveis": 5.0}
+# confundiveis era 5.0 no retreino de 2026-09-25, que derrubou o acerto no
+# hold-out real de 13/14 (modelo antigo) para 6/14.
+CUSTOM_PTBR_GROUPS = {"fundo": 10.0, "confundiveis": 2.0}
 for _group, _weight in CUSTOM_PTBR_GROUPS.items():
     _dir = f"negative_datasets/custom_ptbr_{_group}"
     if not os.path.isdir(os.path.join(_dir, "training", "wakeword_mmap")):
@@ -92,9 +94,32 @@ for _group, _weight in CUSTOM_PTBR_GROUPS.items():
     )
     print(f"[config] incluindo negativos pt-BR de {_dir} (sampling_weight={_weight})")
 
-config["training_steps"] = [5000]  # reduzido de 10000: treino em CPU vaza memória e
-# precisa de reinícios periódicos (ver scripts/06b_train_loop.sh); menos passos
-# = menos ciclos de OOM+retomada até concluir.
+# Positivos reais (03b_generate_real_positives.py) — gravações de gente de
+# verdade, com a mesma augmentation dos sintéticos. Peso maior que o dos 2000
+# sintéticos (2.0): são o que mais se parece com o microfone real, e sem eles o
+# modelo trata qualquer voz humana real como negativa.
+_real_pos = "real_positive_features"
+if os.path.isdir(os.path.join(_real_pos, "training", "wakeword_mmap")):
+    config["features"].append(
+        {
+            "features_dir": _real_pos,
+            "sampling_weight": 3.0,
+            "penalty_weight": 1.0,
+            "truth": True,
+            "truncation_strategy": "truncate_start",
+            "type": "mmap",
+        }
+    )
+    print(f"[config] incluindo positivos reais de {_real_pos} (sampling_weight=3.0)")
+else:
+    print(f"[config] {_real_pos} sem features de treino — só positivos sintéticos")
+
+# Passos de UM processo de treino. O `./run.sh train` treina em rodadas curtas
+# (TRAIN_ROUND_STEPS, padrão 500) e passa o valor por TRAINING_STEPS: cada
+# validação do model_train_eval vaza ~3,8 GB que nunca são liberados, então um
+# processo longo morre por OOM na 3ª validação. 5000 é o total histórico, usado
+# só se alguém rodar o 06_train.sh direto.
+config["training_steps"] = [int(os.environ.get("TRAINING_STEPS", "5000"))]
 config["positive_class_weight"] = [1]
 config["negative_class_weight"] = [20]
 config["learning_rates"] = [0.001]
