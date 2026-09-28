@@ -1,4 +1,4 @@
-"""Carregamento e validação do modelo streaming (`hey_luna_trained.tflite`,
+"""Carregamento e validação do modelo streaming (`hey_luna_ptbr.tflite`,
 `okay_nabu.tflite`, ...) via `ai-edge-litert`, sucessor mantido do
 `tflite-runtime` — ver ADR 004 para por que não é `tflite-runtime` nem
 `tensorflow`.
@@ -65,7 +65,7 @@ def load_model(path: Path) -> LoadedModel:
     Validação espelha `checkTensor()` do firmware (WakeWord.cpp, seção de
     boot): entrada `[1, stride, FEATURE_SIZE]` int8, saída de 1 elemento
     uint8. O `stride` é lido do tensor (`dims[1]`), nunca hardcoded — modelos
-    diferentes usam strides diferentes (`hey_luna_trained`/`okay_nabu` = 3,
+    diferentes usam strides diferentes (`hey_luna_ptbr`/`hey_luna_trained`/`okay_nabu` = 3,
     os `hey_luna` comunitários = 2).
     """
     if not path.exists():

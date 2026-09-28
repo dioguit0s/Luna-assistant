@@ -54,7 +54,7 @@ _STEP_BYTES = 160 * 2
 # não gravada nesta máquina), `result.features` chegou a max=25.78, p99=22.57 —
 # bate com a hipótese 1 (faixa crua ~0..26), não com a 2 (~0..666). Quantizado
 # com o scale/zero_point do `hey_luna_trained.tflite` (0.10196078568696976,
-# -128), 26.0 vira int8 127 quase exato — a faixa do frontend cobre o int8
+# -128; o `hey_luna_ptbr.tflite` tem os mesmos), 26.0 vira int8 127 quase exato — a faixa do frontend cobre o int8
 # quase inteiro sem escala nenhuma. Reconfirmar com fala real antes do M4; se
 # o teto medido não bater com ~26, ver a nota de fallback abaixo (dump de
 # features do firmware via WAKE_DUMP_FEATURES) antes de mudar esta constante.

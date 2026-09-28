@@ -63,7 +63,7 @@ Portar (não reescrever) a lógica de `luna-client-test/src/config.ts` e `src/pr
 ### 4b. Preferências locais (painel v2)
 
 `userData/settings.json` guarda também `wakeThreshold` (0.5–0.999; ausente = `WAKEWORD_THRESHOLD`
-do `.env` ou o 0.97 do sidecar), `talkShortcut` (accelerator do Electron; o registro é testado
+do `.env` ou o 0.99 do sidecar, o cutoff do `hey_luna_ptbr`), `talkShortcut` (accelerator do Electron; o registro é testado
 antes de gravar) e `reminderNotifications` (padrão ligado; precisa do token admin, porque o aviso
 vem de `GET /admin/v1/reminders`).
 

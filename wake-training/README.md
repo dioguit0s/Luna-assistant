@@ -129,14 +129,16 @@ cd ../luna-desktop/wakeword-sidecar
 .venv/Scripts/python.exe wake_sidecar.py --model ../../wake-training/work/hey_luna.tflite --threshold 0.97 --wav fixtures/hey-luna.wav
 ```
 
-| Áudio | O que mede | `hey_luna_trained` (atual) |
-|---|---|---|
-| `fixtures/hey-luna.wav` | 10 "hey luna" reais pelo mic do desktop — **o teste que mais importa** (mesmo caminho de áudio do uso real) | 3/10 em 0,97; 7/10 em 0,7 |
-| `work/real_positives_holdout.wav` | hold-out das gravações reais (celular, perto do mic — mais fácil) | 13/14 em 0,97 |
-| `work/custom_negatives_wav/fundo/*.wav` | disparos falsos em 22 min de TV pt-BR (visto no treino — otimista) | 2 em 0,97 |
-| `fixtures/okay-nabu.wav` | outra wake word (8 repetições) — não deveria disparar | 2 em 0,97 |
+| Áudio | O que mede | `hey_luna_trained` (anterior) | `hey_luna_ptbr` (atual, 2026-09-28) |
+|---|---|---|---|
+| `fixtures/hey-luna.wav` | 11 "hey luna" reais pelo mic do desktop — **o teste que mais importa** (mesmo caminho de áudio do uso real) | 3/11 em 0,97; 7/11 em 0,7 | 11/11 em 0,97–0,995 |
+| `work/real_positives_holdout.wav` | hold-out das gravações reais (celular, perto do mic — mais fácil) | 13/14 em 0,97 | 13/14 em 0,99 |
+| `work/custom_negatives_wav/fundo/*.wav` | disparos falsos em 22 min de TV pt-BR (visto no treino — otimista) | 2 em 0,97 | 2 em 0,99; 3 em 0,97 |
+| `fixtures/okay-nabu.wav` | outra wake word (8 repetições) — não deveria disparar | 2 em 0,97 | 1 em 0,99 |
 
-Varra o cutoff (0,97 / 0,9 / 0,8 / 0,7) — o valor do manifesto não vale para o mic real.
+Varra o cutoff (0,995 / 0,99 / 0,97 / 0,9 / 0,8 / 0,7) — o valor do manifesto não vale para o
+mic real. O `hey_luna_ptbr` saiu da rodada 9 de 10 do treino de 2026-09-28 (a de maior
+`average viable recall`; as rodadas oscilaram de 5 a 389 falsos-positivos/hora estimados).
 O novo só substitui o atual se acertar mais no `hey-luna.wav` sem disparar mais nos
 negativos; depois disso, ainda falta o teste com o microfone do satélite (ver "Depois do
 treino").

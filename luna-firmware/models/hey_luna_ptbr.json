@@ -1,0 +1,36 @@
+{
+  "type": "micro",
+  "wake_word": "Hey Luna",
+  "author": "treino local (microWakeWord, wake-training/)",
+  "website": "https://github.com/kahrendt/microWakeWord",
+  "model": "hey_luna_ptbr.tflite",
+  "trained_languages": ["en", "pt"],
+  "version": 2,
+  "micro": {
+    "probability_cutoff": 0.99,
+    "feature_step_size": 10,
+    "sliding_window_size": 5,
+    "tensor_arena_size": 34000,
+    "minimum_esphome_version": "2024.7.0"
+  },
+  "_notes": {
+    "architecture": "mixednet, idêntico ao hey_luna_trained/okay_nabu (pointwise_filters 64,64,64,64; stride 3); mesma quantização de entrada (scale 0.10196078568696976, zero_point -128)",
+    "treino": "2026-09-28, rodada 9 de 10 (500 passos cada, ~4500 passos efetivos) — ver wake-training/README.md, 'Treino em rodadas'",
+    "positivos": "2000 sintéticos en_US-libritts + 480 sintéticos Piper pt-BR (faber, cadu, jeff, edresson) + 60 'hey luna' reais gravados pelo usuário (celular)",
+    "negativos": "speech/dinner_party/no_speech (en) + 22 min de conversa pt-BR + frases confundíveis pt-BR",
+    "roc_cutoffs": {
+      "0.99": "frr=0.1504 faph=0.187",
+      "0.98": "frr=0.1278 faph=0.562",
+      "0.94": "frr=0.0977 faph=0.937",
+      "0.93": "frr=0.0940 faph=1.125"
+    },
+    "aceite_voz_real_cutoff_0.99": {
+      "fixtures/hey-luna.wav (mic do desktop, 11 tentativas)": "11/11 (hey_luna_trained em 0.97: 3/11)",
+      "hold-out das gravações reais (14, nunca treinado)": "13/14 (hey_luna_trained: 13/14)",
+      "22 min de TV/conversa pt-BR (visto no treino como negativo)": "2 disparos (hey_luna_trained em 0.97: 2)",
+      "fixtures/okay-nabu.wav (8x outra wake word)": "1 disparo (hey_luna_trained em 0.97: 2)"
+    },
+    "pendente": "calibrar WAKE_PROB_CUTOFF no INMP441 do satélite (WAKE_DEBUG) — os números acima são do mic do desktop via sidecar",
+    "fallback": "hey_luna_trained.tflite (modelo anterior) ou okay_nabu.tflite (validado no hardware, ver docs/adr/003-wake-word-engine.md)"
+  }
+}

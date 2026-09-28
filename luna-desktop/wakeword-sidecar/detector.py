@@ -26,7 +26,7 @@ FEATURE_SIZE = 40  # WAKE_FEATURE_SIZE — canais por fatia
 SLIDING_WINDOW = 5  # WAKE_SLIDING_WINDOW — média móvel sobre N inferências
 REARM_WINDOWS = 50  # WAKE_REARM_WINDOWS — refratário depois de disparar
 SETTLE_WINDOWS = 15  # WAKE_SETTLE_WINDOWS — cooldown depois de rearm()/boot
-DEFAULT_CUTOFF = 0.97  # WAKE_PROB_CUTOFF
+DEFAULT_CUTOFF = 0.99  # WAKE_PROB_CUTOFF (hey_luna_ptbr)
 
 # Cada fatia de features cobre 10 ms de áudio (WAKE_FEATURE_STEP_MS), e o modelo
 # só é invocado a cada `stride` fatias — daí a conversão de "janelas de

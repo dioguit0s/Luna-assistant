@@ -4,7 +4,7 @@
 |---|---|---|
 | `../../../luna-client-test/fixtures/silence.wav` (reuso) | prova de zero falso-positivo — 2s de silêncio digital, 100% zeros | ✅ existe |
 | `okay-nabu.wav` | **positivo de controle** — `okay_nabu.tflite` é o modelo comprovadamente forte (ADR 003: 0.95-1.00 no INMP441); se ele não disparar aqui, o problema é o sidecar, não o modelo | ✅ gravado e validado — **8/8 detecções** (recall 100%), `mean_prob` 0.970-0.993 |
-| `hey-luna.wav` | o alvo de verdade, contra `hey_luna_trained.tflite` | ✅ gravado e validado — **3/10 detecções** (recall ~30%); quando dispara é com confiança e sem falso-positivo, mas perde a maioria das tentativas. Bate com o `test_auc: 0.536` já documentado em `hey_luna_trained.json` — ver "Implicação para o marco 4" no `README.md` deste diretório |
+| `hey-luna.wav` | o alvo de verdade (11 repetições — recontadas pela energia; o texto abaixo dizia 10) | ✅ `hey_luna_ptbr` em 0.99: **11/11**. Histórico, `hey_luna_trained`: **3/11 detecções** (recall ~30%); quando dispara é com confiança e sem falso-positivo, mas perde a maioria das tentativas. Bate com o `test_auc: 0.536` já documentado em `hey_luna_trained.json` — ver "Implicação para o marco 4" no `README.md` deste diretório |
 | `noise-smoke.wav` | falso-positivo — mesmo teste que validou o firmware | ✅ gravado (50s) e testado — **0 detecções** nos dois modelos (`okay_nabu` chegou a `max_mean_prob=0.29`; `hey_luna_trained` a `0.017`, ambos bem abaixo do cutoff 0.97). **Curto**: 50s é bem menos que os ≥15min recomendados (o mesmo padrão que validou o firmware no ADR 003) — resultado é um sinal positivo de fumaça, não uma prova robusta de ausência de falso-positivo em uso real. Uma sessão mais longa (≥15min de TV/conversa) fica como follow-up recomendado antes/durante o M4, sem bloquear o M3 |
 
 `silence.wav` provou ausência de falso-positivo, mas não provava que a
@@ -51,4 +51,4 @@ versão maior como fixture).
 
 Siga a seção "Calibração" do [`README.md`](../README.md) deste diretório:
 `--feature-stats` primeiro (confirma `FEATURE_SCALE`), depois `okay_nabu`
-como controle, só então `hey_luna_trained`.
+como controle, só então o modelo "Hey Luna" em uso (`hey_luna_ptbr`).

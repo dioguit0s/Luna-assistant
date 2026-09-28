@@ -4,7 +4,7 @@
 # preprocessador .tflite usa ops tflm_signal que só existem no tflite-micro.
 #
 # ai-edge-litert: sucessor mantido do tflite-runtime, roda os modelos
-# streaming .tflite (hey_luna_trained.tflite, okay_nabu.tflite).
+# streaming .tflite (hey_luna_ptbr.tflite, hey_luna_trained.tflite, okay_nabu.tflite).
 ai-edge-litert>=2.1.6
 
 # pymicro-features: mesmo micro frontend C++ do tflite-micro (extração de
