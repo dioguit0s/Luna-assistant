@@ -1,0 +1,3 @@
+# Scripts que rodam no Linux do container: com core.autocrlf=true e sem isto,
+# um checkout converte para CRLF e o bash quebra em `set -euo pipefail\r`.
+*.sh text eol=lf

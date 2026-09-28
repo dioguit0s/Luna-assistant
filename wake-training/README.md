@@ -29,6 +29,12 @@ parar manualmente, em vez de confiar que o processo vai parar sozinho no alvo ce
 **Se for retreinar para melhorar a generalização**, o suspeito nº 1 é a diversidade das amostras
 positivas (mais vozes/pronúncias, não só mais passos) — ver "Se o modelo sair fraco" abaixo.
 
+Retreino de 2026-09-25 (negativos pt-BR, positivos só sintéticos em inglês): 0 disparos em 22 min
+de TV, mas 1/10 no `hey-luna.wav` real — **descartado**, o firmware seguiu com
+`hey_luna_trained`. Dele saíram o treino em rodadas (o `06b_train_loop.sh` foi substituído por
+`./run.sh train`, ver "Treino em rodadas"), os positivos reais e as vozes pt-BR (ver "Positivos
+reais") e o "Critério de aceite".
+
 ## Requisitos
 
 - Docker Desktop (o Dockerfile fixa Python 3.10 + as versões que realmente funcionam
@@ -49,17 +55,42 @@ docker build -t mww-train .   # uma vez
 Ou etapa por etapa (útil para rodar o treino em background sem travar o terminal):
 
 ```bash
-./run.sh samples            # gera ~2000 "hey luna" sintéticas (Piper TTS)
+./run.sh samples            # gera ~2000 "hey luna" sintéticas (Piper TTS, voz inglesa)
+./run.sh ptbr_samples        # +480 sintéticas com 4 vozes Piper pt-BR (baixa as vozes)
 ./run.sh augdata             # baixa RIR/AudioSet/FMA para augmentation
 ./run.sh negatives           # baixa os datasets negativos pré-processados
 ./run.sh custom_negatives    # opcional: negativos pt-BR próprios, ver seção abaixo
-./run.sh features            # aplica augmentation e gera os espectrogramas
-./run.sh train               # treina (a etapa longa)
+./run.sh features            # aplica augmentation e gera os espectrogramas dos sintéticos
+./run.sh real_positives      # opcional: "hey luna" gravado de verdade, ver seção abaixo
+./run.sh train               # treina em rodadas (a etapa longa)
 ./run.sh export              # copia o .tflite final e escreve o manifesto JSON
 ```
 
 Cada etapa pula sozinha se a saída já existir — pode interromper e retomar (exceto
-`custom_negatives`, que sempre regenera a partir dos WAVs).
+`custom_negatives` e `real_positives`, que sempre regeneram a partir dos áudios, e `train`,
+que retoma da última rodada concluída). `ptbr_samples` pula se já houver
+`generated_samples/ptbr_*.wav`; `features` não pula — rode de novo depois de `ptbr_samples`.
+
+### Treino em rodadas
+
+Cada validação do `model_train_eval` vaza ~3,8 GB de RAM que nunca são liberados: um
+processo de 5000 passos morre por OOM na 3ª validação (~passo 1500), e reiniciá-lo não
+resolve (durante o processo, o checkpoint de retomada só é salvo em "novo melhor", e a
+contagem de passos zera). Por isso `./run.sh train` treina em **rodadas** de
+`TRAIN_ROUND_STEPS` passos (padrão 500, uma validação cada, no último passo; no máximo 500 —
+o `eval_step_interval` — senão a rodada valida mais de uma vez), `TRAIN_ROUNDS` vezes
+(padrão 10):
+
+- cada rodada é um processo novo que retoma do checkpoint que a anterior salva ao terminar;
+- os pesos e a métrica de cada rodada ficam em `work/trained_models/rounds/`
+  (`roundN.weights.h5`, `.metric`, `.log`) — o "melhor" do microWakeWord reinicia a cada
+  processo, então sem isso o resultado seria só a última rodada, e as rodadas oscilam muito;
+- no fim, a rodada com maior `average viable recall` vira `best_weights` e é convertida em
+  `.tflite` por `06c_export_only.sh`, num processo novo;
+- rodada que morre por OOM (código 137) é repetida até 3 vezes; outro erro para tudo.
+
+Para treinar do zero, mova `work/trained_models/` para outro lugar antes — senão o treino
+retoma do checkpoint e pula as rodadas que já têm `roundN.metric`.
 
 Rodando numa máquina que também serve produção (ex. o servidor do `luna-server`), limite o
 container para que um OOM do treino mate só ele, e não um processo do host:
@@ -67,6 +98,48 @@ container para que um OOM do treino mate só ele, e não um processo do host:
 ```bash
 MWW_DOCKER_ARGS="--memory=8g --cpus=3" ./run.sh train
 ```
+
+(Com 8 GB, até uma rodada de 500 passos pode não caber; a validação sozinha aloca ~3,8 GB.)
+
+## Positivos reais
+
+Os 2000 positivos de `samples` vêm todos de uma única voz sintética em inglês. O retreino de
+2026-09-25 (com negativos pt-BR e só esses positivos) acertou 6/14 "hey luna" reais no
+hold-out abaixo, contra 13/14 do modelo anterior: toda voz humana real que o modelo via
+estava rotulada negativa. Gravações reais corrigem isso:
+
+- Grave "hey luna" várias vezes seguidas, com ~1 s de pausa entre as repetições (um áudio de
+  WhatsApp serve — `.ogg`/Opus, `.wav`, `.mp3` e `.flac` são aceitos). Varie distância, volume e
+  entonação; mais de uma pessoa é melhor que uma.
+- Coloque os arquivos em `work/real_positives_wav/` e rode `./run.sh real_positives`.
+- O script recorta cada repetição por energia (segmentos de 0,3 a 1,3 s; o log lista os
+  descartados) e separa **1 de cada 5 como hold-out**, que nunca entra no treino — vai para
+  `work/real_positives_holdout.wav`. Mínimo: 10 repetições para treino.
+- As demais passam pela mesma augmentation dos sintéticos (25 repetições cada no treino) e
+  entram em `05_write_training_config.py` como positivo com `sampling_weight` 3.0.
+
+## Critério de aceite
+
+Antes de trocar o modelo do firmware, compare o novo com o atual pelo sidecar do
+`luna-desktop` (mesmo frontend de features do firmware; o evento `eof` traz `detections` e
+`max_mean_prob`):
+
+```bash
+cd ../luna-desktop/wakeword-sidecar
+.venv/Scripts/python.exe wake_sidecar.py --model ../../wake-training/work/hey_luna.tflite --threshold 0.97 --wav fixtures/hey-luna.wav
+```
+
+| Áudio | O que mede | `hey_luna_trained` (atual) |
+|---|---|---|
+| `fixtures/hey-luna.wav` | 10 "hey luna" reais pelo mic do desktop — **o teste que mais importa** (mesmo caminho de áudio do uso real) | 3/10 em 0,97; 7/10 em 0,7 |
+| `work/real_positives_holdout.wav` | hold-out das gravações reais (celular, perto do mic — mais fácil) | 13/14 em 0,97 |
+| `work/custom_negatives_wav/fundo/*.wav` | disparos falsos em 22 min de TV pt-BR (visto no treino — otimista) | 2 em 0,97 |
+| `fixtures/okay-nabu.wav` | outra wake word (8 repetições) — não deveria disparar | 2 em 0,97 |
+
+Varra o cutoff (0,97 / 0,9 / 0,8 / 0,7) — o valor do manifesto não vale para o mic real.
+O novo só substitui o atual se acertar mais no `hey-luna.wav` sem disparar mais nos
+negativos; depois disso, ainda falta o teste com o microfone do satélite (ver "Depois do
+treino").
 
 ## Depois do treino
 
@@ -90,8 +163,10 @@ O notebook oficial já avisa: "a maioria dos treinos não sai bom de primeira". 
 desistir, tente nesta ordem (mais barato → mais caro):
 
 1. Mais passos de treino (`training_steps` em `training_parameters.yaml`, hoje 10000).
-2. Mais amostras positivas (`MAX_SAMPLES` em `01_generate_samples.sh`, hoje 2000) e/ou
-   variar `noise-scales`/`length-scales` do Piper para mais diversidade de pronúncia.
+2. Mais amostras positivas: mais gravações reais em `work/real_positives_wav/` (ver
+   "Positivos reais" — é o que mais ajuda), `PTBR_SAMPLES_PER_VOICE` em
+   `01b_generate_ptbr_samples.py` (hoje 120 por voz) ou `MAX_SAMPLES` em
+   `01_generate_samples.sh` (hoje 2000).
 3. Ajustar os pesos de amostragem/penalidade em `05_write_training_config.py`.
 4. Se nada disso ajudar e o "Hey Luna" continuar ruim, `okay_nabu` fica como fallback —
    ele já está validado e funcionando no satélite.

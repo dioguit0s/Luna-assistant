@@ -3,6 +3,8 @@
 # NVIDIA disponível — então é a etapa mais demorada do pipeline (pode levar
 # horas para os 10000 passos). Retomável: rodar de novo continua de onde parou
 # (mas reinicia a contagem de passos do yaml se train_dir já tiver checkpoint).
+# TEST_STREAMING_QUANTIZED=0 pula o teste/conversão final — usado pelas rodadas
+# do `./run.sh train`, que geram o .tflite à parte com 06c_export_only.sh.
 set -euo pipefail
 cd /work
 
@@ -14,7 +16,7 @@ python -m microwakeword.model_train_eval \
   --test_tflite_nonstreaming 0 \
   --test_tflite_nonstreaming_quantized 0 \
   --test_tflite_streaming 0 \
-  --test_tflite_streaming_quantized 1 \
+  --test_tflite_streaming_quantized "${TEST_STREAMING_QUANTIZED:-1}" \
   --use_weights "best_weights" \
   mixednet \
   --pointwise_filters "64,64,64,64" \
