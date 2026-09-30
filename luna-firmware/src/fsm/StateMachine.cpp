@@ -15,6 +15,15 @@ static volatile uint32_t lastVoiceMs = 0;
 // pelo log (ver mensagem em "janela de escuta fechou"). Não afeta a FSM.
 static volatile int16_t maxPeakSinceWake = 0;
 
+// Janela de continuação aberta e o usuário ainda não falou. Só tem sentido em
+// ACTIVE_STREAMING; a primeira fala (noteCapturePeak) zera e a janela passa a
+// seguir as regras normais de silêncio/teto.
+static volatile bool followUpPending = false;
+// Aviso one-shot para o captureTask (ver takeFollowUpEntry). Separado de
+// followUpPending porque noteCapturePeak pode zerar aquele antes do
+// captureTask ver a borda de streaming.
+static volatile bool followUpEntry = false;
+
 // Início do RESPONDING atual, para a rede de segurança do RESPONDING_TIMEOUT_MS.
 static volatile uint32_t respondingSince = 0;
 
@@ -32,6 +41,8 @@ void begin() { enter(State::IDLE_LISTENING); }
 
 void reset() {
   resumeAt = 0;
+  followUpPending = false;
+  followUpEntry = false;
   enter(State::IDLE_LISTENING);
 }
 
@@ -45,6 +56,16 @@ void update() {
     // Só no modo wake word — no open-mic ACTIVE_STREAMING é o estado permanente.
     if (!wakeAvailable) break;
     const uint32_t now = millis();
+    if (followUpPending) {
+      // Ninguém respondeu: a conversa acabou, volta a exigir wake word.
+      if (now - activeSince > FOLLOWUP_WINDOW_MS) {
+        Serial.printf("[luna] janela de continuação expirou (pico max=%d, limiar=%d)\n",
+                      maxPeakSinceWake, WAKE_LISTEN_VOICE_PEAK);
+        followUpPending = false;
+        enter(State::IDLE_LISTENING);
+      }
+      break;
+    }
     const bool silencio = now - lastVoiceMs > WAKE_LISTEN_SILENCE_MS;
     const bool estourou = now - activeSince > WAKE_LISTEN_MAX_MS;
     if (silencio || estourou) {
@@ -58,7 +79,19 @@ void update() {
   case State::RESPONDING:
     if (resumeAt != 0 && (int32_t)(millis() - resumeAt) >= 0) {
       resumeAt = 0;
-      enter(State::IDLE_LISTENING);
+      if (FOLLOWUP_ENABLED && wakeAvailable) {
+        // Fim normal de resposta: abre a janela de continuação em vez de
+        // voltar a exigir wake word (ver FOLLOWUP_WINDOW_MS em config.h).
+        activeSince = millis();
+        lastVoiceMs = activeSince;
+        maxPeakSinceWake = 0;
+        followUpPending = true;
+        followUpEntry = true;
+        Serial.println("[luna] janela de continuação aberta — pode responder sem wake word");
+        enter(State::ACTIVE_STREAMING);
+      } else {
+        enter(State::IDLE_LISTENING);
+      }
     } else if (millis() - respondingSince > RESPONDING_TIMEOUT_MS) {
       // O servidor nunca mandou speaking_end (turno perdido/travado no
       // provider). Sem isto o satélite fica mudo e surdo (wake word
@@ -83,11 +116,21 @@ void setWakeWordAvailable(bool available) { wakeAvailable = available; }
 
 bool wakeWordAvailable() { return wakeAvailable; }
 
+bool awaitingFollowUp() { return followUpPending && state == State::ACTIVE_STREAMING; }
+
+bool takeFollowUpEntry() {
+  const bool entry = followUpEntry;
+  followUpEntry = false;
+  return entry;
+}
+
 uint32_t msSinceVoice() { return millis() - lastVoiceMs; }
 
 void onWakeWord() {
   if (state != State::IDLE_LISTENING) return;
   resumeAt = 0;
+  followUpPending = false;
+  followUpEntry = false;
   activeSince = millis();
   lastVoiceMs = activeSince; // começa a contar silêncio a partir do wake
   maxPeakSinceWake = 0;
@@ -99,11 +142,18 @@ void noteCapturePeak(int16_t peak) {
   if (peak > maxPeakSinceWake) maxPeakSinceWake = peak;
   if (peak >= WAKE_LISTEN_VOICE_PEAK) {
     lastVoiceMs = millis();
+    if (followUpPending) {
+      // O usuário respondeu: regras normais da janela, com o teto
+      // WAKE_LISTEN_MAX_MS contado a partir daqui, como num turno com wake.
+      followUpPending = false;
+      activeSince = lastVoiceMs;
+    }
   }
 }
 
 void onSpeakingStart() {
   resumeAt = 0;
+  followUpPending = false;
   respondingSince = millis();
   enter(State::RESPONDING);
 }

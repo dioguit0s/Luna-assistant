@@ -49,6 +49,18 @@ app.setAppUserModelId('com.diogo.luna.desktop');
 const WAKE_SCORE_INTERVAL_MS = 200;
 /** 5 frames de 20 ms: o medidor de nível do painel anda a 10 Hz. */
 const MIC_LEVEL_EVERY_FRAMES = 5;
+/** Pico (0..32767) que conta como fala na janela de continuação — mesmo
+ * limiar do firmware (WAKE_LISTEN_VOICE_PEAK em luna-firmware/include/config.h). */
+const FOLLOWUP_VOICE_PEAK = 3000;
+
+function pcmPeak(pcm: Buffer): number {
+  let peak = 0;
+  for (let i = 0; i + 1 < pcm.length; i += 2) {
+    const sample = Math.abs(pcm.readInt16LE(i));
+    if (sample > peak) peak = sample;
+  }
+  return peak;
+}
 
 let tray: TrayController | null = null;
 let session: Session | null = null;
@@ -308,6 +320,11 @@ if (!gotLock) {
         // O envio ao servidor é fechado durante thinking/speaking/mudo/
         // aguardando-wake. Descartar aqui, não no renderer, mantém a decisão
         // de gate inteira no session.
+        // Janela de continuação: fala mantém o uplink aberto (ver
+        // Session.noteVoice). Só mede com a janela aberta.
+        if (session?.isFollowUpOpen() && pcmPeak(pcm) >= FOLLOWUP_VOICE_PEAK) {
+          session.noteVoice();
+        }
         if (session?.isUplinkOpen()) wsClient?.sendAudio(pcm);
       },
       onCaptureError: (message) => {

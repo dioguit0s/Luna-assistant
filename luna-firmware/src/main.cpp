@@ -260,9 +260,16 @@ static void captureTask(void *) {
 
     const bool streaming = StateMachine::shouldStream();
     if (streaming && !wasStreaming) {
-      // Acabou de acordar: manda primeiro o que já estava no pré-buffer, senão
-      // o provider recebe o comando sem o começo.
-      prerollFlush();
+      if (StateMachine::takeFollowUpEntry()) {
+        // Janela de continuação: o pré-buffer foi enchido durante RESPONDING e
+        // contém o fim da própria resposta saindo do alto-falante. Mandá-lo
+        // seria eco para o VAD do provider — descarta.
+        prerollCount = 0;
+      } else {
+        // Acabou de acordar: manda primeiro o que já estava no pré-buffer, senão
+        // o provider recebe o comando sem o começo.
+        prerollFlush();
+      }
     }
     wasStreaming = streaming;
 
@@ -399,6 +406,10 @@ static void updateStatusLed() {
         // Open-mic: ACTIVE_STREAMING é permanente, então verde fixo mentiria
         // dizendo "estou te ouvindo agora" o tempo todo.
         ui = StatusLed::Ui::DEGRADED;
+      } else if (StateMachine::awaitingFollowUp()) {
+        // Janela de continuação: o silêncio aqui é a espera pela réplica, não
+        // o modelo pensando — msSinceVoice() pintaria THINKING logo abaixo.
+        ui = StatusLed::Ui::LISTENING;
       } else if (StateMachine::msSinceVoice() >= LED_THINKING_AFTER_MS) {
         ui = StatusLed::Ui::THINKING;
       } else {
@@ -533,6 +544,24 @@ void loop() {
   }
 
   StateMachine::update();
+
+  // Janela de continuação: a primeira fala faz o papel do wake word para o
+  // orçamento de latência do turno (wake->tx fica ~0, tx->speaking_start é a
+  // réplica + o endpointing). Marcar na abertura da janela somaria ao turno o
+  // tempo que o usuário levou para começar a responder.
+  // Na abertura, zera os marcos do turno anterior mesmo que a borda de fala
+  // nunca aconteça (réplica baixa que só o VAD do servidor pegou).
+  static bool wasAwaitingFollowUp = false;
+  const bool awaitingFollowUp = StateMachine::awaitingFollowUp();
+  if (!wasAwaitingFollowUp && awaitingFollowUp) {
+    resetTurnLatency();
+  } else if (wasAwaitingFollowUp && !awaitingFollowUp &&
+             StateMachine::current() == StateMachine::State::ACTIVE_STREAMING) {
+    resetTurnLatency();
+    turnWakeAtMs = millis();
+  }
+  wasAwaitingFollowUp = awaitingFollowUp;
+
   updateStatusLed();
 
   // Drena a fila de captura, mas com orçamento de tempo. Um `while` sem limite

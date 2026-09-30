@@ -159,7 +159,8 @@ satélite                              servidor                        provider
    |<-- audio_response (tempo real) -----|   fila paceada por sala
    |            :                        |<-- onTurnComplete -------------|
    |<-- speaking_end --------------------|    (ultimo item da fila)
-   |   [150ms] -> volta a IDLE_LISTENING |
+   |   [150ms] -> janela de continuacao  |
+   |   (6s sem fala -> IDLE_LISTENING)    |
 ```
 
 ### Pacing de `audio_response`
@@ -254,6 +255,19 @@ resposta falada mais longa que o teto era cortada no meio do playback.
 
 Após `speaking_end`, o satélite espera `AEC_RESUME_DELAY_MS` (150 ms) antes de
 recapturar, para o rabo do áudio no alto-falante não entrar no microfone.
+
+### Janela de continuação
+
+Ao recapturar, o satélite **já volta transmitindo**, sem exigir wake word, para o usuário
+responder à Luna (`FOLLOWUP_*` em [`config.h`](../luna-firmware/include/config.h); no desktop,
+as constantes `FOLLOWUP_*` de `session.ts`, que esperam 600 ms extras pelo pacing + lead do playback e têm teto de 20 s).
+Sem fala acima do limiar em 6 s, a janela fecha e volta a exigir wake; depois da primeira fala
+vale a regra de silêncio normal (5 s). Os caminhos de falha (watchdogs, `RESPONDING_TIMEOUT_MS`,
+desconexão) **não** abrem a janela.
+
+**Não há mensagem nova:** para o servidor é só mais `audio_chunk` chegando na sessão da sala,
+que o `RoomManager` mantém aberta entre turnos (com o histórico), e o VAD do provider trata
+como um turno novo.
 
 ***
 

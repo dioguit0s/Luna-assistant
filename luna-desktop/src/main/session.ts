@@ -8,7 +8,26 @@ import type { AppState } from './state.js';
 const THINKING_TIMEOUT_MS = 15_000;
 const SPEAKING_TIMEOUT_MS = 5_000;
 
+// Janela de continuação: depois de uma resposta, o uplink reabre sem exigir
+// "Hey Luna" para o usuário responder. Mesmas regras do firmware
+// (FOLLOWUP_WINDOW_MS / WAKE_LISTEN_SILENCE_MS em luna-firmware/include/config.h).
+/** speaking_end sai logo atrás do último frame, que o servidor paceou até
+ * AUDIO_PACING_LEAD_MS (250 ms) à frente, e o renderer ainda soma o seu
+ * PLAYBACK_LEAD_S (200 ms) + a saída do Windows: reabrir antes disso mandaria
+ * o rabo da resposta ao servidor e o eco contaria como fala em noteVoice(). */
+export const FOLLOWUP_OPEN_DELAY_MS = 600;
+/** Sem nenhuma fala até aqui, a conversa acabou: volta a exigir wake. */
+export const FOLLOWUP_WINDOW_MS = 6_000;
+/** Depois que o usuário falou, este silêncio fecha a janela. */
+export const FOLLOWUP_SILENCE_MS = 5_000;
+/** Teto absoluto desde a abertura: ruído contínuo acima do limiar (TV, música)
+ * rearmaria o prazo de silêncio para sempre. Espelha WAKE_LISTEN_MAX_MS. */
+export const FOLLOWUP_MAX_MS = 20_000;
+
 type TurnPhase = 'idle' | 'thinking' | 'speaking';
+/** off: sem janela. opening: aguardando FOLLOWUP_OPEN_DELAY_MS (uplink ainda
+ * fechado). waiting: uplink aberto, ninguém falou. speaking: usuário falou. */
+type FollowUpPhase = 'off' | 'opening' | 'waiting' | 'speaking';
 
 export interface TtfabInfo {
   /**
@@ -69,6 +88,9 @@ export class Session extends TypedEmitter<SessionEvents> {
   /** false enquanto o processo do sidecar de wake word está fora do ar —
    * força 'error' em repouso (ver recompute()), mesmo tratamento de !connected. */
   private sidecarHealthy = true;
+  private followUp: FollowUpPhase = 'off';
+  private followUpTimer: ReturnType<typeof setTimeout> | null = null;
+  private followUpMaxTimer: ReturnType<typeof setTimeout> | null = null;
 
   private state: AppState = 'error';
   private uplinkOpen = false;
@@ -83,6 +105,12 @@ export class Session extends TypedEmitter<SessionEvents> {
 
   isMuted(): boolean {
     return this.muted;
+  }
+
+  /** true enquanto a janela de continuação está aberta — index.ts só mede o
+   * pico do mic (noteVoice) nesse caso. */
+  isFollowUpOpen(): boolean {
+    return this.followUp === 'waiting' || this.followUp === 'speaking';
   }
 
   // --- ciclo de vida da conexão (chamado pelos eventos do LunaWsClient) ---
@@ -107,6 +135,7 @@ export class Session extends TypedEmitter<SessionEvents> {
   // --- controle vindo do servidor ---
 
   onSpeakingStart(): void {
+    this.clearFollowUp();
     // O servidor só manda um speaking_start por turno (speakingByRoom no
     // Orchestrator) — um segundo enquanto já em thinking/speaking é
     // duplicata/glitch de rede, não um novo turno. Ignora em vez de reiniciar
@@ -121,8 +150,30 @@ export class Session extends TypedEmitter<SessionEvents> {
   }
 
   onSpeakingEnd(): void {
+    // speaking_end atrasado de um turno interrompido por barge-in: o gate já
+    // foi aberto por wake/forceListen e o usuário pode estar no meio do
+    // comando — fechar aqui cortaria esse áudio.
+    if (this.turnPhase === 'idle' && !this.awaitingWake && this.followUp === 'off') return;
     this.resetTurn();
+    // Só o fim normal de resposta abre a janela de continuação — watchdog e
+    // desconexão passam por resetTurn() sem chegar aqui. Mudo continua
+    // exigindo wake, e sidecar fora do ar é estado de erro.
+    if (this.connected && !this.muted && this.sidecarHealthy) {
+      this.followUp = 'opening';
+      this.followUpTimer = setTimeout(() => this.openFollowUp(), FOLLOWUP_OPEN_DELAY_MS);
+    }
     this.recompute();
+  }
+
+  /**
+   * Chamado por index.ts quando um frame do mic passa do limiar de voz com a
+   * janela de continuação aberta. A primeira fala troca o prazo de "ninguém
+   * respondeu" pelo de silêncio; cada fala seguinte o adia.
+   */
+  noteVoice(): void {
+    if (!this.isFollowUpOpen()) return;
+    this.followUp = 'speaking';
+    this.armFollowUpTimer(FOLLOWUP_SILENCE_MS);
   }
 
   /**
@@ -156,7 +207,10 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.muted = muted;
     // Mudo muta tudo, incluindo a detecção de wake — desmutar não deve
     // reabrir um streaming pendurado sozinho, precisa de um novo "Hey Luna".
-    if (muted) this.awaitingWake = true;
+    if (muted) {
+      this.clearFollowUp();
+      this.awaitingWake = true;
+    }
     this.recompute();
   }
 
@@ -193,6 +247,7 @@ export class Session extends TypedEmitter<SessionEvents> {
 
   destroy(): void {
     this.clearWatchdogs();
+    this.clearFollowUp();
   }
 
   // --- internals ---
@@ -212,6 +267,9 @@ export class Session extends TypedEmitter<SessionEvents> {
   private openGate(): void {
     if (this.muted) return;
 
+    // Wake/forceListen durante a janela de continuação vira gate normal, sem
+    // prazo — mesmo comportamento de hoje depois de um "Hey Luna".
+    this.clearFollowUp();
     if (this.turnPhase !== 'idle') {
       this.clearWatchdogs();
       this.dropAudio = true;
@@ -228,10 +286,51 @@ export class Session extends TypedEmitter<SessionEvents> {
     this.turnPhase = 'idle';
     this.dropAudio = false;
     this.speakingStartedAt = null;
+    this.clearFollowUp();
     // Fim de turno volta a exigir um novo "Hey Luna" — chamado por
     // onConnecting/onDisconnected/onSpeakingEnd/watchdogFired, então isto
     // cobre todos os jeitos de um turno terminar sem precisar tocar neles.
+    // onSpeakingEnd reabre depois, pela janela de continuação.
     this.awaitingWake = true;
+  }
+
+  private openFollowUp(): void {
+    this.followUpTimer = null;
+    // Mudo e desconexão já cancelam o timer; o sidecar pode ter caído nos
+    // FOLLOWUP_OPEN_DELAY_MS sem passar por aqui.
+    if (!this.connected || this.muted || !this.sidecarHealthy) {
+      this.followUp = 'off';
+      this.recompute();
+      return;
+    }
+    this.followUp = 'waiting';
+    this.awaitingWake = false;
+    this.armFollowUpTimer(FOLLOWUP_WINDOW_MS);
+    this.followUpMaxTimer = setTimeout(() => this.closeFollowUp(), FOLLOWUP_MAX_MS);
+    this.recompute();
+  }
+
+  private closeFollowUp(): void {
+    this.clearFollowUp();
+    this.awaitingWake = true;
+    this.recompute();
+  }
+
+  private armFollowUpTimer(ms: number): void {
+    if (this.followUpTimer) clearTimeout(this.followUpTimer);
+    this.followUpTimer = setTimeout(() => this.closeFollowUp(), ms);
+  }
+
+  private clearFollowUp(): void {
+    if (this.followUpTimer) {
+      clearTimeout(this.followUpTimer);
+      this.followUpTimer = null;
+    }
+    if (this.followUpMaxTimer) {
+      clearTimeout(this.followUpMaxTimer);
+      this.followUpMaxTimer = null;
+    }
+    this.followUp = 'off';
   }
 
   private armSpeakingWatchdog(): void {
@@ -273,7 +372,9 @@ export class Session extends TypedEmitter<SessionEvents> {
           ? 'speaking'
           : !this.sidecarHealthy
             ? 'error'
-            : this.muted || this.awaitingWake
+            : // 'opening' já mostra listening: evita piscar idle→listening
+              // nos 300 ms entre o speaking_end e o uplink reabrir.
+              this.muted || (this.awaitingWake && this.followUp === 'off')
               ? 'idle'
               : 'listening';
 

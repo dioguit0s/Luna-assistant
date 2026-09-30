@@ -220,6 +220,17 @@
 #define WAKE_LISTEN_SILENCE_MS 5000  // silêncio que fecha a janela
 #define WAKE_LISTEN_MAX_MS 20000     // teto absoluto da janela pós-wake
 
+// Janela de continuação: quando uma resposta termina de tocar (playback drenado
+// + AEC_RESUME_DELAY_MS), a FSM volta direto para ACTIVE_STREAMING em vez de
+// IDLE_LISTENING, para o usuário responder sem repetir o wake word. Enquanto
+// ninguém fala, a janela fecha após FOLLOWUP_WINDOW_MS; depois da primeira fala
+// (pico >= WAKE_LISTEN_VOICE_PEAK) valem as regras normais de silêncio e teto
+// acima. Não abre quando RESPONDING sai pelo RESPONDING_TIMEOUT_MS — isso é
+// falha, não fim de resposta. Nada muda no protocolo: o servidor só vê mais
+// áudio chegando na sessão já aberta da sala.
+#define FOLLOWUP_ENABLED 1
+#define FOLLOWUP_WINDOW_MS 6000
+
 // Diagnóstico do domínio de features: loga pico de áudio, min/max/média das
 // features e a probabilidade crua máxima. Ligado: o hey_luna_ptbr acabou de
 // entrar e o cutoff 0.99 ainda precisa ser calibrado no INMP441. Desligar

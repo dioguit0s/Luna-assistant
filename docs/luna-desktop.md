@@ -52,6 +52,8 @@ Mesmos 3 estados do `StateMachine.h` do firmware, mais um "pensando" que o deskt
 
 Volta pra Idle depois de `speaking_end` (ou timeout, mesmo padrão do `flushResponseWav`/`scheduleResponseSave` do client-test).
 
+**Janela de continuação** (implementada depois do plano original): o `speaking_end` normal não volta direto pra Idle — após 600 ms (pacing do servidor + lead do playback) o uplink reabre sem wake word por até 6 s esperando a réplica; fala acima do limiar (`FOLLOWUP_VOICE_PEAK` em `index.ts`) troca o prazo por 5 s de silêncio, com teto de 20 s. Watchdog, desconexão e mudo não abrem a janela; wake/forçar escuta durante ela vira gate normal. Constantes `FOLLOWUP_*` em `src/main/session.ts`, mesmas regras do firmware (ver [protocolo](protocolo-websocket.md#janela-de-continuação)).
+
 ### 4. Identidade e config
 
 Portar (não reescrever) a lógica de `luna-client-test/src/config.ts` e `src/protocol.ts` — já implementam `computeAuthToken` (HMAC-SHA256), `createEnvelope`/`serializeControlMessage`/`parseIncomingMessage` compatíveis com o `MessageEnvelope` do `luna-server/src/ws/protocol.ts`. Não há motivo pra reescrever esse contrato do zero.

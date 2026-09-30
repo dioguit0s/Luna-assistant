@@ -98,8 +98,11 @@ pio device monitor      # log serial (115200)
 - `wakeTask` (core 0, prio 2): `WakeWord::feed()` → dispara `StateMachine::onWakeWord()`.
 - `loop` (core 1, dono único do WS): `ws.loop()`, drena `txQueue` → `sendBIN`, trata frames.
 - `playbackTask` (core 0, prio 3): StreamBuffer ← `audio_response` → I2S1.
-- `StateMachine`: `IDLE_LISTENING` --wake--> `ACTIVE_STREAMING` ⇄ `RESPONDING`, e de `RESPONDING`
-  sempre de volta para `IDLE_LISTENING` (cada turno exige a wake word de novo). Em
+- `StateMachine`: `IDLE_LISTENING` --wake--> `ACTIVE_STREAMING` ⇄ `RESPONDING`. Quando a resposta
+  termina de tocar, `RESPONDING` volta para `ACTIVE_STREAMING` numa **janela de continuação**
+  (`FOLLOWUP_*` em `config.h`): dá para responder sem repetir o wake word; se ninguém falar em
+  `FOLLOWUP_WINDOW_MS` (6 s), volta a `IDLE_LISTENING`. O teto `RESPONDING_TIMEOUT_MS` (falha)
+  vai direto para `IDLE_LISTENING`, sem janela. Em
   `ACTIVE_STREAMING` há uma **janela de escuta com timeout** (`WAKE_LISTEN_*` em `config.h`): se o
   servidor não enfileirar uma resposta, a FSM fecha por silêncio/teto e volta a exigir o wake word,
   em vez de ficar presa transmitindo.
