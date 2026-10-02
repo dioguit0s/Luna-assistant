@@ -46,6 +46,16 @@ bool wakeWordAvailable();
 // noteCapturePeak() não roda e o valor apenas cresce.
 uint32_t msSinceVoice();
 
+// Verdadeiro durante a janela de continuação (FOLLOWUP_WINDOW_MS em config.h)
+// enquanto o usuário ainda não falou: ACTIVE_STREAMING aberto sem wake word,
+// esperando a réplica. O LED usa isto para não mostrar "pensando" na espera.
+bool awaitingFollowUp();
+
+// Consome (uma vez) o aviso de que a última entrada em ACTIVE_STREAMING veio da
+// janela de continuação, não do wake word. O captureTask usa para descartar o
+// pré-buffer, que nesse caso guarda o eco do fim da resposta.
+bool takeFollowUpEntry();
+
 // Trigger da wake word -> ACTIVE_STREAMING (volta a transmitir).
 void onWakeWord();
 
