@@ -11,8 +11,8 @@ destinos que NUNCA se misturam:
 
 Motivação: os únicos negativos pt-BR do treino eram 22 min de UM vídeo de TV,
 e a única medição de falso-positivo em pt-BR era nesses mesmos 22 min (2
-disparos — otimista, o modelo tinha visto o áudio). Em 79 min do `dev` do
-FLEURS o `hey_luna_ptbr` deu ~9 disparos/hora em 0.99 (medido em 2026-10-26).
+disparos — otimista, o modelo tinha visto o áudio). Em 4,6 h do `dev`+`test`
+do FLEURS o `hey_luna_ptbr` deu 7 a 13 disparos/hora em 0.99 (conforme a pausa entre as frases) (medido em 2026-10-26).
 Cada arquivo do FLEURS é uma frase com silêncio nas pontas, então a janela
 inicial de cada um (o recorte de 3 s do 04b começa no início do arquivo) traz
 o "silêncio → começo de fala" que é onde a maioria dos disparos acontece.

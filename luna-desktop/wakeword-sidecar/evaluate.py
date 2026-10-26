@@ -17,9 +17,12 @@ script faz as duas coisas com o mesmo caminho de inferência do sidecar
   reaproveitadas para todos os cutoffs (o detector é puro e determinístico).
 - Áudio: `.wav` (PCM16 ou float), `.ogg`/`.opus` do WhatsApp, `.flac`, `.mp3`.
 - `--negative` aceita arquivo ou diretório (recursivo). Os arquivos de um
-  mesmo `--negative` são emendados num fluxo contínuo, como o microfone
-  ouviria — sem `rearm()` entre eles, então o settle de ~450 ms não esconde
-  nada.
+  mesmo `--negative` são emendados num fluxo só, sem `rearm()` entre eles
+  (o settle de ~450 ms não esconde nada), separados por `NEG_GAP_S` de
+  silêncio para o refratário de um disparo não engolir o arquivo seguinte.
+  As horas da taxa contam só o áudio, não esse silêncio. Por conjunto sai o
+  número de disparos, a taxa por hora e quantos arquivos dispararam — este
+  último é o número que importa num diretório de frases curtas.
 - `--positive DIR`: cada arquivo é UMA repetição da wake word (ex.
   `wake-training/work/real_positives_clips/holdout/`). Acerto = detecção
   dentro do clipe ou até `HIT_TAIL_S` depois; detecção fora disso conta como
@@ -70,9 +73,10 @@ HIT_TAIL_S = 1.0
 # o próximo clipe.
 POS_PAD_BEFORE_S = 1.0
 POS_PAD_AFTER_S = 2.0
-# Pausa (silêncio digital) entre arquivos emendados de um --negative. Curta:
-# só evita que a borda de um arquivo cole na do outro.
-JOIN_GAP_S = 0.2
+# Silêncio entre arquivos emendados de um --negative. Maior que o refratário
+# (REARM_WINDOWS x stride 3 x 10 ms = 1,5 s) somado ao HIT_TAIL_S, senão num
+# diretório de frases de ~1 s um disparo apaga o da frase seguinte.
+NEG_GAP_S = 2.0
 
 
 def log(message: str) -> None:
@@ -96,24 +100,33 @@ class Stream:
     def seconds(self) -> float:
         return len(self.pcm) / (2 * SAMPLE_RATE)
 
+    @property
+    def audio_seconds(self) -> float:
+        """Só o áudio dos arquivos, sem o silêncio inserido entre eles."""
+        return sum(end - start for start, end, _name in self.parts)
+
+    def part_index(self, t: float) -> int | None:
+        """Índice do arquivo a que um disparo em `t` pertence (ver `locate`)."""
+        prev = None
+        for k, (start, _end, _name) in enumerate(self.parts):
+            if start > t:
+                break
+            prev = k
+        if prev is not None and prev > 0 and t - self.parts[prev][0] < HIT_TAIL_S:
+            if t <= self.parts[prev - 1][1] + HIT_TAIL_S:
+                return prev - 1
+        return prev
+
     def locate(self, t: float) -> str:
         """"arquivo @ segundo" de um disparo. A detecção conclui até
         `HIT_TAIL_S` depois do áudio que a causou, então um disparo logo no
         começo de um arquivo, colado no fim do anterior, é atribuído ao
         anterior (senão o --top apontaria o trecho errado para ouvir)."""
-        prev = None
-        for k, (start, end, name) in enumerate(self.parts):
-            if start > t:
-                break
-            prev = k
-        if prev is None:
+        k = self.part_index(t)
+        if k is None:
             return f"{self.label} @ {t:.1f}s"
-        start, _end, name = self.parts[prev]
-        if prev > 0 and t - start < HIT_TAIL_S:
-            p_start, p_end, p_name = self.parts[prev - 1]
-            if t <= p_end + HIT_TAIL_S:
-                return f"{p_name} @ {t - p_start:.1f}s (fim)"
-        return f"{name} @ {t - start:.1f}s"
+        start, end, name = self.parts[k]
+        return f"{name} @ {t - start:.1f}s" + (" (fim)" if t > end else "")
 
 
 def list_audio(path: Path) -> list[Path]:
@@ -140,8 +153,18 @@ def read_audio(path: Path) -> bytes:
     return samples.astype("<i2").tobytes()
 
 
+# Nível do "silêncio" inserido entre arquivos (RMS em LSB de PCM16, ~-60 dBFS):
+# piso de ruído de sala, não zero digital. Com zeros o PCAN do frontend sobe o
+# ganho no vazio e toda retomada de fala vira um ataque exagerado — medido:
+# o FLEURS com 2 s de zeros entre frases dava o dobro de disparos de 0,2 s de
+# zeros. Nenhum microfone real entrega zero digital.
+GAP_NOISE_RMS = 30.0
+
+
 def silence(seconds: float) -> bytes:
-    return b"\x00\x00" * int(seconds * SAMPLE_RATE)
+    rng = np.random.default_rng(0)
+    noise = rng.normal(0.0, GAP_NOISE_RMS, int(seconds * SAMPLE_RATE))
+    return np.clip(np.round(noise), -32768, 32767).astype("<i2").tobytes()
 
 
 def load_stream(spec: str, *, positive: bool) -> Stream:
@@ -158,7 +181,7 @@ def load_stream(spec: str, *, positive: bool) -> Stream:
     if positive and expected is None and not path.is_dir():
         raise SystemExit(f"--positive {spec}: passe um diretório (um clipe por arquivo) ou arquivo:N")
     per_clip = positive and expected is None
-    before, after = (POS_PAD_BEFORE_S, POS_PAD_AFTER_S) if per_clip else (0.0, JOIN_GAP_S)
+    before, after = (POS_PAD_BEFORE_S, POS_PAD_AFTER_S) if per_clip else (0.0, NEG_GAP_S)
 
     pcm = bytearray()
     parts = []
@@ -255,8 +278,8 @@ def evaluate(args: argparse.Namespace) -> dict:
         n = s.expected if s.expected is not None else len(s.parts)
         log(f"[positivo] {s.label}: {n} repetição(ões), {s.seconds:.0f}s")
     for s in negatives:
-        log(f"[negativo] {s.label}: {len(s.parts)} arquivo(s), {s.seconds / 60:.1f} min")
-    neg_hours = sum(s.seconds for s in negatives) / 3600.0
+        log(f"[negativo] {s.label}: {len(s.parts)} arquivo(s), {s.audio_seconds / 60:.1f} min")
+    neg_hours = sum(s.audio_seconds for s in negatives) / 3600.0
 
     report = {"cutoffs": cutoffs, "negative_hours": round(neg_hours, 3), "models": {}}
     for model_path in args.model:
@@ -275,9 +298,13 @@ def evaluate(args: argparse.Namespace) -> dict:
             false_total = 0
             for s in negatives:
                 hits = replay(*outs[id(s)], cutoff)
+                hours = s.audio_seconds / 3600.0
                 row["negatives"][s.label] = {
                     "false": len(hits),
-                    "minutes": round(s.seconds / 60, 2),
+                    "false_per_hour": round(len(hits) / hours, 2) if hours else None,
+                    "files_with_false": len({s.part_index(t) for t, _m in hits}),
+                    "files": len(s.parts),
+                    "minutes": round(s.audio_seconds / 60, 2),
                     "where": [{"at": s.locate(t), "mean": round(m, 4)} for t, m in hits],
                 }
                 false_total += len(hits)
@@ -304,7 +331,10 @@ def print_report(report: dict, *, top: int, top_cutoff: float) -> None:
         for row in rows:
             recall = f"{row['hits']}/{row['repetitions']} {100 * row['recall']:.0f}%" if row["repetitions"] else "-"
             fph = f"{row['false_per_hour']:.1f}" if row["false_per_hour"] is not None else "-"
-            detail = ", ".join(f"{k}={v['false']}" for k, v in row["negatives"].items())
+            detail = ", ".join(
+                f"{k}={v['false']}" + (f" ({v['files_with_false']}/{v['files']} arq.)" if v["files"] > 1 else "")
+                for k, v in row["negatives"].items()
+            )
             if row["stray_in_positives"]:
                 detail += f" (+{row['stray_in_positives']} fora de hora nos positivos)"
             print(f"{row['cutoff']:>7} | {recall:>12} | {row['false']:>6} | {fph:>8} | {detail}")

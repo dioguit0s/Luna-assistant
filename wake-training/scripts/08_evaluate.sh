@@ -16,6 +16,10 @@ set -euo pipefail
 cd /work
 
 BASELINE="${EVAL_BASELINE:-hey_luna_ptbr.tflite}"
+if [ -n "${EVAL_BASELINE:-}" ] && [ ! -f "/models/$BASELINE" ]; then
+  echo "EVAL_BASELINE=$EVAL_BASELINE não existe em luna-firmware/models/" >&2
+  exit 1
+fi
 args=()
 [ -f hey_luna.tflite ] && args+=(--model /work/hey_luna.tflite)
 [ -f "/models/$BASELINE" ] && args+=(--model "/models/$BASELINE")

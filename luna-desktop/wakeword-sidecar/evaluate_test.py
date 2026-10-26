@@ -86,6 +86,11 @@ class LocateTest(unittest.TestCase):
 
     def test_hit_right_after_previous_file_is_attributed_to_it(self):
         self.assertEqual(self.s.locate(10.5), "a.wav @ 10.5s (fim)")
+        self.assertEqual(self.s.part_index(10.5), 0)
+        self.assertEqual(self.s.part_index(15.0), 1)
+
+    def test_audio_seconds_excludes_inserted_silence(self):
+        self.assertAlmostEqual(self.s.audio_seconds, 19.8)
 
 
 if __name__ == "__main__":

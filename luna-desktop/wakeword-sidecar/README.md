@@ -219,8 +219,8 @@ reaplica o detector para cada cutoff:
 Só vale como régua o áudio que o modelo não viu no treino. O `wake-training` gera dois
 conjuntos assim (`./run.sh ptbr_speech` e `./run.sh hard_negatives`) e roda este script com
 `./run.sh evaluate` — ver `wake-training/README.md`, "Critério de aceite" e "Diagnóstico de
-2026-10-26": em 4,6 h de FLEURS pt-BR, o `hey_luna_ptbr` deu 7,4 falsos/hora em 0,99 e 5,0 em
-0,995, com média 0,99+ nos disparos. A sensibilidade "RÍGIDA" do painel ameniza, mas não
+2026-10-26": em 4,6 h de FLEURS pt-BR, o `hey_luna_ptbr` deu 12,6 falsos/hora em 0,99 e 9,3
+em 0,995, com média 0,99+ nos disparos. A sensibilidade "RÍGIDA" do painel ameniza, mas não
 resolve: o conserto é retreinar.
 
 ## Testes

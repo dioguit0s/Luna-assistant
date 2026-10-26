@@ -35,20 +35,23 @@ de TV, mas 1/10 no `hey-luna.wav` real — **descartado**, o firmware seguiu com
 `./run.sh train`, ver "Treino em rodadas"), os positivos reais e as vozes pt-BR (ver "Positivos
 reais") e o "Critério de aceite".
 
-### Diagnóstico de 2026-10-26: o `hey_luna_ptbr` dispara sozinho ~7 vezes por hora
+### Diagnóstico de 2026-10-26: o `hey_luna_ptbr` dispara sozinho 7 a 13 vezes por hora
 
 Medido com `../luna-desktop/wakeword-sidecar/evaluate.py` (ver "Critério de aceite") em áudio
 que o modelo **nunca** viu: 4,6 h de fala pt-BR lida do FLEURS (`dev` + `test`, 1305 frases de
-falantes variados) e 60 frases confundíveis sintetizadas fora do treino.
+falantes variados, com 2 s de ruído de sala entre as frases) e 56 frases confundíveis sintetizadas
+fora do treino (o hold-out do `hard_negatives`).
 
-| cutoff | recall `hey-luna.wav` | falsos/h (FLEURS) | confundíveis (de 60) |
+| cutoff | recall `hey-luna.wav` | falsos/h (FLEURS) | confundíveis que disparam (de 56) |
 |---|---|---|---|
-| 0,97 | 11/11 | 14,1 | 5 |
-| 0,99 (firmware/desktop hoje) | 11/11 | 7,4 | 4 |
-| 0,995 ("RÍGIDA" no painel) | 11/11 | 5,0 | 3 |
+| 0,97 | 11/11 | 21,2 | 18 |
+| 0,99 (firmware/desktop hoje) | 11/11 | 12,6 | 15 |
+| 0,995 ("RÍGIDA" no painel) | 11/11 | 9,3 | 13 |
 
-- **Não é o limiar**: os falsos disparam com média 0,99–1,0. Subir para 0,995 só tira um terço
+- **Não é o limiar**: os falsos disparam com média 0,99–1,0. Subir para 0,995 só tira um quarto
   deles, e nenhum cutoff da varredura chega perto de zero.
+- **Pausa antes da fala piora**: emendando as frases do FLEURS com 0,2 s de intervalo, eram
+  7,4/h em 0,99; com 2 s de pausa (como numa sala), 12,6/h. Bate com o padrão abaixo.
 - **A medição antiga era otimista**: os "2 disparos em 22 min de TV" foram medidos no mesmo áudio
   usado como negativo no treino.
 - **O padrão dos disparos**: 71% caem nos primeiros 3,5 s de uma frase (trecho que é só 28% do
@@ -171,7 +174,9 @@ O relatório completo fica em `work/eval_report.json`. `work/eval_negatives/` s�
 | qualquer outra pasta | gravações da casa (TV, conversa) que você **não** pôs em `custom_negatives_wav/` — é a régua mais fiel ao uso real |
 
 O novo só substitui o atual se, no **mesmo cutoff**, tiver falsos/hora claramente menor sem perder
-recall no `hey-luna.wav` nem no hold-out. Depois disso ainda falta o teste com o microfone do
+recall no `hey-luna.wav` nem no hold-out. O hold-out é o portão de verdade: ele é contado clipe a
+clipe, enquanto o `hey-luna.wav:11` só conta detecções (um disparo fora de hora ali passa por
+acerto). Depois disso ainda falta o teste com o microfone do
 satélite (ver "Depois do treino") — os números aqui são de áudio de arquivo.
 
 Fora do Docker (Windows, venv do sidecar), o mesmo comando:
@@ -185,7 +190,7 @@ cd ../luna-desktop/wakeword-sidecar
 
 Histórico (2026-09-28, antes desta régua): o `hey_luna_ptbr` entrou por acertar 11/11 no
 `hey-luna.wav` (contra 3/11 do `hey_luna_trained`) e 13/14 no hold-out, com "2 disparos em 22 min
-de TV" — TV que estava no treino. Na régua nova, os dois modelos ficam em 7–11 falsos/hora em 0,99
+de TV" — TV que estava no treino. Na régua nova, os dois modelos ficam em 12–18 falsos/hora em 0,99
 (ver "Diagnóstico de 2026-10-26"). Ele saiu da rodada 9 de 10 (a de maior `average viable
 recall`; as rodadas oscilaram de 5 a 389 falsos-positivos/hora estimados).
 

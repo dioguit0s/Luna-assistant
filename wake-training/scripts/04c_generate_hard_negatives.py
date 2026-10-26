@@ -4,8 +4,8 @@
 Piper pt-BR e na voz inglesa multi-falante do `01_generate_samples.sh`.
 
 Motivação (medido em 2026-10-26 com `luna-desktop/wakeword-sidecar/evaluate.py`):
-o `hey_luna_ptbr` dispara ~9 vezes por hora em fala pt-BR que nunca viu
-(FLEURS pt_br, 79 min, cutoff 0.99), com média 0.99+ — não é limiar, é o
+o `hey_luna_ptbr` dispara 7 a 13 vezes por hora em fala pt-BR que nunca viu
+(FLEURS pt_br dev+test, 4,6 h, cutoff 0.99), com média 0.99+ — não é limiar, é o
 modelo convicto. A maioria dos disparos cai 1-3 s depois do começo de uma
 frase ("A culinária maiorquina...", "NHK também disse...", "Ele usa..."): o
 padrão "silêncio, depois começo de fala" é exatamente o formato de TODO
@@ -25,8 +25,10 @@ As frases (`PTBR_PHRASES`/`EN_PHRASES`) misturam dois tipos:
 - formato: frases do dia a dia ditas perto do satélite ("liga a TV", "bom
   dia") — o começo de fala sem a wake word.
 NENHUMA pode ser uma variação aceitável da wake word ("ei Luna", "rei Luna",
-"e aí Luna") — isso ensinaria o modelo a rejeitar o próprio "hey luna". Elas
-estão nos positivos de `01b_generate_ptbr_samples.py`.
+"e aí Luna") nem um par quase mínimo dela ("Ei, Luana", "hey Lunar") — com
+ruído a -5 dB e reverb, isso vira o próprio "hey luna" rotulado negativo e
+derruba o recall em voz real. As variações aceitáveis estão nos positivos de
+`01b_generate_ptbr_samples.py`.
 
 Hold-out: 1 de cada HOLDOUT_EVERY frases pt-BR nunca entra no treino — é
 sintetizada (uma vez por voz) em /work/eval_negatives/confundiveis_sinteticos/,
@@ -63,15 +65,16 @@ EN_GENERATOR = "/opt/piper-sample-generator/models/en_US-libritts_r-medium.pt"
 PTBR_PHRASES = [
     # confundíveis — sons de "ei", "lu", "na", "uma"
     "Lua", "A lua", "Olha a lua", "Lua cheia", "Ei, lua", "Uma", "É uma", "Tem uma",
-    "Nenhuma", "Alguma", "Uma luz", "Luana", "Ei, Luana", "Luciana", "Juliana",
+    "Nenhuma", "Alguma", "Uma luz", "Luana", "Luciana", "Juliana",
     "Bruna", "Ei, Bruna", "Helena", "Ei, Helena", "Lena", "Ei, Lena", "Lúcia",
     "Ei, Lúcia", "Luíza", "Lula", "Ei, Lula", "O Lula", "Lunar", "Coluna",
     "Lacuna", "Fortuna", "Duna", "Lona", "Luva", "Lume", "Menina", "Vacina",
     "Meia-lua", "Alumínio", "Rei", "O rei", "Hein?", "Ei", "Ei, você", "Ei, psiu",
     "Oi", "Olá", "Ei, uma pergunta", "Ela é uma", "Então", "Leva uma",
-    # "Luna" sem o "ei" na frente. Poucas e no meio de frase: é o que mais
-    # perto chega da wake word, e peso demais aqui deixa o modelo surdo.
-    "A Luna", "Cadê a Luna?", "Falei com a Luna", "A Luna é bonita",
+    # "Luna" sem o "ei" na frente. Só duas, e nenhuma terminando em "a Luna"
+    # (a uma vogal de "ei Luna" no fim da janela): é o que mais perto chega
+    # da wake word, e peso demais aqui deixa o modelo surdo.
+    "A Luna dormiu", "A Luna é bonita",
     # formato — começo de fala comum, sem nada parecido com a wake word
     "Liga a TV", "Desliga a luz", "Acende a luz", "Que horas são?", "Bom dia",
     "Boa noite", "Tudo bem?", "Tô com fome", "Vamos embora", "Cadê o controle?",
@@ -79,9 +82,11 @@ PTBR_PHRASES = [
     "Que calor", "Já volto", "Onde você está?", "Olha só", "Deixa comigo",
 ]
 EN_PHRASES = [
+    # Sem "Luna"/"lunar" (par quase mínimo, ver docstring) e sem "okay Nabu"
+    # (o fixtures/okay-nabu.wav é régua do `evaluate`).
     "hey", "hey you", "hey Lou", "hey Laura", "hey Lena", "hey look", "hey listen",
-    "hello", "honey", "Luna", "lunar", "hey Luke", "hey Lucy", "hey Lunar",
-    "hey Google", "Alexa", "okay Nabu", "hey Siri", "good morning", "turn on the lights",
+    "hello", "honey", "hey Luke", "hey Lucy", "hey Google", "Alexa", "hey Siri",
+    "good morning", "turn on the lights", "hey there", "hey Lisa", "hey Logan", "hey man",
 ]
 
 HOLDOUT_EVERY = 5
@@ -161,30 +166,42 @@ def synth_ptbr(out_dir: str, eval_dir: str) -> int:
 
 
 def synth_en(out_dir: str) -> int:
-    # O gerador libritts sorteia falantes a cada amostra — é o que dá variedade
-    # de voz aqui. Uma frase por chamada: com várias, ele numera os arquivos
-    # 0.wav, 1.wav... e uma frase sobrescreveria a outra.
-    n = 0
-    for p, text in enumerate(EN_PHRASES):
-        tmp = os.path.join(out_dir, f"_tmp_{p:03d}")
-        shutil.rmtree(tmp, ignore_errors=True)
-        subprocess.run(
-            [
-                sys.executable, "-m", "piper_sample_generator", text,
-                "--model", EN_GENERATOR,
-                "--max-samples", str(EN_PER_PHRASE),
-                "--batch-size", "20",
-                "--output-dir", tmp,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-        )
-        for i, f in enumerate(sorted(glob.glob(os.path.join(tmp, "*.wav")))):
-            os.rename(f, os.path.join(out_dir, f"en_{p:03d}_{i:03d}.wav"))
-            n += 1
-        shutil.rmtree(tmp)
-    print(f"[hard_negatives] {n} clipes em inglês ({len(EN_PHRASES)} frases)")
-    return n
+    # Uma chamada só, com as frases num arquivo: o gerador cicla o texto a
+    # cada amostra e os falantes/settings de forma determinística a partir do
+    # zero em cada processo. Uma chamada por frase repetiria as mesmas 40
+    # mesclas de falante (e os mesmos settings) em todas as frases; numa só,
+    # a amostra i é a frase i % len(EN_PHRASES) e cada frase pega falantes
+    # diferentes.
+    tmp = os.path.join(out_dir, "_tmp_en")
+    shutil.rmtree(tmp, ignore_errors=True)
+    os.makedirs(tmp)
+    phrases_txt = os.path.join(tmp, "frases.txt")
+    with open(phrases_txt, "w", encoding="utf-8") as f:
+        f.write("\n".join(EN_PHRASES) + "\n")
+    total = len(EN_PHRASES) * EN_PER_PHRASE
+    subprocess.run(
+        [
+            sys.executable, "-m", "piper_sample_generator", phrases_txt,
+            "--model", EN_GENERATOR,
+            "--max-samples", str(total),
+            "--batch-size", "20",
+            "--length-scales", *map(str, LENGTH_SCALES),
+            "--output-dir", tmp,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    wavs = glob.glob(os.path.join(tmp, "*.wav"))
+    # O __main__ do gerador não repassa o código de saída (`main()` sem
+    # sys.exit): erro de configuração sai com 0 e só aparece aqui.
+    if len(wavs) != total:
+        sys.exit(f"[hard_negatives] gerador em inglês produziu {len(wavs)} de {total} clipes — ver log acima")
+    for f in wavs:
+        i = int(os.path.splitext(os.path.basename(f))[0])
+        os.rename(f, os.path.join(out_dir, f"en_{i % len(EN_PHRASES):03d}_{i:04d}.wav"))
+    shutil.rmtree(tmp)
+    print(f"[hard_negatives] {total} clipes em inglês ({len(EN_PHRASES)} frases)")
+    return total
 
 
 expected = len(VOICES) * len(TRAIN_PTBR) * PTBR_PER_PHRASE_PER_VOICE + len(EN_PHRASES) * EN_PER_PHRASE
