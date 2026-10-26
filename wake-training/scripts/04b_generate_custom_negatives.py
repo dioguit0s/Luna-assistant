@@ -10,13 +10,16 @@ cutoff por acidente — ver a seção "Se o modelo dispara demais" no README.
 
 Entrada esperada, em `/work/custom_negatives_wav/` — qualquer WAV (ou `.WAV`),
 mono ou estéreo, qualquer sample rate (o `Clips` do microWakeWord reamostra e
-converte para mono), em dois grupos:
+converte para mono), em grupos:
 
 - `fundo/` (ou soltos na raiz): TV, rádio, conversa de fundo em pt-BR. Costuma
   ser muito áudio (minutos) e pouco específico.
 - `confundiveis/`: as palavras/frases parecidas com "hey luna" ("lua", "uma",
   "luna" sem o "hey", "e aí, luna"). Costuma ser pouco áudio (segundos), mas é
   o que mais importa.
+- `fala/`: fala pt-BR lida de corpus público (FLEURS), baixada por
+  `04d_download_ptbr_speech.py` — horas de áudio, dezenas de falantes. Não é
+  para gravações próprias: o 04d apaga e rebaixa a pasta.
 
 Os grupos viram diretórios de features separados, com `sampling_weight`
 próprio em `05_write_training_config.py` — no mesmo diretório, 20 min de TV
@@ -60,6 +63,7 @@ LEGACY_OUT = os.path.join(OUT_ROOT, "custom_ptbr")
 GROUPS = {
     "fundo": (3.0, 3.0),
     "confundiveis": (1.5, 0.5),
+    "fala": (3.0, 3.0),
 }
 # Janelas menores que isto são descartadas: abaixo de ~120 ms (10 frames de
 # feature) o SpectrogramGeneration quebra com ValueError.

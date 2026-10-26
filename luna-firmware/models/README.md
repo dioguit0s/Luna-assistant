@@ -37,6 +37,12 @@ satélite (`WAKE_PROB_CUTOFF` em `include/config.h`, hoje 0,99) precisa ser cali
 `raw_max` com `WAKE_DEBUG`, e o teste de ≥15 min de TV/conversa sem disparar vale de novo
 (o trecho de TV acima foi visto no treino como negativo, então é otimista).
 
+⚠️ **Falso-positivo confirmado fora do treino (2026-10-26).** Em 4,6 h de fala pt-BR que o
+modelo nunca viu (FLEURS), o `hey_luna_ptbr` dispara 7,4 vezes por hora em 0,99 (5,0 em 0,995;
+o `hey_luna_trained` fica em 10,6 em 0,99), sempre com média 0,99+ — subir o cutoff não resolve.
+Diagnóstico e o retreino proposto em
+[`../../wake-training/README.md`](../../wake-training/README.md) ("Diagnóstico de 2026-10-26").
+
 Histórico: os três `hey_luna*` da comunidade (`hey_luna.tflite`, `_v2`, `_v3`) são fracos e não
 disparam neste hardware (INMP441) — só o `okay_nabu` (modelo oficial) provou que o hardware está
 bom. O `hey_luna_trained` (2026-07-25, só positivos sintéticos em inglês) ficou com recall baixo

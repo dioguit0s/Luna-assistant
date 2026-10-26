@@ -54,6 +54,12 @@ RUN git clone --depth 1 https://github.com/kahrendt/microWakeWord /opt/microWake
 # sem isto o treino quebra na primeira avaliação com TBNotInstalledError.
 RUN pip install tensorboard
 
+# ai-edge-litert: o runtime do luna-desktop/wakeword-sidecar (ADR 004), para o
+# `./run.sh evaluate` rodar o evaluate.py dele aqui dentro com a mesma
+# inferência do sidecar. pymicro-features (o outro requisito) já vem com o
+# microWakeWord.
+RUN pip install "ai-edge-litert>=2.1.6"
+
 RUN git clone --depth 1 https://github.com/rhasspy/piper-sample-generator /opt/piper-sample-generator
 
 # Voz TTS (libritts) usada para gerar as amostras da wake word.

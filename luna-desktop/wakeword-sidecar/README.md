@@ -191,6 +191,38 @@ subiu para 0.99 (em 0.97 os acertos são os mesmos e a TV dispara 3 vezes em
 vez de 2). O recall no `hey-luna.wav` não muda de 0.97 a 0.995, então a
 sensibilidade do painel pode ir para "RÍGIDA" (0.995) se ainda disparar à toa.
 
+## Régua de falso-positivo: `evaluate.py`
+
+`wake_sidecar.py --wav` conta detecções num arquivo, num cutoff. Para decidir se um modelo
+está bom, o número que importa é **falsos disparos por hora em fala comum** — e esse só
+aparece com horas de áudio. `evaluate.py` usa o mesmo caminho deste sidecar
+(`MicroFeatures` + `LoadedModel` + `WakeDetector`), roda cada áudio pelo modelo uma vez e
+reaplica o detector para cada cutoff:
+
+```bash
+.venv\Scripts\python.exe evaluate.py ^
+  --model ..\..\luna-firmware\models\hey_luna_ptbr.tflite ^
+  --model ..\..\luna-firmware\models\hey_luna_trained.tflite ^
+  --positive fixtures\hey-luna.wav:11 ^
+  --negative C:\caminho\para\fala-ptbr ^
+  --negative fixtures\okay-nabu.wav
+```
+
+- `--positive DIR` (um clipe por repetição) ou `--positive arquivo:N` (N repetições num arquivo).
+- `--negative` arquivo ou diretório (recursivo; `.wav` PCM16 ou float, `.ogg`/`.opus` do
+  WhatsApp, `.flac`, `.mp3`), emendado num fluxo contínuo, como o mic ouviria.
+- `--top N` lista onde os piores falsos aconteceram (arquivo + segundo) — ouça o trecho; se
+  for uma frase que a casa fala, ela vai para o treino
+  (`wake-training/work/custom_negatives_wav/confundiveis/` ou `PTBR_PHRASES` do `04c`).
+- `--json` grava o relatório completo.
+
+Só vale como régua o áudio que o modelo não viu no treino. O `wake-training` gera dois
+conjuntos assim (`./run.sh ptbr_speech` e `./run.sh hard_negatives`) e roda este script com
+`./run.sh evaluate` — ver `wake-training/README.md`, "Critério de aceite" e "Diagnóstico de
+2026-10-26": em 4,6 h de FLEURS pt-BR, o `hey_luna_ptbr` deu 7,4 falsos/hora em 0,99 e 5,0 em
+0,995, com média 0,99+ nos disparos. A sensibilidade "RÍGIDA" do painel ameniza, mas não
+resolve: o conserto é retreinar.
+
 ## Testes
 
 ```bash
@@ -202,6 +234,9 @@ ou, do `luna-desktop/`:
 ```bash
 npm run test:wakeword
 ```
+
+`evaluate_test.py` cobre a parte pura do `evaluate.py` (replay idêntico ao detector ao
+vivo, contagem de acertos, atribuição do disparo ao arquivo certo).
 
 `detector_test.py` é puro `unittest` + numpy — sem tflite, sem
 pymicro-features, sem I/O. Cobre exatamente as sutilezas do firmware que um

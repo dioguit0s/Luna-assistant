@@ -35,6 +35,31 @@ de TV, mas 1/10 no `hey-luna.wav` real — **descartado**, o firmware seguiu com
 `./run.sh train`, ver "Treino em rodadas"), os positivos reais e as vozes pt-BR (ver "Positivos
 reais") e o "Critério de aceite".
 
+### Diagnóstico de 2026-10-26: o `hey_luna_ptbr` dispara sozinho ~7 vezes por hora
+
+Medido com `../luna-desktop/wakeword-sidecar/evaluate.py` (ver "Critério de aceite") em áudio
+que o modelo **nunca** viu: 4,6 h de fala pt-BR lida do FLEURS (`dev` + `test`, 1305 frases de
+falantes variados) e 60 frases confundíveis sintetizadas fora do treino.
+
+| cutoff | recall `hey-luna.wav` | falsos/h (FLEURS) | confundíveis (de 60) |
+|---|---|---|---|
+| 0,97 | 11/11 | 14,1 | 5 |
+| 0,99 (firmware/desktop hoje) | 11/11 | 7,4 | 4 |
+| 0,995 ("RÍGIDA" no painel) | 11/11 | 5,0 | 3 |
+
+- **Não é o limiar**: os falsos disparam com média 0,99–1,0. Subir para 0,995 só tira um terço
+  deles, e nenhum cutoff da varredura chega perto de zero.
+- **A medição antiga era otimista**: os "2 disparos em 22 min de TV" foram medidos no mesmo áudio
+  usado como negativo no treino.
+- **O padrão dos disparos**: 71% caem nos primeiros 3,5 s de uma frase (trecho que é só 28% do
+  áudio) — "silêncio → começo de fala". É o formato de todo positivo do treino (clipe curto no fim
+  da janela) e de quase nenhum negativo (recortes aleatórios de fala contínua). E nas
+  confundíveis o que dispara é "ei" + algo terminado em "-na"/"-a" ("Ei, Helena", "Ei, Lula",
+  "Ei, lua", "Ei, Bruna") e "-uma" ("Nenhuma").
+
+Daí as três etapas novas — `hard_negatives`, `ptbr_speech` e `evaluate` (ver "Uso" e "Se o modelo
+dispara demais") — e o critério de aceite passar a ser falsos/hora em áudio fora do treino.
+
 ## Requisitos
 
 - Docker Desktop (o Dockerfile fixa Python 3.10 + as versões que realmente funcionam
@@ -59,16 +84,20 @@ Ou etapa por etapa (útil para rodar o treino em background sem travar o termina
 ./run.sh ptbr_samples        # +480 sintéticas com 4 vozes Piper pt-BR (baixa as vozes)
 ./run.sh augdata             # baixa RIR/AudioSet/FMA para augmentation
 ./run.sh negatives           # baixa os datasets negativos pré-processados
-./run.sh custom_negatives    # opcional: negativos pt-BR próprios, ver seção abaixo
+./run.sh ptbr_speech         # baixa ~2,5 GB de fala pt-BR (FLEURS): treino + régua de avaliação
+./run.sh custom_negatives    # negativos pt-BR: o FLEURS acima + gravações próprias, ver seção abaixo
+./run.sh hard_negatives      # frases confundíveis sintéticas ("lua", "ei, Lúcia"...) — precisa do augdata
 ./run.sh features            # aplica augmentation e gera os espectrogramas dos sintéticos
 ./run.sh real_positives      # opcional: "hey luna" gravado de verdade, ver seção abaixo
 ./run.sh train               # treina em rodadas (a etapa longa)
 ./run.sh export              # copia o .tflite final e escreve o manifesto JSON
+./run.sh evaluate            # compara com o modelo do firmware em áudio fora do treino
 ```
 
 Cada etapa pula sozinha se a saída já existir — pode interromper e retomar (exceto
-`custom_negatives` e `real_positives`, que sempre regeneram a partir dos áudios, e `train`,
-que retoma da última rodada concluída). `ptbr_samples` pula se já houver
+`custom_negatives`, `hard_negatives` e `real_positives`, que sempre regeneram as features a
+partir dos áudios, e `train`, que retoma da última rodada concluída). `ptbr_speech` e a síntese do
+`hard_negatives` pulam se já tiverem rodado até o fim. `ptbr_samples` pula se já houver
 `generated_samples/ptbr_*.wav`; `features` não pula — rode de novo depois de `ptbr_samples`.
 
 ### Treino em rodadas
@@ -120,28 +149,45 @@ estava rotulada negativa. Gravações reais corrigem isso:
 
 ## Critério de aceite
 
-Antes de trocar o modelo do firmware, compare o novo com o atual pelo sidecar do
-`luna-desktop` (mesmo frontend de features do firmware; o evento `eof` traz `detections` e
-`max_mean_prob`):
+Antes de trocar o modelo do firmware, rode `./run.sh evaluate`. Ele roda
+`../luna-desktop/wakeword-sidecar/evaluate.py` (mesmo frontend de features e mesma lógica de
+disparo do firmware) com o modelo novo (`work/hey_luna.tflite`) e o atual do firmware
+(`EVAL_BASELINE`, padrão `hey_luna_ptbr.tflite`), varre os cutoffs e imprime, por modelo:
+
+- **recall** no hold-out das gravações reais (`work/real_positives_clips/holdout/`, um clipe por
+  repetição) e no `fixtures/hey-luna.wav` (11 "hey luna" pelo mic do desktop — o mesmo caminho de
+  áudio do uso real);
+- **falsos disparos** em cada conjunto de `work/eval_negatives/` e no `fixtures/okay-nabu.wav`, e
+  o total em **falsos/hora**;
+- os piores falsos em 0,99 (arquivo + segundo), para ouvir o que confundiu o modelo.
+
+O relatório completo fica em `work/eval_report.json`. `work/eval_negatives/` só pode ter áudio que
+**não** entra no treino:
+
+| Conjunto | De onde vem |
+|---|---|
+| `fleurs_ptbr/` | `./run.sh ptbr_speech` — FLEURS `dev`+`test`, 4,6 h (o `train` vai para o treino) |
+| `confundiveis_sinteticos/` | `./run.sh hard_negatives` — 1 de cada 5 frases confundíveis, nunca treinadas |
+| qualquer outra pasta | gravações da casa (TV, conversa) que você **não** pôs em `custom_negatives_wav/` — é a régua mais fiel ao uso real |
+
+O novo só substitui o atual se, no **mesmo cutoff**, tiver falsos/hora claramente menor sem perder
+recall no `hey-luna.wav` nem no hold-out. Depois disso ainda falta o teste com o microfone do
+satélite (ver "Depois do treino") — os números aqui são de áudio de arquivo.
+
+Fora do Docker (Windows, venv do sidecar), o mesmo comando:
 
 ```bash
 cd ../luna-desktop/wakeword-sidecar
-.venv/Scripts/python.exe wake_sidecar.py --model ../../wake-training/work/hey_luna.tflite --threshold 0.97 --wav fixtures/hey-luna.wav
+.venv/Scripts/python.exe evaluate.py --model ../../wake-training/work/hey_luna.tflite \
+  --model ../../luna-firmware/models/hey_luna_ptbr.tflite \
+  --positive fixtures/hey-luna.wav:11 --negative ../../wake-training/work/eval_negatives/fleurs_ptbr
 ```
 
-| Áudio | O que mede | `hey_luna_trained` (anterior) | `hey_luna_ptbr` (atual, 2026-09-28) |
-|---|---|---|---|
-| `fixtures/hey-luna.wav` | 11 "hey luna" reais pelo mic do desktop — **o teste que mais importa** (mesmo caminho de áudio do uso real) | 3/11 em 0,97; 7/11 em 0,7 | 11/11 em 0,97–0,995 |
-| `work/real_positives_holdout.wav` | hold-out das gravações reais (celular, perto do mic — mais fácil) | 13/14 em 0,97 | 13/14 em 0,99 |
-| `work/custom_negatives_wav/fundo/*.wav` | disparos falsos em 22 min de TV pt-BR (visto no treino — otimista) | 2 em 0,97 | 2 em 0,99; 3 em 0,97 |
-| `fixtures/okay-nabu.wav` | outra wake word (8 repetições) — não deveria disparar | 2 em 0,97 | 1 em 0,99 |
-
-Varra o cutoff (0,995 / 0,99 / 0,97 / 0,9 / 0,8 / 0,7) — o valor do manifesto não vale para o
-mic real. O `hey_luna_ptbr` saiu da rodada 9 de 10 do treino de 2026-09-28 (a de maior
-`average viable recall`; as rodadas oscilaram de 5 a 389 falsos-positivos/hora estimados).
-O novo só substitui o atual se acertar mais no `hey-luna.wav` sem disparar mais nos
-negativos; depois disso, ainda falta o teste com o microfone do satélite (ver "Depois do
-treino").
+Histórico (2026-09-28, antes desta régua): o `hey_luna_ptbr` entrou por acertar 11/11 no
+`hey-luna.wav` (contra 3/11 do `hey_luna_trained`) e 13/14 no hold-out, com "2 disparos em 22 min
+de TV" — TV que estava no treino. Na régua nova, os dois modelos ficam em 7–11 falsos/hora em 0,99
+(ver "Diagnóstico de 2026-10-26"). Ele saiu da rodada 9 de 10 (a de maior `average viable
+recall`; as rodadas oscilaram de 5 a 389 falsos-positivos/hora estimados).
 
 ## Depois do treino
 
@@ -212,7 +258,30 @@ Ordem recomendada (mais barato → mais caro):
      confundiveis 5.0) — nenhuma mudança manual de config necessária. Apagar os WAVs e rodar a etapa de novo
      remove as features, e o próximo treino volta a não usá-las.
    - Retreine (`./run.sh train`) e reexporte (`./run.sh export`).
-3. **Se ainda disparar**: considerar ligar `time_mask_*`/`freq_mask_*` (SpecAugment,
+3. **Negativos com o formato do positivo** (`./run.sh hard_negatives`, ver o diagnóstico de
+   2026-10-26): frases curtas sintetizadas com as 4 vozes Piper pt-BR e a voz inglesa
+   multi-falante, passadas pela mesma augmentation e pela mesma `truncate_start` dos
+   positivos — o modelo deixa de poder separar "hey luna" de "ei, Helena" pelo formato e
+   precisa olhar o conteúdo. Frases em `PTBR_PHRASES`/`EN_PHRASES` do
+   `04c_generate_hard_negatives.py`; para acrescentar uma frase que o `--top` do
+   `evaluate` apontou, edite a lista (a síntese regera sozinha quando a contagem muda).
+   Peso: `HARD_NEGATIVES_WEIGHT` (padrão 3.0, variável de ambiente) — primeiro parâmetro a
+   baixar se o recall cair.
+4. **Mais fala pt-BR de verdade** (`./run.sh ptbr_speech` e depois `custom_negatives`):
+   o `train` do FLEURS (horas de fala lida, dezenas de falantes) vira o grupo `fala`
+   (peso 10.0, o mesmo do `speech` em inglês). Os 22 min de TV continuam no `fundo`.
+5. **Se ainda disparar**: considerar ligar `time_mask_*`/`freq_mask_*` (SpecAugment,
    hoje zerados em `05_write_training_config.py`) ou subir `negative_class_weight`
    (hoje 20) — não testado neste repositório ainda, ver comentários no notebook oficial
    do microWakeWord antes de mexer.
+
+Para um retreino com as etapas novas, a partir de um `work/` que já tem o resto:
+
+```bash
+docker build -t mww-train .              # a imagem ganhou o ai-edge-litert (para o evaluate)
+./run.sh ptbr_speech
+./run.sh custom_negatives
+./run.sh hard_negatives
+mv work/trained_models work/trained_models.hey_luna_ptbr   # treinar do zero, não retomar
+./run.sh train && ./run.sh export && ./run.sh evaluate
+```
