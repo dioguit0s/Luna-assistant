@@ -10,13 +10,16 @@ cutoff por acidente — ver a seção "Se o modelo dispara demais" no README.
 
 Entrada esperada, em `/work/custom_negatives_wav/` — qualquer WAV (ou `.WAV`),
 mono ou estéreo, qualquer sample rate (o `Clips` do microWakeWord reamostra e
-converte para mono), em dois grupos:
+converte para mono), em grupos:
 
 - `fundo/` (ou soltos na raiz): TV, rádio, conversa de fundo em pt-BR. Costuma
   ser muito áudio (minutos) e pouco específico.
 - `confundiveis/`: as palavras/frases parecidas com "hey luna" ("lua", "uma",
   "luna" sem o "hey", "e aí, luna"). Costuma ser pouco áudio (segundos), mas é
   o que mais importa.
+- `fala/`: fala pt-BR lida de corpus público (FLEURS), baixada por
+  `04d_download_ptbr_speech.py` — horas de áudio, dezenas de falantes. Não é
+  para gravações próprias: o 04d apaga e rebaixa a pasta.
 
 Os grupos viram diretórios de features separados, com `sampling_weight`
 próprio em `05_write_training_config.py` — no mesmo diretório, 20 min de TV
@@ -60,7 +63,17 @@ LEGACY_OUT = os.path.join(OUT_ROOT, "custom_ptbr")
 GROUPS = {
     "fundo": (3.0, 3.0),
     "confundiveis": (1.5, 0.5),
+    "fala": (3.0, 3.0),
 }
+# Grupos sem split de validação. A validação do model_train_eval carrega o
+# split inteiro na RAM, e a do `fala` (~530 MB de features, mais que todos os
+# outros grupos juntos) levou a rodada 1 a OOM com --memory=10g em 2026-10-27.
+# Não faz falta: a métrica que escolhe a rodada (average viable recall) mede
+# falsos/h no `validation_ambient` do dinner_party_eval, e a fala pt-BR fora do
+# treino já é medida pelo `./run.sh evaluate` (FLEURS dev+test). Custo: o
+# `Clips` continua separando 10% das janelas para validação, que aqui não vão
+# para lugar nenhum (~1 h do FLEURS train fica fora do treino).
+NO_VALIDATION = {"fala"}
 # Janelas menores que isto são descartadas: abaixo de ~120 ms (10 frames de
 # feature) o SpectrogramGeneration quebra com ValueError.
 MIN_CHUNK_S = 0.5
@@ -155,6 +168,8 @@ for group, chunk_dir in chunk_dirs.items():
     # importa aqui, que é "essa frase pt-BR não deveria disparar".
     shutil.rmtree(tmp_dir, ignore_errors=True)
     splits = {"training": "train", "validation": "validation", "testing": "test"}
+    if group in NO_VALIDATION:
+        del splits["validation"]
     for split, split_name in splits.items():
         split_dir = os.path.join(tmp_dir, split)
         os.makedirs(split_dir, exist_ok=True)

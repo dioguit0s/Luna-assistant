@@ -1,8 +1,9 @@
 #!/bin/bash
 # Orquestra o pipeline inteiro de treino do "Hey Luna" (microWakeWord).
 # Cada etapa é resumível: se já existir a saída, o script da etapa pula
-# (exceto custom_negatives e real_positives, que sempre regeneram a partir dos
-# áudios de entrada, e train, que retoma da última rodada concluída).
+# (exceto custom_negatives, hard_negatives e real_positives, que sempre
+# regeneram as features a partir dos áudios, e train, que retoma da última
+# rodada concluída).
 #
 # Uso:
 #   ./run.sh                 # roda tudo, na ordem
@@ -28,11 +29,15 @@ read -ra DOCKER_EXTRA <<< "${MWW_DOCKER_ARGS:-}"
 # `-e TRAINING_STEPS=500`); o treino em rodadas usa.
 RUN_ENV=()
 
+# Volumes extras para o container (só o `evaluate` usa).
+RUN_VOLS=()
+
 run() {
   echo "=== $1 ==="
   MSYS_NO_PATHCONV=1 docker run --rm ${DOCKER_EXTRA[@]+"${DOCKER_EXTRA[@]}"} ${RUN_ENV[@]+"${RUN_ENV[@]}"} \
     -v "$WORK:/work" \
     -v "$SCRIPTS:/scripts" \
+    ${RUN_VOLS[@]+"${RUN_VOLS[@]}"} \
     "$IMAGE" "${@:2}"
 }
 
@@ -46,6 +51,12 @@ step_negatives()   { run "4/7 negativos"            bash /scripts/04_download_ne
 # "Se o modelo dispara demais" no README. Roda sempre (no-op quando vazia)
 # para não exigir mais um passo manual em "all"; com WAVs, regenera do zero.
 step_custom_negatives() { run "4b/7 negativos pt-BR (opcional)" python3 /scripts/04b_generate_custom_negatives.py; }
+# Negativos difíceis sintéticos ("lua", "ei, Lúcia", "liga a TV"...) com a
+# mesma augmentation dos positivos — ver docstring do 04c. Precisa do augdata.
+step_hard_negatives() { run "4c/7 negativos difíceis" python3 /scripts/04c_generate_hard_negatives.py; }
+# FLEURS pt_br: train vira o grupo `fala` do custom_negatives (rodar
+# custom_negatives depois); dev/test vão para work/eval_negatives/, só régua.
+step_ptbr_speech() { run "4d/7 fala pt-BR (FLEURS)" python3 /scripts/04d_download_ptbr_speech.py; }
 # Opcional: gravações reais de "hey luna" em work/real_positives_wav/ — ver
 # "Positivos reais" no README. No-op sem áudio; com áudio, regenera do zero.
 step_real_positives() { run "3b/7 positivos reais (opcional)" python3 /scripts/03b_generate_real_positives.py; }
@@ -119,6 +130,16 @@ step_train() {
   run "5/7 conversão para .tflite (${best#* })" bash /scripts/06c_export_only.sh
 }
 step_export()      { run "6/7 exportar manifesto" python3 /scripts/07_export_manifest.py; }
+# Compara work/hey_luna.tflite com o modelo do firmware em áudio fora do
+# treino (falsos/hora + recall por cutoff) — ver "Critério de aceite".
+step_evaluate() {
+  RUN_VOLS=(-v "$(cd .. && pwd)/luna-desktop/wakeword-sidecar:/sidecar:ro"
+            -v "$(cd .. && pwd)/luna-firmware/models:/models:ro")
+  RUN_ENV=(-e "EVAL_BASELINE=${EVAL_BASELINE:-}" -e "EVAL_ARGS=${EVAL_ARGS:-}")
+  run "7/7 avaliação" bash /scripts/08_evaluate.sh || { RUN_VOLS=(); RUN_ENV=(); return 1; }
+  RUN_VOLS=()
+  RUN_ENV=()
+}
 
 case "${1:-all}" in
   samples) step_samples ;;
@@ -128,21 +149,27 @@ case "${1:-all}" in
   real_positives) step_real_positives ;;
   negatives) step_negatives ;;
   custom_negatives) step_custom_negatives ;;
+  hard_negatives) step_hard_negatives ;;
+  ptbr_speech) step_ptbr_speech ;;
   train) step_train ;;
   export) step_export ;;
+  evaluate) step_evaluate ;;
   all)
     step_samples
     step_ptbr_samples
     step_augdata
     step_negatives
+    step_ptbr_speech
     step_custom_negatives
+    step_hard_negatives
     step_features
     step_real_positives
     step_train
     step_export
+    step_evaluate
     ;;
   *)
-    echo "Uso: $0 [samples|ptbr_samples|augdata|features|real_positives|negatives|custom_negatives|train|export|all]" >&2
+    echo "Uso: $0 [samples|ptbr_samples|augdata|features|real_positives|negatives|ptbr_speech|custom_negatives|hard_negatives|train|export|evaluate|all]" >&2
     exit 1
     ;;
 esac

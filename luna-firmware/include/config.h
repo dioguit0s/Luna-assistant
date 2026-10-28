@@ -136,25 +136,26 @@
 #define WAKE_WORD_ENABLED 1 // 0 = volta ao open-mic (transmite sempre)
 
 // Frase da wake word gravada no header src/wake/models/hey_luna_model_data.h.
-// EM TESTE NO SATÉLITE: hey_luna_ptbr (treinado localmente em 2026-09-28, ver
-// wake-training/ e models/hey_luna_ptbr.json; mixednet idêntico ao okay_nabu).
-// Além das amostras sintéticas, treinou com "hey luna" real gravado pelo
-// usuário, vozes pt-BR e conversa pt-BR como negativo. No mic do desktop
-// (sidecar) acertou 11/11 contra 3/11 do hey_luna_trained, com os mesmos
-// disparos falsos em TV — mas ainda não foi medido no INMP441. Se não disparar
-// bem aqui, os fallbacks são o hey_luna_trained (modelo anterior) e o
-// "Okay Nabu" — ver models/README.md e docs/adr/003. Reverter: regerar o header
-// a partir de models/hey_luna_trained.tflite (cutoff 0.97) ou okay_nabu.tflite
+// EM TESTE NO SATÉLITE: hey_luna_ptbr_v2 (retreinado do zero em 2026-10-27, ver
+// wake-training/ e models/hey_luna_ptbr_v2.json; mixednet idêntico ao okay_nabu).
+// Mesmos positivos do hey_luna_ptbr ("hey luna" real do usuário + vozes pt-BR),
+// mais fala pt-BR (FLEURS) e frases confundíveis sintéticas como negativo. Em
+// áudio fora do treino, acerta o mesmo que o hey_luna_ptbr (13/14 no hold-out
+// real, 11/11 no mic do desktop) com 1,1 falso/hora em fala pt-BR contra 12,6
+// — mas ainda não foi medido no INMP441. Se não disparar bem aqui, os
+// fallbacks são o hey_luna_ptbr (modelo anterior) e o "Okay Nabu" — ver
+// models/README.md e docs/adr/003. Reverter: regerar o header a partir de
+// models/hey_luna_ptbr.tflite (cutoff 0.99) ou okay_nabu.tflite
 // (WAKE_PHRASE "Okay Nabu", cutoff 0.90).
 #define WAKE_PHRASE "Hey Luna"
 
 // Constantes do manifesto do modelo em uso — trocar o modelo exige revisar.
-// Cutoff do hey_luna_ptbr: 0.99 é onde o sidecar no mic do desktop teve 11/11
-// acertos com o mesmo nº de disparos falsos em TV que o modelo anterior em
-// 0.97 (ROC do treino: 0.99 => frr=0.15 faph=0.19). Ainda precisa calibrar
+// Cutoff do hey_luna_ptbr_v2: 0.85 é o maior que mantém 13/14 no hold-out e
+// 11/11 no hey-luna.wav (0.84 e 0.86 medem igual; 0.88 já perde um, 0.99 fica
+// em 9/11) — NÃO é a escala do hey_luna_ptbr (0.99). Ainda precisa calibrar
 // pelo raw_max no INMP441 (WAKE_DEBUG), igual foi feito para o okay_nabu
 // (manifesto dizia 0.97, o hardware real pediu 0.90).
-#define WAKE_PROB_CUTOFF 0.99f    // média da janela deslizante que dispara
+#define WAKE_PROB_CUTOFF 0.85f    // média da janela deslizante que dispara
 #define WAKE_SLIDING_WINDOW 5     // nº de probabilidades na média móvel
 #define WAKE_FEATURE_STEP_MS 10   // stride entre features (160 amostras @16k)
 // Manifesto diz 30000, mas na prática o AllocateTensors usa ~30604 — com folga
@@ -232,8 +233,8 @@
 #define FOLLOWUP_WINDOW_MS 6000
 
 // Diagnóstico do domínio de features: loga pico de áudio, min/max/média das
-// features e a probabilidade crua máxima. Ligado: o hey_luna_ptbr acabou de
-// entrar e o cutoff 0.99 ainda precisa ser calibrado no INMP441. Desligar
+// features e a probabilidade crua máxima. Ligado: o hey_luna_ptbr_v2 acabou de
+// entrar e o cutoff 0.85 ainda precisa ser calibrado no INMP441. Desligar
 // depois de validar (economiza CPU/serial).
 #define WAKE_DEBUG 1
 

@@ -546,7 +546,7 @@ function buildNoSignal(): void {
 let local: any = null;
 let micLevel = 0;
 
-/** Limiar com 2 casas, ou 3 quando 2 arredondariam (0.995 viraria "0.99" e pareceria EQUILIBRADA). */
+/** Limiar com 2 casas, ou 3 quando 2 arredondariam (0.995 viraria "0.99" e pareceria o preset 0.99). */
 function formatThreshold(value: number): string {
   return Number(value.toFixed(2)) === value ? value.toFixed(2) : value.toFixed(3);
 }
@@ -2180,13 +2180,18 @@ pages.push({
     );
 
     // Preferências (v2): sensibilidade, atalho, notificação.
+    // Escala do hey_luna_ptbr_v2 (default 0.85): acima de 0.86 ele já perde
+    // "hey luna" de verdade (0.99 acerta 9/11). O 0.99 fica para quem volta ao
+    // hey_luna_ptbr pelo WAKEWORD_MODEL (o preset só muda o limiar, não o
+    // modelo) — ver wakeword-sidecar/README.md.
     const thresholds: Array<{ value: number | null; label: string }> = [
       { value: null, label: 'PADRÃO' },
-      { value: 0.9, label: '0.90 · SENSÍVEL' },
-      { value: 0.95, label: '0.95' },
-      { value: 0.97, label: '0.97' },
-      { value: 0.99, label: '0.99 · EQUILIBRADA' },
-      { value: 0.995, label: '0.995 · RÍGIDA' },
+      { value: 0.75, label: '0.75 · SENSÍVEL' },
+      { value: 0.8, label: '0.80' },
+      { value: 0.85, label: '0.85 · EQUILIBRADA' },
+      { value: 0.9, label: '0.90' },
+      { value: 0.95, label: '0.95 · RÍGIDA' },
+      { value: 0.99, label: '0.99 · SÓ COM O MODELO ANTERIOR' },
     ];
     if (view.wakeThreshold !== null && !thresholds.some((t) => t.value === view.wakeThreshold)) {
       thresholds.push({ value: view.wakeThreshold, label: view.wakeThreshold.toFixed(3) });

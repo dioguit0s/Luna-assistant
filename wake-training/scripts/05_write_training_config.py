@@ -76,7 +76,9 @@ config["features"] = [
 # antiga) quebraria o carregamento no treino.
 # confundiveis era 5.0 no retreino de 2026-09-25, que derrubou o acerto no
 # hold-out real de 13/14 (modelo antigo) para 6/14.
-CUSTOM_PTBR_GROUPS = {"fundo": 10.0, "confundiveis": 2.0}
+# - fala: FLEURS pt_br (04d), horas de fala lida por dezenas de falantes —
+#   mesmo peso do `speech` em inglês, que é o papel dele em pt-BR.
+CUSTOM_PTBR_GROUPS = {"fundo": 10.0, "confundiveis": 2.0, "fala": 10.0}
 for _group, _weight in CUSTOM_PTBR_GROUPS.items():
     _dir = f"negative_datasets/custom_ptbr_{_group}"
     if not os.path.isdir(os.path.join(_dir, "training", "wakeword_mmap")):
@@ -93,6 +95,30 @@ for _group, _weight in CUSTOM_PTBR_GROUPS.items():
         }
     )
     print(f"[config] incluindo negativos pt-BR de {_dir} (sampling_weight={_weight})")
+
+# Negativos difíceis sintéticos (04c_generate_hard_negatives.py): frases
+# curtas parecidas com "hey luna" ou com o mesmo formato dela, com a mesma
+# augmentation dos positivos. `truncate_start`, como os positivos: a frase
+# termina no fim da janela, no mesmo lugar do "hey luna" — senão o modelo
+# continua podendo separar os dois pela posição em vez do conteúdo.
+# Mesmo risco do `confundiveis`: peso alto demais deixa o modelo surdo para o
+# próprio "hey luna". É o primeiro parâmetro a baixar se o recall cair.
+HARD_NEGATIVES_WEIGHT = float(os.environ.get("HARD_NEGATIVES_WEIGHT", "3.0"))
+_hard = "negative_datasets/hard_negatives"
+if os.path.isdir(os.path.join(_hard, "training", "wakeword_mmap")):
+    config["features"].append(
+        {
+            "features_dir": _hard,
+            "sampling_weight": HARD_NEGATIVES_WEIGHT,
+            "penalty_weight": 1.0,
+            "truth": False,
+            "truncation_strategy": "truncate_start",
+            "type": "mmap",
+        }
+    )
+    print(f"[config] incluindo negativos difíceis de {_hard} (sampling_weight={HARD_NEGATIVES_WEIGHT})")
+else:
+    print(f"[config] {_hard} sem features de treino — pulando (rode `./run.sh hard_negatives`)")
 
 # Positivos reais (03b_generate_real_positives.py) — gravações de gente de
 # verdade, com a mesma augmentation dos sintéticos. Peso maior que o dos 2000

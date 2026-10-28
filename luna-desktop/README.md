@@ -142,20 +142,22 @@ Desde o marco 4, o Electron sobe o sidecar sozinho (`src/main/wakeword/`) e
 liga o evento `wake` à máquina de estados — ver "Estado atual" acima.
 
 **`WAKEWORD_MODEL`/`WAKEWORD_THRESHOLD` no `.env`** (opcionais — omitidos,
-o sidecar usa os próprios defaults, `hey_luna_ptbr.tflite` e `0.99`):
+o sidecar usa os próprios defaults, `hey_luna_ptbr_v2.tflite` e `0.85`):
 
 ```
-WAKEWORD_MODEL=../luna-firmware/models/hey_luna_trained.tflite
-WAKEWORD_THRESHOLD=0.97
+WAKEWORD_MODEL=../luna-firmware/models/hey_luna_ptbr.tflite
+WAKEWORD_THRESHOLD=0.99
 ```
 
-`hey_luna_ptbr.tflite` (retreinado em 2026-09-28 com "hey luna" real e vozes
-pt-BR) acertou 11/11 no `fixtures/hey-luna.wav`, contra 3/11 do
-`hey_luna_trained.tflite` (o modelo anterior), com os mesmos disparos falsos
-em TV. Os dois ficam no instalador como fallback, junto do
-`okay_nabu.tflite` (muda a frase para "Okay Nabu"). A sensibilidade escolhida
-no painel vence o `.env` — se ela estava gravada em 0.97 para o modelo
-anterior, volte para "PADRÃO" ou "0.99 · EQUILIBRADA". Detalhe completo em
+`hey_luna_ptbr_v2.tflite` (retreinado em 2026-10-27 com fala pt-BR e frases
+confundíveis como negativo) acerta o mesmo que o `hey_luna_ptbr.tflite` (o
+modelo anterior) — 11/11 no `fixtures/hey-luna.wav`, 13/14 no hold-out real —
+e dispara 1,1 vez por hora em fala pt-BR, contra 12,6. O anterior, o
+`hey_luna_trained.tflite` e o `okay_nabu.tflite` (muda a frase para "Okay
+Nabu") ficam no instalador como fallback. **A escala do cutoff mudou:** o v2
+usa 0.85; em 0.99 (o do modelo anterior) ele acerta só 9/11. A sensibilidade
+escolhida no painel vence o `.env` — se ela estava gravada em 0.99 ou 0.995,
+volte para "PADRÃO" ou "0.85 · EQUILIBRADA". Detalhe completo em
 [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md).
 
 ## Conexão e áudio

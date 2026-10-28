@@ -35,7 +35,7 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_MODEL = SCRIPT_DIR / ".." / ".." / "luna-firmware" / "models" / "hey_luna_ptbr.tflite"
+DEFAULT_MODEL = SCRIPT_DIR / ".." / ".." / "luna-firmware" / "models" / "hey_luna_ptbr_v2.tflite"
 
 # Frames de 640 bytes = 20ms a 16kHz mono — o mesmo quantum que o renderer do
 # luna-desktop entrega (`shared/pcm.ts: CHUNK_BYTES`). Alimentar em blocos
