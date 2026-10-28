@@ -65,6 +65,15 @@ GROUPS = {
     "confundiveis": (1.5, 0.5),
     "fala": (3.0, 3.0),
 }
+# Grupos sem split de validação. A validação do model_train_eval carrega o
+# split inteiro na RAM, e a do `fala` (~530 MB de features, mais que todos os
+# outros grupos juntos) levou a rodada 1 a OOM com --memory=10g em 2026-10-27.
+# Não faz falta: a métrica que escolhe a rodada (average viable recall) mede
+# falsos/h no `validation_ambient` do dinner_party_eval, e a fala pt-BR fora do
+# treino já é medida pelo `./run.sh evaluate` (FLEURS dev+test). Custo: o
+# `Clips` continua separando 10% das janelas para validação, que aqui não vão
+# para lugar nenhum (~1 h do FLEURS train fica fora do treino).
+NO_VALIDATION = {"fala"}
 # Janelas menores que isto são descartadas: abaixo de ~120 ms (10 frames de
 # feature) o SpectrogramGeneration quebra com ValueError.
 MIN_CHUNK_S = 0.5
@@ -159,6 +168,8 @@ for group, chunk_dir in chunk_dirs.items():
     # importa aqui, que é "essa frase pt-BR não deveria disparar".
     shutil.rmtree(tmp_dir, ignore_errors=True)
     splits = {"training": "train", "validation": "validation", "testing": "test"}
+    if group in NO_VALIDATION:
+        del splits["validation"]
     for split, split_name in splits.items():
         split_dir = os.path.join(tmp_dir, split)
         os.makedirs(split_dir, exist_ok=True)

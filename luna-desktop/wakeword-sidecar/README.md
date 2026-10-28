@@ -26,7 +26,7 @@ standalone — e, por coincidência útil, é exatamente a implementação que o
 [microWakeWord](https://github.com/kahrendt/microWakeWord) usou para gerar as
 features de **treino** dos modelos vendorizados em `luna-firmware/models/`.
 
-O modelo streaming (`hey_luna_ptbr.tflite`, `hey_luna_trained.tflite`, `okay_nabu.tflite`) continua
+O modelo streaming (`hey_luna_ptbr_v2.tflite`, `hey_luna_ptbr.tflite`, `okay_nabu.tflite`...) continua
 sendo um `.tflite` de verdade, carregado com
 [`ai-edge-litert`](https://pypi.org/project/ai-edge-litert/) — sucessor
 mantido do `tflite-runtime`, com wheel para Windows + Python 3.14.
@@ -52,10 +52,10 @@ python -m venv .venv
 .venv\Scripts\python.exe wake_sidecar.py --stdin < mic.pcm
 ```
 
-`--model` default: `luna-firmware/models/hey_luna_ptbr.tflite` (resolvido
-relativo a este script). `--threshold`/`--cutoff` default: `0.99` (o
-`WAKE_PROB_CUTOFF` do firmware para esse modelo — medido aqui no mic do
-desktop, ver "Modelo atual: `hey_luna_ptbr`" abaixo; no INMP441 ainda falta
+`--model` default: `luna-firmware/models/hey_luna_ptbr_v2.tflite` (resolvido
+relativo a este script). `--threshold`/`--cutoff` default: `0.85` (o
+`WAKE_PROB_CUTOFF` do firmware para esse modelo — medido com `evaluate.py`,
+ver "Modelo atual: `hey_luna_ptbr_v2`" abaixo; no INMP441 ainda falta
 calibrar). `--feature-stats` imprime min/max/média das
 features cruas do frontend, em stderr.
 
@@ -130,8 +130,8 @@ está hoje provavelmente frustra o usuário no dia a dia (precisa repetir a
 frase 2-3x). Considerar como próximo passo: `okay_nabu` como wake word
 provisória no desktop (mesma decisão que o ADR 003 já tomou pro firmware
 por motivo idêntico), ou retreinar um "hey luna" com mais dados/vozes antes
-de fechar o M4. → Retreinado em 2026-09-28, ver "Modelo atual:
-`hey_luna_ptbr`" abaixo. (Recontando o `hey-luna.wav` pela energia, ele tem
+de fechar o M4. → Retreinado em 2026-09-28 (`hey_luna_ptbr`) e de
+novo em 2026-10-27, ver "Modelo atual: `hey_luna_ptbr_v2`" abaixo. (Recontando o `hey-luna.wav` pela energia, ele tem
 11 repetições, não 10 — o `hey_luna_trained` fez 3/11.)
 
 Falso-positivo (`fixtures/noise-smoke.wav`, 50s de ruído de fundo): **0
@@ -170,7 +170,28 @@ os dados de `--trace` das tentativas perdidas (picos de prob individual
 ~0.9 sem sustentar a média) sugerem que o gargalo é a confiança do modelo
 nessas janelas, não a soma final. Ver "Implicação para o marco 4" acima.
 
-## Modelo atual: `hey_luna_ptbr` (2026-09-28)
+## Modelo atual: `hey_luna_ptbr_v2` (2026-10-27)
+
+O `hey_luna_ptbr` (abaixo) resolveu o recall, mas disparava sozinho 12,6 vezes por hora em
+fala pt-BR (ver "Régua de falso-positivo" mais abaixo). O v2 foi retreinado do zero com os
+mesmos positivos e dois grupos novos de negativos — ~10 h de fala pt-BR lida (FLEURS `train`) e
+frases confundíveis sintéticas com o formato do "hey luna" ("ei, Helena", "uma"...) — ver
+`wake-training/README.md` e `luna-firmware/models/hey_luna_ptbr_v2.json`. Medido com
+`evaluate.py` (`./run.sh evaluate`), só em áudio fora do treino dos dois:
+
+| Áudio | `hey_luna_ptbr` em 0.99 | `hey_luna_ptbr_v2` em 0.85 |
+|---|---|---|
+| `fixtures/hey-luna.wav` (11 tentativas, pós-AGC/NS do Chromium) | 11/11 | **11/11** |
+| hold-out das gravações reais (14) | 13/14 | **13/14** |
+| FLEURS pt-BR `dev`+`test`, 4,5 h (falsos/hora) | 12,6 | **1,1** |
+| frases confundíveis do hold-out (disparam, de 56) | 16 | **3** |
+| `fixtures/okay-nabu.wav` (8x outra wake word; disparos falsos) | 1 | **0** |
+
+**A escala do cutoff mudou.** O v2 é menos convicto nos positivos: 0.85 é o maior cutoff com
+11/11 e 13/14 (em 0.88 ele já perde um, em 0.99 acerta 9/11). Por isso os presets do painel
+agora vão de 0.75 a 0.95, e o 0.99 ficou só para quem voltar ao `hey_luna_ptbr`.
+
+## Modelo anterior: `hey_luna_ptbr` (2026-09-28)
 
 Retreinado com os positivos que faltavam ao `hey_luna_trained`: 60 "hey luna"
 reais gravados pelo usuário (celular), 480 amostras Piper pt-BR, e conversa
@@ -188,8 +209,8 @@ este sidecar (`--wav`, detecções no evento `eof`):
 
 O `hey_luna_ptbr` fica com `mean_prob` ~1.0 nos positivos: por isso o cutoff
 subiu para 0.99 (em 0.97 os acertos são os mesmos e a TV dispara 3 vezes em
-vez de 2). O recall no `hey-luna.wav` não muda de 0.97 a 0.995, então a
-sensibilidade do painel pode ir para "RÍGIDA" (0.995) se ainda disparar à toa.
+vez de 2). O recall no `hey-luna.wav` não muda de 0.97 a 0.995 neste modelo (no v2, sim —
+ver acima).
 
 ## Régua de falso-positivo: `evaluate.py`
 
@@ -201,8 +222,8 @@ reaplica o detector para cada cutoff:
 
 ```bash
 .venv\Scripts\python.exe evaluate.py ^
+  --model ..\..\luna-firmware\models\hey_luna_ptbr_v2.tflite ^
   --model ..\..\luna-firmware\models\hey_luna_ptbr.tflite ^
-  --model ..\..\luna-firmware\models\hey_luna_trained.tflite ^
   --positive fixtures\hey-luna.wav:11 ^
   --negative C:\caminho\para\fala-ptbr ^
   --negative fixtures\okay-nabu.wav
@@ -220,8 +241,9 @@ Só vale como régua o áudio que o modelo não viu no treino. O `wake-training`
 conjuntos assim (`./run.sh ptbr_speech` e `./run.sh hard_negatives`) e roda este script com
 `./run.sh evaluate` — ver `wake-training/README.md`, "Critério de aceite" e "Diagnóstico de
 2026-10-26": em 4,6 h de FLEURS pt-BR, o `hey_luna_ptbr` deu 12,6 falsos/hora em 0,99 e 9,3
-em 0,995, com média 0,99+ nos disparos. A sensibilidade "RÍGIDA" do painel ameniza, mas não
-resolve: o conserto é retreinar.
+em 0,995, com média 0,99+ nos disparos — subir o cutoff amenizava, mas não resolvia. O
+retreino com essas réguas virou o `hey_luna_ptbr_v2` (1,1 falso/hora em 0,85, ver "Modelo
+atual" acima).
 
 ## Testes
 

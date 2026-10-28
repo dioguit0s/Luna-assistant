@@ -15,7 +15,7 @@
 set -euo pipefail
 cd /work
 
-BASELINE="${EVAL_BASELINE:-hey_luna_ptbr.tflite}"
+BASELINE="${EVAL_BASELINE:-hey_luna_ptbr_v2.tflite}"
 if [ -n "${EVAL_BASELINE:-}" ] && [ ! -f "/models/$BASELINE" ]; then
   echo "EVAL_BASELINE=$EVAL_BASELINE não existe em luna-firmware/models/" >&2
   exit 1
@@ -39,4 +39,4 @@ args+=(--negative /sidecar/fixtures/okay-nabu.wav)
 
 read -ra extra <<< "${EVAL_ARGS:-}"
 PYTHONDONTWRITEBYTECODE=1 python3 /sidecar/evaluate.py "${args[@]}" \
-  --top-cutoff 0.99 --json /work/eval_report.json ${extra[@]+"${extra[@]}"}
+  --top-cutoff 0.85 --json /work/eval_report.json ${extra[@]+"${extra[@]}"}

@@ -35,6 +35,39 @@ de TV, mas 1/10 no `hey-luna.wav` real — **descartado**, o firmware seguiu com
 `./run.sh train`, ver "Treino em rodadas"), os positivos reais e as vozes pt-BR (ver "Positivos
 reais") e o "Critério de aceite".
 
+### Retreino de 2026-10-27: `hey_luna_ptbr_v2`, 1,1 falso/hora em fala pt-BR
+
+Treinado do zero com as três etapas do diagnóstico abaixo (`ptbr_speech`, `hard_negatives` e o
+grupo `fala` do `custom_negatives`) e os mesmos positivos do `hey_luna_ptbr`. A melhor rodada foi
+a 9 de 10 (`average viable recall` 0,711; as rodadas foram de 0,136 a 0,711). Medido com
+`./run.sh evaluate` e uma varredura fina de cutoff (`work/eval_report.json` e
+`work/eval_report_fino.json`):
+
+| cutoff | modelo | hold-out real | `hey-luna.wav` | falsos/h (FLEURS, 4,5 h) | confundíveis que disparam (de 56) |
+|---|---|---|---|---|---|
+| 0,80 | `hey_luna_ptbr` | 13/14 | 11/11 | 52,3 | 22 |
+| 0,80 | **v2** | 13/14 | 11/11 | 1,3 | 4 |
+| 0,84 / 0,86 | `hey_luna_ptbr` | 13/14 | 11/11 | 47,9 / 44,4 | 22 |
+| **0,84 / 0,86** | **v2** | **13/14** | **11/11** | **1,1** | **3** |
+| 0,88 | **v2** | 13/14 | 10/11 | 0,9 | 3 |
+| 0,99 | `hey_luna_ptbr` (o que estava em uso) | 13/14 | 11/11 | 12,6 | 16 |
+| 0,99 | **v2** | 13/14 | 9/11 | 0,0 | 1 |
+
+- **Aprovado em 0,85** (entre 0,84 e 0,86, que medem igual): no mesmo cutoff, o v2 empata no
+  recall e tem ~40x menos falsos/hora; mesmo contra o `hey_luna_ptbr` no cutoff em que ele
+  estava (0,99), são 11x menos.
+- **A escala do cutoff mudou.** O v2 é menos convicto nos positivos: 0,86 é o maior cutoff
+  medido que mantém 11/11 e 13/14. O 0,99 do `hey_luna_ptbr` deixaria o v2 surdo (9/11).
+- **O padrão "começo de fala" enfraqueceu**: dos 5 falsos do FLEURS em 0,86, dois caem nos
+  primeiros segundos da frase (1,5 s e 2,1 s) e três no meio (5,3 s, 9,7 s e 10,4 s), todos com
+  média 0,88–0,92, e não mais 0,99+. As 3 confundíveis que ainda disparam são todas "Ei, Lula" (3 vozes) — candidata a
+  entrar no treino numa próxima rodada.
+- O `okay-nabu.wav` (8 vezes outra wake word) não dispara nenhuma vez.
+
+O modelo foi para `../luna-firmware/models/hey_luna_ptbr_v2.tflite` (+ `.json`), com firmware e
+sidecar em 0,85. Falta calibrar no INMP441 e o teste de ≥15 min de TV/conversa real (ver "Depois
+do treino").
+
 ### Diagnóstico de 2026-10-26: o `hey_luna_ptbr` dispara sozinho 7 a 13 vezes por hora
 
 Medido com `../luna-desktop/wakeword-sidecar/evaluate.py` (ver "Critério de aceite") em áudio
@@ -131,7 +164,10 @@ container para que um OOM do treino mate só ele, e não um processo do host:
 MWW_DOCKER_ARGS="--memory=8g --cpus=3" ./run.sh train
 ```
 
-(Com 8 GB, até uma rodada de 500 passos pode não caber; a validação sozinha aloca ~3,8 GB.)
+(Com 8 GB, até uma rodada de 500 passos pode não caber; a validação sozinha aloca ~3,8 GB.
+Com os grupos `fala` e `hard_negatives`, a validação cresceu: em 2026-10-27 a rodada 1 morreu
+por OOM nas três tentativas com `--memory=10g`, até o `fala` sair da validação — ver
+`NO_VALIDATION` no `04b`. Do jeito atual, `--memory=11g` coube nas 10 rodadas.)
 
 ## Positivos reais
 
@@ -155,14 +191,14 @@ estava rotulada negativa. Gravações reais corrigem isso:
 Antes de trocar o modelo do firmware, rode `./run.sh evaluate`. Ele roda
 `../luna-desktop/wakeword-sidecar/evaluate.py` (mesmo frontend de features e mesma lógica de
 disparo do firmware) com o modelo novo (`work/hey_luna.tflite`) e o atual do firmware
-(`EVAL_BASELINE`, padrão `hey_luna_ptbr.tflite`), varre os cutoffs e imprime, por modelo:
+(`EVAL_BASELINE`, padrão `hey_luna_ptbr_v2.tflite`), varre os cutoffs e imprime, por modelo:
 
 - **recall** no hold-out das gravações reais (`work/real_positives_clips/holdout/`, um clipe por
   repetição) e no `fixtures/hey-luna.wav` (11 "hey luna" pelo mic do desktop — o mesmo caminho de
   áudio do uso real);
 - **falsos disparos** em cada conjunto de `work/eval_negatives/` e no `fixtures/okay-nabu.wav`, e
   o total em **falsos/hora**;
-- os piores falsos em 0,99 (arquivo + segundo), para ouvir o que confundiu o modelo.
+- os piores falsos em 0,85, o cutoff do `hey_luna_ptbr_v2` (arquivo + segundo), para ouvir o que confundiu o modelo.
 
 O relatório completo fica em `work/eval_report.json`. `work/eval_negatives/` só pode ter áudio que
 **não** entra no treino:
@@ -184,7 +220,7 @@ Fora do Docker (Windows, venv do sidecar), o mesmo comando:
 ```bash
 cd ../luna-desktop/wakeword-sidecar
 .venv/Scripts/python.exe evaluate.py --model ../../wake-training/work/hey_luna.tflite \
-  --model ../../luna-firmware/models/hey_luna_ptbr.tflite \
+  --model ../../luna-firmware/models/hey_luna_ptbr_v2.tflite \
   --positive fixtures/hey-luna.wav:11 --negative ../../wake-training/work/eval_negatives/fleurs_ptbr
 ```
 

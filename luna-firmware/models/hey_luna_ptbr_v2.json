@@ -1,0 +1,32 @@
+{
+  "type": "micro",
+  "wake_word": "Hey Luna",
+  "author": "treino local (microWakeWord, wake-training/)",
+  "website": "https://github.com/kahrendt/microWakeWord",
+  "model": "hey_luna_ptbr_v2.tflite",
+  "trained_languages": ["en", "pt"],
+  "version": 2,
+  "micro": {
+    "probability_cutoff": 0.85,
+    "feature_step_size": 10,
+    "sliding_window_size": 5,
+    "tensor_arena_size": 34000,
+    "minimum_esphome_version": "2024.7.0"
+  },
+  "_notes": {
+    "architecture": "mixednet, idêntico ao hey_luna_ptbr/okay_nabu (pointwise_filters 64,64,64,64; stride 3)",
+    "treino": "2026-10-27, do zero, rodada 9 de 10 (500 passos cada; average viable recall 0.711) — ver wake-training/README.md, 'Treino em rodadas'",
+    "positivos": "2000 sintéticos en_US-libritts + 480 sintéticos Piper pt-BR + 60 'hey luna' reais gravados pelo usuário (celular) — os mesmos do hey_luna_ptbr",
+    "negativos": "speech/dinner_party/no_speech (en) + 22 min de conversa pt-BR + frases confundíveis gravadas + NOVOS: FLEURS pt_br train (grupo fala, 10.0) e negativos difíceis sintéticos com o formato do positivo (hard_negatives, 3.0)",
+    "aceite_fora_do_treino": {
+      "fonte": "wake-training/work/eval_report_fino.json (./run.sh evaluate, mesmo frontend e mesma lógica de disparo do firmware)",
+      "cutoff_0.85 (0.84 e 0.86 medidos, idênticos)": "hold-out real 13/14, fixtures/hey-luna.wav 11/11, FLEURS dev+test (4,5 h) 1,1 falsos/h, confundíveis do hold-out 3/56 (as três 'Ei, Lula'), okay-nabu.wav 0",
+      "hey_luna_ptbr no mesmo cutoff": "13/14, 11/11, ~46 falsos/h, 22/56",
+      "hey_luna_ptbr em 0.99 (o que estava em uso)": "13/14, 11/11, 12,6 falsos/h, 16/56",
+      "acima de 0.86": "0.88 já perde 1 no hey-luna.wav (10/11); 0.99 fica em 9/11 — por isso o cutoff do hey_luna_ptbr (0.99) NÃO serve para este modelo"
+    },
+    "roc_do_treino": "tflite_streaming_roc.txt reporta AUC 0.511 (0.86 => frr=0.27 faph=0.75) — a régua do microWakeWord não é a de aceite; o hey_luna_trained também tinha test_auc ~0.5",
+    "pendente": "calibrar WAKE_PROB_CUTOFF no INMP441 do satélite (WAKE_DEBUG) e testar ≥15 min de TV/conversa real — os números acima são de áudio de arquivo",
+    "fallback": "hey_luna_ptbr.tflite (cutoff 0.99) ou okay_nabu.tflite (validado no hardware, ver docs/adr/003-wake-word-engine.md)"
+  }
+}

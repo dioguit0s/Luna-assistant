@@ -9,7 +9,7 @@ script faz as duas coisas com o mesmo caminho de inferência do sidecar
 (`MicroFeatures` + `LoadedModel` + `WakeDetector`, ou seja, paridade com
 `WakeWord.cpp`):
 
-    python evaluate.py --model ../../luna-firmware/models/hey_luna_ptbr.tflite \\
+    python evaluate.py --model ../../luna-firmware/models/hey_luna_ptbr_v2.tflite \\
         --positive fixtures/hey-luna.wav:11 \\
         --negative ~/fala-ptbr/ --negative fixtures/okay-nabu.wav
 
@@ -60,7 +60,7 @@ from wavio import SAMPLE_RATE, _resample_linear, read_wav_pcm16
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-DEFAULT_CUTOFFS = (0.8, 0.9, 0.95, 0.97, 0.98, 0.99, 0.995)
+DEFAULT_CUTOFFS = (0.8, 0.82, 0.85, 0.88, 0.9, 0.95, 0.97, 0.98, 0.99, 0.995)
 AUDIO_EXTS = (".wav", ".ogg", ".opus", ".mp3", ".flac")
 
 # A detecção só conclui depois da palavra acabar (média de 5 inferências de
