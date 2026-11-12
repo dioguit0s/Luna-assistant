@@ -1,0 +1,2 @@
+# Exportações (KiCad, Gerbers) — regeneráveis, ficam fora do pacote para o `tsci dev` não carregá-las
+build/

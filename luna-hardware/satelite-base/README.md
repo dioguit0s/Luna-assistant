@@ -38,10 +38,20 @@ Pré-requisitos (uma vez): Node, `npm i -g tscircuit bun`, KiCad 10 (para revis�
 bun install          # dependências do projeto
 tsci build --pcb-png --schematic-png   # compila, roteia e gera dist/index/*.png
 npm run check        # netlist, pinos, posicionamento, curtos, estilo
-npm run export:kicad # dist/fab/satelite-base-kicad.zip — abrir no KiCad
+npm run export:kicad # ../build/satelite-base-fab/satelite-base-kicad.zip — abrir no KiCad
 npm run export:gerbers
 tsci dev             # visualização interativa; BOM + pick-and-place para a JLCPCB
 ```
+
+**Visualizar no navegador:** rode `tsci build` e depois `tsci dev`, e abra
+<http://localhost:3020/#file=dist%2Findex%2Fcircuit.json&main_component=dist%2Findex%2Fcircuit.json>.
+Abra o `circuit.json` (o resultado do build), e não o `.tsx`: o visualizador
+compila o `.tsx` com uma versão mais antiga do compilador (0.0.1745), que não
+desenha a USB-C nem roteia, e mostra dezenas de erros falsos.
+
+As exportações ficam em `luna-hardware/build/` (ignorado pelo git), fora do
+pacote: se ficarem dentro, o `tsci dev` tenta carregar o zip do KiCad e os
+modelos 3D, e trava em "Loading files…".
 
 Mudanças passam pelo código: edite o `.tsx`, rode `tsci build`, confira os PNGs
 e o `npm run check`. O Claude Code tem a skill `tscircuit` em
@@ -50,7 +60,7 @@ e o `npm run check`. O Claude Code tem a skill `tscircuit` em
 ### Revisão no KiCad (segunda opinião)
 
 ```bash
-kicad-cli pcb drc --refill-zones --format json --severity-all -o drc.json dist/kicad/index.circuit.kicad_pcb
+kicad-cli pcb drc --refill-zones --format json --severity-all -o drc.json ../build/satelite-base-kicad/index.circuit.kicad_pcb
 ```
 
 Estado em 2026-11-11: 0 itens desconectados; 2 erros de `hole_clearance`

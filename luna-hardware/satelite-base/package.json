@@ -17,8 +17,8 @@
     "start": "tsci dev",
     "typecheck": "tsc --noEmit",
     "check": "tsci check netlist && tsci check pin_specification && tsci check placement && tsci check shorts && tsci check pcb-style",
-    "export:kicad": "tsci export index.circuit.tsx -f kicad_zip -o dist/fab/satelite-base-kicad.zip",
-    "export:gerbers": "tsci export index.circuit.tsx -f gerbers -o dist/fab/satelite-base-gerbers.zip"
+    "export:kicad": "tsci export index.circuit.tsx -f kicad_zip -o ../build/satelite-base-fab/satelite-base-kicad.zip",
+    "export:gerbers": "tsci export index.circuit.tsx -f gerbers -o ../build/satelite-base-fab/satelite-base-gerbers.zip"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",

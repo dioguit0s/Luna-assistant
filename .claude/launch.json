@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "placa-satelite",
+      "runtimeExecutable": "cmd",
+      "runtimeArgs": ["/c", "cd luna-hardware\\satelite-base && tsci dev"],
+      "port": 3020
+    }
+  ]
+}
