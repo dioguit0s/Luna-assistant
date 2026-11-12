@@ -7,6 +7,10 @@
 
 ## 1. Tabela consolidada de GPIOs
 
+> **PCB:** a placa-base em [`luna-hardware/satelite-base`](../luna-hardware/satelite-base/README.md)
+> usa esta mesma pinagem (constantes no topo de `index.circuit.tsx`). Mudou aqui,
+> muda lá e no `config.h`.
+
 | GPIO | Componente | Função | Direção |
 |------|-----------|--------|---------|
 | **GPIO12** | INMP441 | SD (DOUT) — dado do microfone | ESP32 ← INMP441 |
