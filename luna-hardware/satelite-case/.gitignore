@@ -1,0 +1,8 @@
+# Ambiente Python do CadQuery (recriável: ver README)
+.venv/
+.tmp/
+__pycache__/
+
+# Regeneráveis pelo case.py
+luna-satelite-case.zip
+preview/*.stl
