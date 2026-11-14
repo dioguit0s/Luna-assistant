@@ -9,6 +9,7 @@ import { HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
 import { ReminderStore } from '../reminders/ReminderStore.js';
 import { WsServer } from './WsServer.js';
+import type { WakeClipStore } from '../diagnostics/WakeClipStore.js';
 import { computeAuthToken } from './auth.js';
 import { createEnvelope, parseControlMessage, serializeControlMessage } from './protocol.js';
 
@@ -156,5 +157,37 @@ describe('WsServer: endurecimento da borda', () => {
     });
 
     assert.equal(closeCode, 1009);
+  });
+
+  it('wake_clip vai para o WakeClipStore e nunca vira áudio de turno', async () => {
+    const parts: Array<{ deviceId: string; roomId: string; part?: number; bytes: number }> = [];
+    server.setWakeClipStore({
+      addPart: (deviceId: string, roomId: string, envelope: { part?: number }, pcm: Buffer) =>
+        parts.push({ deviceId, roomId, part: envelope.part, bytes: pcm.length }),
+    } as unknown as WakeClipStore);
+    const turnAudio: Buffer[] = [];
+    const orchestrator = (server as unknown as { orchestrator: { handleAudioChunk: unknown } }).orchestrator;
+    orchestrator.handleAudioChunk = async (_room: string, _dev: string, pcm: Buffer) => {
+      turnAudio.push(pcm);
+    };
+
+    const ws = new WebSocket(wsUrl);
+    await new Promise<void>((resolve) => ws.on('open', () => resolve()));
+    const token = computeAuthToken(config.wsAuthSecret, 'device-1');
+    ws.send(serializeControlMessage(createEnvelope('auth', 'sala_de_estar', { device_id: 'device-1', token })));
+    await new Promise<void>((resolve) => ws.once('message', () => resolve()));
+
+    // room_id do envelope é ignorado: vale o da autenticação.
+    const header = JSON.stringify({ type: 'wake_clip', room_id: 'outra_sala', clip_id: 7, part: 0, parts: 1 });
+    ws.send(Buffer.concat([Buffer.from(header, 'utf8'), Buffer.alloc(640)]), { binary: true });
+
+    const deadline = Date.now() + 2000;
+    while (parts.length === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    ws.close();
+
+    assert.deepEqual(parts, [{ deviceId: 'device-1', roomId: 'sala_de_estar', part: 0, bytes: 640 }]);
+    assert.equal(turnAudio.length, 0);
   });
 });

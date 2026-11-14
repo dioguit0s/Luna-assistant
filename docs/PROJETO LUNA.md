@@ -76,6 +76,7 @@ Todas as mensagens de controle seguem o envelope JSON padrão abaixo. Chunks de 
 | ---------------- | ------------------- | ------------------------------------------------------------------------ |
 | `auth`           | Satélite → Servidor | Handshake inicial com token HMAC-SHA256 e device\_id                     |
 | `audio_chunk`    | Satélite → Servidor | Chunk de 640 bytes de PCM 16kHz mono. Campo `seq` para detecção de perda |
+| `wake_clip`      | Satélite → Servidor | Binário: os ~2 s antes de um wake, em partes de 20 ms, enviados depois do turno (coleta de material de treino) |
 | `activity_end`   | Satélite → Servidor | Push-to-talk: fim de fala explícito (só com `GEMINI_MANUAL_ACTIVITY=true`) |
 | `auth_ok`        | Servidor → Satélite | Token validado — o firmware reseta a FSM ao receber                       |
 | `auth_error`     | Servidor → Satélite | Handshake recusado, com o motivo no campo `reason`                        |

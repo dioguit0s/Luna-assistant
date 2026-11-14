@@ -83,6 +83,10 @@ de bancada em Node aceita qualquer tamanho.
 | `device` | `string` | só em `command_result` | Dispositivo falado, como resolvido no registro |
 | `action` | `on` / `off` | só em `command_result` | Ação aplicada |
 | `entity_id` | `string` | só em `command_result` | Entidade acionada no Home Assistant |
+| `clip_id` | `number` | só em `wake_clip` | Identifica o clipe: `millis()` do satélite no disparo |
+| `part` / `parts` | `number` | só em `wake_clip` | Índice desta parte (0 a `parts - 1`, em ordem) e total de partes |
+| `prob` | `number` | só em `wake_clip` | Média da janela deslizante que disparou (a que passou de `WAKE_PROB_CUTOFF`) |
+| `responded` | `boolean` | só em `wake_clip` | Se o turno desse wake teve `speaking_start`. `false` é o candidato mais forte a falso disparo |
 
 **`room_id` precisa casar `/^[a-z0-9_]{1,64}$/`** e é a mesma string do `area_id` do
 Home Assistant — o HA é a fonte de verdade dos cômodos. Ver [`infra/README.md`](../infra/README.md).
@@ -101,6 +105,7 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 |---|---|---|
 | `auth` | texto | Primeira mensagem após conectar. **Obrigatória em até 10 s** (`AUTH_TIMEOUT_MS`), senão a conexão é encerrada |
 | `audio_chunk` | **binário** | A cada 20 ms enquanto a FSM está em `ACTIVE_STREAMING` |
+| `wake_clip` | **binário** | Depois de um turno aberto por wake word, de volta a `IDLE_LISTENING`: os últimos ~2 s que o detector ouviu, em partes de 640 bytes. Ver [Clipes de wake](#clipes-de-wake-wake_clip) |
 | `activity_end` | texto | Push-to-talk: fim de fala explícito. Só tem efeito com `GEMINI_MANUAL_ACTIVITY=true` |
 | `ping` | texto | Keep-alive a cada 10 s (`PING_INTERVAL_MS`). Ignorado antes da autenticação |
 
@@ -119,6 +124,26 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 Mensagens de controle de tipo desconhecido são **logadas e ignoradas**, não derrubam
 a conexão — é o que permite adicionar um tipo novo no servidor antes de todos os
 satélites terem sido atualizados.
+
+### Clipes de wake (`wake_clip`)
+
+Coleta de material de treino da wake word: a cada disparo, o firmware congela na PSRAM os
+últimos `WAKE_CLIP_MS` (2 s) de áudio que o detector ouviu e, **só depois que o turno
+acaba**, manda em frames binários como o `audio_chunk`:
+
+```
+{"type":"wake_clip","room_id":"sala","clip_id":81234,"part":0,"parts":100,"prob":0.873,"responded":false,"ts":95000}<640 bytes de PCM16LE>
+```
+
+- Partes **em ordem**, de 0 a `parts - 1`. Parte faltando ou fora de ordem: o servidor
+  descarta o clipe. Recomeçar da parte 0 (reconexão no meio) substitui o que havia.
+- Não disputa banda com o turno: o firmware só envia em `IDLE_LISTENING`, poucas partes por
+  iteração do `loop()`, e pausa se um wake novo abrir outro turno no meio.
+- Nunca é áudio de turno: o servidor não passa isso ao provider. Grava como WAV + JSON só com
+  `WAKE_CLIP_DIR` configurado (ver `luna-server/.env.example`); sem isso, descarta.
+- Firmware que manda `wake_clip` para um servidor anterior a este tipo: cada parte vira um
+  aviso "Mensagem JSON inválida" no log, sem outro efeito. Atualize o servidor primeiro.
+- Desligado no firmware com `WAKE_CLIP_UPLOAD 0` (`config.h`).
 
 ***
 

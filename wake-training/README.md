@@ -186,6 +186,40 @@ estava rotulada negativa. Gravações reais corrigem isso:
 - As demais passam pela mesma augmentation dos sintéticos (25 repetições cada no treino) e
   entram em `05_write_training_config.py` como positivo com `sampling_weight` 3.0.
 
+## Coleta de disparos reais
+
+Os negativos que mais ensinam são os que o modelo **já errou na casa**, pelo microfone do
+satélite. O firmware guarda os ~2 s que o detector ouviu antes de cada wake e, depois que o
+turno acaba, manda ao servidor (`wake_clip`, ver
+[`docs/protocolo-websocket.md`](../docs/protocolo-websocket.md#clipes-de-wake-wake_clip)).
+O servidor grava cada um como WAV 16 kHz mono + JSON.
+
+Ligar:
+
+1. No servidor, `WAKE_CLIP_DIR=/var/lib/luna-server/wake-clips` no `/etc/luna-server.env`
+   (dentro do `StateDirectory`, o único lugar gravável com `ProtectSystem=strict`) e reiniciar.
+   O log mostra `wake_clips_enabled` no boot e `wake_clip_saved` a cada clipe.
+2. Firmware com `WAKE_CLIP_UPLOAD 1` (`luna-firmware/include/config.h`, já é o padrão).
+   Atualize o servidor **antes**: um servidor sem o tipo novo loga um aviso por parte.
+
+Os arquivos se chamam `<UTC>_<sala>_<device>_<resp|noresp>_p<prob>.wav`:
+
+- **`noresp`** = o turno não teve resposta (ninguém falou depois do bipe). É o candidato forte
+  a falso disparo, mas confira ouvindo: às vezes a pessoa chamou e desistiu.
+- **`resp`** = houve resposta. Em geral é wake verdadeiro, mas o modelo responde a TV também.
+- `p` = a média que disparou. Falsos perto do cutoff (0,85–0,90) são os mais úteis no treino.
+
+Triagem: traga os clipes (`scp` do diretório, ver `luna-server/deploy/README.md` para o acesso),
+ouça e separe em `work/custom_negatives_wav/falsos_reais/` (falsos) e
+`work/real_positives_wav/` (verdadeiros, que também viram positivos com o microfone do
+satélite). Opcional: preencha `label` no JSON, que fica junto para referência. Guarde uma
+parte dos falsos fora do treino, em `work/eval_negatives/falsos_reais/`, para ser régua (ver
+"Critério de aceite"). O grupo `falsos_reais` ainda não existe no `04b`/`05`: entra no
+próximo retreino.
+
+O diretório tem teto (`WAKE_CLIP_MAX`, padrão 2000 clipes, ~128 MB; no pior caso ~300 MB); passado ele, os mais
+antigos são apagados — traga os clipes com alguma frequência.
+
 ## Critério de aceite
 
 Antes de trocar o modelo do firmware, rode `./run.sh evaluate`. Ele roda

@@ -38,6 +38,33 @@ static uint32_t lastAuthedMs = 0;
 static uint32_t lastWarnMs = 0;
 static uint32_t lastWakeStatsMs = 0;
 
+#if WAKE_CLIP_UPLOAD
+// --- Coleta de clipes de wake (WAKE_CLIP_UPLOAD em config.h) ---
+// clipRing: últimos WAKE_CLIP_MS que o detector ouviu. Só o captureTask mexe.
+static AudioChunk *clipRing = nullptr;
+static size_t clipRingHead = 0;
+static size_t clipRingCount = 0;
+// clipPending: o ring congelado no disparo, esperando o fim do turno para subir.
+// Posse por clipState: FREE -> READY só no captureTask (depois de preencher),
+// READY -> FREE só no loop() (depois de enviar). Os demais campos só são
+// escritos por quem tem a posse naquele momento.
+enum : uint8_t { CLIP_FREE = 0, CLIP_READY = 1 };
+static AudioChunk *clipPending = nullptr;
+static volatile uint8_t clipState = CLIP_FREE;
+static size_t clipPendingCount = 0;
+static uint32_t clipId = 0;
+static float clipProb = 0.0f;
+static uint16_t clipNextPart = 0;
+// Verdadeiro do disparo até o turno acabar: só nessa janela um speaking_start
+// conta como "este wake teve resposta". Escritos no loop() (onSpeakingStart e
+// pumpWakeClip) e uma vez no captureTask, antes de clipState virar READY.
+static volatile bool clipTurnOpen = false;
+static volatile bool clipResponded = false;
+// captureTask levanta quando um wake chega com o clipe anterior ainda pendente;
+// o loop() consome (loga e fecha clipTurnOpen).
+static volatile bool clipDropped = false;
+#endif
+
 // Motivo do boot anterior. Distingue de graça três coisas que se parecem no
 // comportamento e agora também no LED: queda de alimentação (o amplificador em
 // rajada mais o pico de TX do Wi-Fi passam do que a porta USB entrega — ver
@@ -148,6 +175,9 @@ static void onSpeakingStart() {
   // AEC: para de transmitir e descarta o backlog de captura (evita eco).
   StateMachine::onSpeakingStart();
   turnSpeakingStartAtMs = millis();
+#if WAKE_CLIP_UPLOAD
+  if (clipTurnOpen) clipResponded = true;
+#endif
   if (txQueue) xQueueReset(txQueue);
   responseBytes = 0;
   playbackUnderruns = 0;
@@ -238,9 +268,99 @@ static void prerollFlush() {
   prerollCount = 0;
 }
 
+#if WAKE_CLIP_UPLOAD
+static void clipRingPush(const AudioChunk &chunk) {
+  if (!clipRing) return;
+  clipRing[clipRingHead] = chunk;
+  clipRingHead = (clipRingHead + 1) % WAKE_CLIP_CHUNKS;
+  if (clipRingCount < WAKE_CLIP_CHUNKS) clipRingCount++;
+}
+
+// Congela o ring no clipPending. Chamado pelo captureTask na borda do wake.
+// Se o clipe anterior ainda não subiu (servidor fora), este é descartado: o
+// anterior já tem a posse do buffer e não há como copiar sem lock.
+static void clipSnapshot() {
+  if (!clipRing || !clipPending || clipRingCount == 0) return;
+  if (clipState != CLIP_FREE) {
+    // Sem Serial aqui (task de tempo real): o loop() loga e fecha o turno do
+    // clipe antigo, para o speaking_start deste turno novo não rotulá-lo.
+    clipDropped = true;
+    return;
+  }
+  size_t idx = (clipRingHead + WAKE_CLIP_CHUNKS - clipRingCount) % WAKE_CLIP_CHUNKS;
+  for (size_t i = 0; i < clipRingCount; i++) {
+    clipPending[i] = clipRing[idx];
+    idx = (idx + 1) % WAKE_CLIP_CHUNKS;
+  }
+  clipPendingCount = clipRingCount;
+  clipRingCount = 0;
+  clipId = millis();
+  clipProb = WakeWord::detectionProbability();
+  clipNextPart = 0;
+  clipResponded = false;
+  clipTurnOpen = true;
+  __sync_synchronize(); // os campos acima ficam visíveis antes do READY
+  clipState = CLIP_READY;
+}
+
+// Sobe o clipe pendente aos poucos, só com o turno encerrado (IDLE_LISTENING):
+// assim nunca disputa a socket com o áudio do turno. Chamado do loop().
+static void pumpWakeClip() {
+  static uint32_t idleSinceMs = 0;
+  if (clipDropped) {
+    clipDropped = false;
+    clipTurnOpen = false;
+    Serial.println("[wake] clipe anterior ainda não enviado — este disparo fica sem clipe");
+  }
+  if (clipState != CLIP_READY) return;
+
+  const bool idle = StateMachine::current() == StateMachine::State::IDLE_LISTENING;
+  if (!idle || !LunaWsClient::isAuthenticated()) {
+    // Turno novo ou conexão caída no meio do envio: recomeça da parte 0 depois.
+    // Retomar do meio arriscaria o servidor já ter descartado o começo por
+    // timeout (um turno longo passa dos 60 s dele) e o clipe sumir calado.
+    idleSinceMs = 0;
+    clipNextPart = 0;
+    return;
+  }
+  // Espera a sala acalmar: um speaking_start atrasado (janela pós-wake fechada
+  // por silêncio antes da resposta) ainda marca este clipe como respondido.
+  const uint32_t now = millis();
+  if (idleSinceMs == 0) idleSinceMs = now;
+  if (now - idleSinceMs < WAKE_CLIP_SEND_DELAY_MS) return;
+
+  // Mesmo orçamento do dreno da txQueue: sendBIN pode bloquear com Wi-Fi ruim,
+  // e o loop() precisa voltar a ws.loop()/WifiManager::loop() logo.
+  const uint32_t deadline = now + 15;
+  for (int i = 0; i < WAKE_CLIP_FRAMES_PER_LOOP && clipNextPart < clipPendingCount &&
+                  (int32_t)(millis() - deadline) < 0 &&
+                  StateMachine::current() == StateMachine::State::IDLE_LISTENING;
+       i++) {
+    const AudioChunk &c = clipPending[clipNextPart];
+    if (!LunaWsClient::sendWakeClipPart(clipId, clipNextPart, (uint16_t)clipPendingCount,
+                                        clipProb, clipResponded, (const uint8_t *)c.samples,
+                                        (size_t)c.count * sizeof(int16_t))) {
+      clipNextPart = 0;
+      return;
+    }
+    clipNextPart++;
+  }
+  if (clipNextPart >= clipPendingCount) {
+    Serial.printf("[wake] clipe %lu enviado (%u ms, p=%.3f, %s)\n", (unsigned long)clipId,
+                  (unsigned)(clipPendingCount * 20), clipProb,
+                  clipResponded ? "com resposta" : "sem resposta");
+    clipTurnOpen = false;
+    clipState = CLIP_FREE;
+  }
+}
+#endif
+
 static void captureTask(void *) {
   AudioChunk chunk;
   bool wasStreaming = false;
+#if WAKE_CLIP_UPLOAD
+  bool wasDetecting = false;
+#endif
 
   for (;;) {
     chunk.count = AudioCapture::readChunk(chunk.samples); // bloqueia ~20ms
@@ -252,11 +372,19 @@ static void captureTask(void *) {
 
     // O detector precisa do áudio mesmo (e principalmente) quando nada está
     // sendo transmitido — é justamente esse o estado de escuta passiva.
-    if (wakeBuffer && StateMachine::shouldDetectWake()) {
+    const bool detecting = wakeBuffer && StateMachine::shouldDetectWake();
+    if (detecting) {
       // Sem espera: se o wakeTask atrasou, é melhor perder um chunk de detecção
       // do que segurar o I2S e furar o tempo real da captura.
       xStreamBufferSend(wakeBuffer, chunk.samples, (size_t)chunk.count * sizeof(int16_t), 0);
     }
+#if WAKE_CLIP_UPLOAD
+    // O ring vê exatamente o áudio do detector. Zerado ao voltar à escuta, senão
+    // um wake logo depois de uma resposta levaria áudio de antes do turno.
+    if (detecting && !wasDetecting) clipRingCount = 0;
+    if (detecting) clipRingPush(chunk);
+    wasDetecting = detecting;
+#endif
 
     const bool streaming = StateMachine::shouldStream();
     if (streaming && !wasStreaming) {
@@ -269,6 +397,10 @@ static void captureTask(void *) {
         // Acabou de acordar: manda primeiro o que já estava no pré-buffer, senão
         // o provider recebe o comando sem o começo.
         prerollFlush();
+#if WAKE_CLIP_UPLOAD
+        // Só em wake de verdade: em open-mic o ring nunca enche e isto é no-op.
+        clipSnapshot();
+#endif
       }
     }
     wasStreaming = streaming;
@@ -476,6 +608,22 @@ void setup() {
     preroll = (AudioChunk *)malloc(sizeof(AudioChunk) * WAKE_PREROLL_CHUNKS);
   }
 
+#if WAKE_CLIP_UPLOAD
+  // Só na PSRAM: ~128 KB não cabem na RAM interna sem roubar as arenas. Sem
+  // PSRAM a coleta fica desligada e o resto segue normal.
+  clipRing = (AudioChunk *)heap_caps_malloc(sizeof(AudioChunk) * WAKE_CLIP_CHUNKS,
+                                            MALLOC_CAP_SPIRAM);
+  clipPending = (AudioChunk *)heap_caps_malloc(sizeof(AudioChunk) * WAKE_CLIP_CHUNKS,
+                                               MALLOC_CAP_SPIRAM);
+  if (!clipRing || !clipPending) {
+    Serial.println("[erro] PSRAM indisponível — coleta de clipes de wake desligada");
+    if (clipRing) heap_caps_free(clipRing);
+    if (clipPending) heap_caps_free(clipPending);
+    clipRing = nullptr;
+    clipPending = nullptr;
+  }
+#endif
+
 #if WAKE_WORD_ENABLED
   wakeBuffer = xStreamBufferCreate(CHUNK_BYTES * 8, sizeof(int16_t));
   if (!wakeBuffer || !WakeWord::begin()) {
@@ -586,6 +734,12 @@ void loop() {
     LunaWsClient::sendAudioChunk(seqCounter++, (const uint8_t *)out.samples,
                                  (size_t)out.count * sizeof(int16_t));
   }
+
+#if WAKE_CLIP_UPLOAD
+  // Depois da fila de captura: com o turno encerrado ela está vazia, mas a
+  // ordem deixa explícito que áudio de turno tem prioridade.
+  pumpWakeClip();
+#endif
 
   const uint32_t now = millis();
 

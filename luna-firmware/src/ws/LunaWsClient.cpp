@@ -18,7 +18,8 @@ static SimpleCb speakingEndCb = nullptr;
 static AudioResponseCb audioResponseCb = nullptr;
 
 // Frame de saída: header JSON + PCM concatenados.
-static uint8_t txFrame[192 + CHUNK_BYTES];
+// 256 de header: o `wake_clip` tem ~130 bytes de campos fixos + room_id de até 64.
+static uint8_t txFrame[256 + CHUNK_BYTES];
 
 static void sendAuth() {
   const String token = computeAuthToken(authSecret, deviceId);
@@ -163,6 +164,24 @@ void sendAudioChunk(uint32_t seq, const uint8_t *pcm, size_t len) {
 
   memcpy(txFrame + headerLen, pcm, len);
   ws.sendBIN(txFrame, headerLen + len);
+}
+
+bool sendWakeClipPart(uint32_t clipId, uint16_t part, uint16_t parts, float prob,
+                      bool responded, const uint8_t *pcm, size_t len) {
+  if (!authenticated || len == 0) return false;
+
+  // Sem chaves em nenhum valor: o parser do servidor acha o fim do header
+  // contando chaves (invariante do contrato, ver docs/protocolo-websocket.md).
+  const int headerLen = snprintf(
+      (char *)txFrame, sizeof(txFrame),
+      "{\"type\":\"wake_clip\",\"room_id\":\"%s\",\"clip_id\":%lu,\"part\":%u,\"parts\":%u,"
+      "\"prob\":%.3f,\"responded\":%s,\"ts\":%lu}",
+      roomId.c_str(), (unsigned long)clipId, (unsigned)part, (unsigned)parts, prob,
+      responded ? "true" : "false", (unsigned long)millis());
+  if (headerLen <= 0 || (size_t)headerLen + len > sizeof(txFrame)) return false;
+
+  memcpy(txFrame + headerLen, pcm, len);
+  return ws.sendBIN(txFrame, headerLen + len);
 }
 
 void sendPing() {

@@ -5,11 +5,21 @@ export interface ParsedAudioMessage {
   pcm: Buffer;
 }
 
+/** Tipos que viajam em frame binário (envelope + PCM). */
+const BINARY_TYPES = new Set(['audio_chunk', 'wake_clip']);
+
 /**
  * Mensagens de áudio: envelope JSON imediatamente seguido do payload PCM binário
- * no mesmo frame WebSocket.
+ * no mesmo frame WebSocket. Só `audio_chunk` — ver `parseBinaryMessage` para
+ * qualquer tipo binário.
  */
 export function parseAudioMessage(data: Buffer): ParsedAudioMessage | null {
+  const parsed = parseBinaryMessage(data);
+  return parsed && parsed.envelope.type === 'audio_chunk' ? parsed : null;
+}
+
+/** Frame binário de qualquer tipo binário do contrato (`audio_chunk`, `wake_clip`). */
+export function parseBinaryMessage(data: Buffer): ParsedAudioMessage | null {
   if (data.length === 0) return null;
 
   if (data[0] !== 0x7b) {
@@ -57,7 +67,7 @@ export function parseAudioMessage(data: Buffer): ParsedAudioMessage | null {
 
   const jsonStr = data.subarray(0, jsonEnd + 1).toString('utf8');
   const envelope = parseControlMessage(jsonStr);
-  if (!envelope || envelope.type !== 'audio_chunk') return null;
+  if (!envelope || !BINARY_TYPES.has(envelope.type)) return null;
 
   const pcm = data.subarray(jsonEnd + 1);
   return { envelope, pcm };

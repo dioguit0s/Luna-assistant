@@ -17,7 +17,8 @@ import type { CompassoClient } from '../calendar/CompassoClient.js';
 import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import type { AlarmRinger } from '../reminders/AlarmRinger.js';
 import { validateAuthToken } from './auth.js';
-import { parseAudioMessage } from './messageParser.js';
+import { parseBinaryMessage } from './messageParser.js';
+import type { WakeClipStore } from '../diagnostics/WakeClipStore.js';
 import {
   createEnvelope,
   parseControlMessage,
@@ -155,6 +156,13 @@ export class WsServer {
       weatherSource,
       calendarClient,
     );
+  }
+
+  /** Destino dos `wake_clip`. Sem ele, as partes são descartadas. */
+  private wakeClipStore: WakeClipStore | null = null;
+
+  setWakeClipStore(store: WakeClipStore): void {
+    this.wakeClipStore = store;
   }
 
   /** Liga a API admin. Chamado antes de `start()`. */
@@ -490,7 +498,13 @@ export class WsServer {
     const buf = Buffer.from(data as Buffer);
 
     if (state?.authenticated && isBinary) {
-      const parsed = parseAudioMessage(buf);
+      const parsed = parseBinaryMessage(buf);
+      if (parsed && parsed.envelope.type === 'wake_clip') {
+        // Material de treino, nunca áudio de turno: não passa pelo Orchestrator.
+        // O `room_id` vem da autenticação, não do envelope.
+        this.wakeClipStore?.addPart(state.deviceId, state.roomId, parsed.envelope, parsed.pcm);
+        return;
+      }
       if (parsed && parsed.pcm.length > 0) {
         await this.orchestrator.handleAudioChunk(state.roomId, state.deviceId, parsed.pcm);
         return;
