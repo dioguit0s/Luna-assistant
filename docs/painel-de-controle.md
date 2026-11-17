@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 e v2 implementadas (marcos 1–11) — falta validação manual no app instalado e no servidor de produção; a agenda por voz entrou ([ADR 011](adr/011-agenda-compasso.md)); fora da v2 ficaram as telas da agenda e o "não perturbe"
+**Status:** v1 e v2 implementadas (marcos 1–11) e validadas manualmente no app instalado e no servidor de produção (2026-11-17); a agenda por voz entrou ([ADR 011](adr/011-agenda-compasso.md)); fora da v2 ficaram as telas da agenda e o "não perturbe"
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -293,7 +293,10 @@ Marcos 6 a 11, cada um com commit próprio e passado pelo `luna-code-reviewer`:
 A migração 4 do banco (tabelas do diagnóstico) torna o deploy de mão única — ver
 `luna-server/deploy/README.md`.
 
-### Verificação manual pendente
+### Verificação manual
+
+✅ Todos os passos abaixo confirmados pelo usuário em 2026-11-17. Ficam aqui como roteiro
+para repetir depois de mudanças grandes.
 
 1. No servidor: reinstalar a unit (`sudo cp` + `daemon-reload`, ver `deploy/README.md`) e
    definir `LUNA_ADMIN_TOKEN` em `/etc/luna-server.env` **antes** do deploy — o
