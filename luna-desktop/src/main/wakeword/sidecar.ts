@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { app } from 'electron';
 
 import { parseWakewordLine, type WakewordEvent } from './protocol.js';
+import { ensureSidecarPython, invalidateSidecarVenv, type ProvisionStage } from './python-env.js';
 
 // De dist/main/wakeword/ sobe três níveis até a raiz do projeto — mesmo
 // padrão de PROJECT_ROOT em config.ts / ASSETS_DIR em tray.ts, um nível mais
@@ -28,7 +29,10 @@ const PROJECT_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const SIDECAR_DIR = app.isPackaged
   ? join(process.resourcesPath, 'wakeword-sidecar')
   : join(PROJECT_ROOT, 'wakeword-sidecar');
-const DEFAULT_PYTHON_PATH = join(SIDECAR_DIR, '.venv', 'Scripts', 'python.exe');
+// Em dev, o venv do checkout (criado à mão, ver wakeword-sidecar/README.md).
+// Empacotado, o venv mora no userData e é criado pelo próprio app — ver
+// python-env.ts para o porquê (o NSIS apaga resources/ a cada reinstalação).
+const DEV_PYTHON_PATH = join(SIDECAR_DIR, '.venv', 'Scripts', 'python.exe');
 
 // Em dev, wake_sidecar.py resolve seu próprio default (hey_luna_ptbr_v2.tflite)
 // relativo ao checkout do monorepo (luna-firmware/models/, fora de
@@ -46,9 +50,17 @@ const RESTART_BACKOFF_MAX_MS = 30_000;
 // se corrige sozinho — pula direto pro teto do backoff em vez de martelar a
 // cada 1s. Mesmo racional do AUTH_ERROR_BACKOFF_MS em ws/client.ts.
 const FATAL_ERROR_BACKOFF_MS = RESTART_BACKOFF_MAX_MS;
+// Preparação do venv que falhou (sem Python, sem rede): cada nova tentativa
+// roda um `pip install` inteiro, então o intervalo cresce até 30 min em vez de
+// martelar a cada 30 s num app de bandeja que sobe com o Windows.
+const PROVISION_BACKOFF_MAX_MS = 30 * 60_000;
 
 export interface WakewordSidecarOptions {
-  /** Default: wakeword-sidecar/.venv/Scripts/python.exe */
+  /**
+   * Python explícito, sem provisionamento. Omitido: em dev,
+   * wakeword-sidecar/.venv/Scripts/python.exe; empacotado, o venv do userData
+   * (criado na primeira execução e reinstalado quando o requirements.txt muda).
+   */
   pythonPath?: string;
   /**
    * --model — omitido usa hey_luna_ptbr_v2.tflite: em dev, o default do
@@ -69,6 +81,8 @@ export interface WakewordSidecarEvents {
   crashed: (info: { code: number | null; signal: NodeJS.Signals | null }) => void;
   restartScheduled: (delayMs: number) => void;
   fatalError: (message: string) => void;
+  /** Preparando o venv: uma vez por preparação, com a primeira etapa (só empacotado). */
+  provisioning: (stage: ProvisionStage) => void;
 }
 
 export declare interface WakewordSidecar {
@@ -85,6 +99,17 @@ export class WakewordSidecar extends EventEmitter {
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private backoffMs = RESTART_BACKOFF_INITIAL_MS;
   private sawFatalError = false;
+  /** Python pronto para o spawn; zera se o spawn falhar (venv apagado no meio). */
+  private resolvedPython: string | null = null;
+  private provisioningInFlight: Promise<void> | null = null;
+  private provisionAbort: AbortController | null = null;
+  /** Falhas seguidas de preparação: dita o backoff e cala a notificação repetida. */
+  private provisionFailures = 0;
+  private lastProvisionError: string | null = null;
+  /** O processo atual mandou `ready`? Sair antes disso com venv provisionado = venv suspeito. */
+  private sawReady = false;
+  /** Uma repreparação forçada por execução do app, para não virar laço. */
+  private forcedReprovision = false;
 
   constructor(private readonly opts: WakewordSidecarOptions = {}) {
     super();
@@ -93,12 +118,70 @@ export class WakewordSidecar extends EventEmitter {
   /** Inicia o processo (e o ciclo de restart automático até stop()). */
   start(): void {
     this.stopped = false;
-    this.spawnChild();
+    this.launch();
+  }
+
+  /** Garante o Python (empacotado: venv no userData) e sobe o processo. */
+  private launch(): void {
+    const explicit = this.opts.pythonPath ?? (app.isPackaged ? null : DEV_PYTHON_PATH);
+    if (explicit) {
+      this.spawnChild(explicit);
+      return;
+    }
+    if (this.resolvedPython) {
+      this.spawnChild(this.resolvedPython);
+      return;
+    }
+    // Um `setThreshold` no meio da instalação faz stop()+start(): a mesma
+    // instalação serve, e o `.then` abaixo sobe o processo se ainda fizer sentido.
+    if (this.provisioningInFlight) return;
+
+    // Só a primeira etapa da primeira tentativa avisa: criar o venv já implica
+    // instalar em seguida, e uma retentativa depois de falha já foi notificada.
+    let announced = this.provisionFailures > 0;
+    const abort = new AbortController();
+    this.provisionAbort = abort;
+    this.provisioningInFlight = ensureSidecarPython({
+      venvDir: this.venvDir(),
+      requirementsPath: join(SIDECAR_DIR, 'requirements.txt'),
+      signal: abort.signal,
+      onProvision: (stage) => {
+        console.log(`[wakeword-sidecar] preparando o ambiente Python (${stage})`);
+        if (!announced) this.emit('provisioning', stage);
+        announced = true;
+      },
+    })
+      .then((python) => {
+        this.resolvedPython = python;
+        this.provisionFailures = 0;
+        this.lastProvisionError = null;
+        if (!this.stopped && !this.child) this.spawnChild(python);
+      })
+      .catch((err: unknown) => {
+        if (this.stopped) return; // app saindo ou reinício: o cancelamento é esperado
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[wakeword-sidecar] ${message}`);
+        this.provisionFailures += 1;
+        // Mesma falha de novo (ainda sem Python, ainda sem rede): só o log.
+        if (message !== this.lastProvisionError) this.emit('fatalError', message);
+        this.lastProvisionError = message;
+        this.scheduleRestart(
+          Math.min(FATAL_ERROR_BACKOFF_MS * 2 ** (this.provisionFailures - 1), PROVISION_BACKOFF_MAX_MS),
+        );
+      })
+      .finally(() => {
+        if (this.provisionAbort === abort) this.provisionAbort = null;
+        this.provisioningInFlight = null;
+      });
   }
 
   /** Encerra de vez — usado no app.quit(). Não reinicia depois disso. */
   stop(): void {
     this.stopped = true;
+    // Mata o venv/pip em curso: órfão, ele continuaria escrevendo no venv
+    // enquanto o app reaberto começa outro pip no mesmo lugar.
+    this.provisionAbort?.abort();
+    this.provisionAbort = null;
     if (this.restartTimer) {
       clearTimeout(this.restartTimer);
       this.restartTimer = null;
@@ -129,8 +212,11 @@ export class WakewordSidecar extends EventEmitter {
     this.child.stdin.write(pcm);
   }
 
-  private spawnChild(): void {
-    const pythonPath = this.opts.pythonPath ?? DEFAULT_PYTHON_PATH;
+  private venvDir(): string {
+    return join(app.getPath('userData'), 'wakeword-venv');
+  }
+
+  private spawnChild(pythonPath: string): void {
     const model = this.opts.model ?? DEFAULT_MODEL_PATH;
     const args = ['wake_sidecar.py', '--stdin'];
     if (model) args.push('--model', model);
@@ -143,6 +229,7 @@ export class WakewordSidecar extends EventEmitter {
     const child = spawn(pythonPath, args, { cwd: SIDECAR_DIR, windowsHide: true });
     this.child = child;
     this.sawFatalError = false;
+    this.sawReady = false;
 
     child.stdout.setEncoding('utf8');
     createInterface({ input: child.stdout }).on('line', (line) => this.handleLine(line));
@@ -168,6 +255,8 @@ export class WakewordSidecar extends EventEmitter {
       // Falha do próprio spawn (ex. python.exe não existe porque o venv não
       // foi criado) — não passa por 'exit', precisa de handler próprio.
       console.error(`[wakeword-sidecar] falha ao iniciar processo: ${err.message}`);
+      // Venv sumiu depois de pronto: a próxima tentativa refaz o provisionamento.
+      this.resolvedPython = null;
       this.emit('fatalError', err.message);
       this.child = null;
       this.scheduleRestart();
@@ -178,6 +267,20 @@ export class WakewordSidecar extends EventEmitter {
       this.child = null;
       if (this.stopped) return;
       console.warn(`[wakeword-sidecar] processo saiu (code=${code} signal=${signal})`);
+      // Saiu antes do `ready` sem erro estruturado do próprio sidecar: o python
+      // do venv existe mas não sobe (Python base desinstalado, site-packages
+      // danificado). O hash do requirements não vê isso — força refazer o venv.
+      if (
+        this.resolvedPython !== null &&
+        !this.sawReady &&
+        !this.sawFatalError &&
+        !this.forcedReprovision
+      ) {
+        console.warn('[wakeword-sidecar] venv não subiu — será recriado na próxima tentativa');
+        this.forcedReprovision = true;
+        invalidateSidecarVenv(this.venvDir());
+        this.resolvedPython = null;
+      }
       this.emit('crashed', { code, signal });
       this.scheduleRestart();
     });
@@ -192,6 +295,7 @@ export class WakewordSidecar extends EventEmitter {
 
     switch (event.event) {
       case 'ready':
+        this.sawReady = true;
         this.backoffMs = RESTART_BACKOFF_INITIAL_MS; // processo saudável reseta o backoff
         this.emit('ready', event);
         break;
@@ -216,16 +320,16 @@ export class WakewordSidecar extends EventEmitter {
     }
   }
 
-  private scheduleRestart(): void {
+  private scheduleRestart(delayOverride?: number): void {
     if (this.stopped) return;
 
-    const delay = this.sawFatalError ? FATAL_ERROR_BACKOFF_MS : this.backoffMs;
-    this.backoffMs = Math.min(this.backoffMs * 2, RESTART_BACKOFF_MAX_MS);
+    const delay = delayOverride ?? (this.sawFatalError ? FATAL_ERROR_BACKOFF_MS : this.backoffMs);
+    if (delayOverride === undefined) this.backoffMs = Math.min(this.backoffMs * 2, RESTART_BACKOFF_MAX_MS);
 
     this.emit('restartScheduled', delay);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      if (!this.stopped) this.spawnChild();
+      if (!this.stopped) this.launch();
     }, delay);
   }
 }
