@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseAudioMessage } from './messageParser.js';
+import { parseAudioMessage, parseBinaryMessage } from './messageParser.js';
 
 function buildFrame(headerObj: Record<string, unknown>, pcm: Buffer): Buffer {
   const headerBuf = Buffer.from(JSON.stringify(headerObj), 'utf8');
@@ -64,5 +64,43 @@ describe('parseAudioMessage', () => {
   it('buffer vazio ou que não começa com "{" retorna null', () => {
     assert.equal(parseAudioMessage(Buffer.alloc(0)), null);
     assert.equal(parseAudioMessage(Buffer.from([0x01, 0x02])), null);
+  });
+
+  it('wake_clip não é audio_chunk: não pode virar áudio de turno', () => {
+    const frame = buildFrame({ type: 'wake_clip', room_id: 'sala', clip_id: 1 }, Buffer.from([1, 2]));
+    assert.equal(parseAudioMessage(frame), null);
+  });
+});
+
+describe('parseBinaryMessage', () => {
+  it('aceita wake_clip com os campos do clipe', () => {
+    const pcm = Buffer.from([1, 0, 2, 0]);
+    const frame = buildFrame(
+      {
+        type: 'wake_clip',
+        room_id: 'sala',
+        clip_id: 123456,
+        part: 3,
+        parts: 100,
+        prob: 0.873,
+        responded: false,
+        ts: 99,
+      },
+      pcm,
+    );
+
+    const parsed = parseBinaryMessage(frame);
+
+    assert.ok(parsed);
+    assert.equal(parsed!.envelope.type, 'wake_clip');
+    assert.equal(parsed!.envelope.clip_id, 123456);
+    assert.equal(parsed!.envelope.part, 3);
+    assert.equal(parsed!.envelope.responded, false);
+    assert.deepEqual(parsed!.pcm, pcm);
+  });
+
+  it('aceita audio_chunk e recusa tipo de controle', () => {
+    assert.ok(parseBinaryMessage(buildFrame({ type: 'audio_chunk', room_id: 'sala' }, Buffer.from([1]))));
+    assert.equal(parseBinaryMessage(buildFrame({ type: 'ping', room_id: 'sala' }, Buffer.from([1]))), null);
   });
 });

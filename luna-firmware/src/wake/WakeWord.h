@@ -34,6 +34,9 @@ uint32_t avgInferenceUs(); // média por feature: preprocessador + streaming
 uint32_t maxInferenceUs();
 float cpuLoadPct();        // tempo de inferência / tempo de áudio processado
 float lastProbability();
+// Média da janela deslizante no instante do último disparo (o valor comparado
+// com WAKE_PROB_CUTOFF). Vai junto no `wake_clip` para rotular o clipe.
+float detectionProbability();
 void resetStats();
 
 // Diagnóstico do preprocessador (só útil com WAKE_DEBUG=1). Preenche a linha e

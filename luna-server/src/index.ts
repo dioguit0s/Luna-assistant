@@ -19,6 +19,7 @@ import { RuntimeSettings } from './settings/RuntimeSettings.js';
 import { AdminApi } from './admin/AdminApi.js';
 import { DiagnosticsStore } from './diagnostics/DiagnosticsStore.js';
 import { Diagnostics } from './diagnostics/Diagnostics.js';
+import { WakeClipStore } from './diagnostics/WakeClipStore.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -177,6 +178,13 @@ async function main(): Promise<void> {
   wsServer.setRuntimeConfigSource(() => settings.current());
   wsServer.setBlockedSource((deviceId) => settings.get('satellites').blocked.includes(deviceId));
 
+  // Clipes de wake dos satélites (material de treino). Desligado sem WAKE_CLIP_DIR.
+  const wakeClipStore = WakeClipStore.fromEnv();
+  wsServer.setWakeClipStore(wakeClipStore);
+  if (wakeClipStore.enabled) {
+    getLogger().info({ event: 'wake_clips_enabled', dir: process.env.WAKE_CLIP_DIR }, 'Coleta de clipes de wake ligada');
+  }
+
   // `shutdown` só existe mais abaixo; o reinício pelo painel chega por aqui.
   let requestRestart: () => void = () => {};
   wsServer.setAdminHandler(
@@ -258,6 +266,7 @@ async function main(): Promise<void> {
     forceExit.unref();
 
     diagnostics.stop();
+    await wakeClipStore.flush();
     await wsServer.stop();
     deviceRegistry.stop();
     weatherSource.stop();

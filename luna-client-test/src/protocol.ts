@@ -9,6 +9,9 @@ export type MessageType =
   | 'auth_ok'
   | 'auth_error'
   | 'audio_chunk'
+  // Só o firmware manda (clipes de wake para treino); aqui só para o tipo
+  // acompanhar o contrato — ver docs/protocolo-websocket.md.
+  | 'wake_clip'
   | 'activity_end'
   | 'speaking_start'
   | 'audio_response'

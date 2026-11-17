@@ -21,6 +21,14 @@ bool isAuthenticated();  // auth_ok recebido
 // Envia um chunk de captura (header audio_chunk + PCM) num frame binário.
 void sendAudioChunk(uint32_t seq, const uint8_t *pcm, size_t len);
 
+// Envia uma parte de um clipe de wake (header wake_clip + PCM) num frame
+// binário. `clipId` identifica o clipe (millis() do disparo), `part` vai de 0 a
+// parts-1, em ordem. `prob` é a média que disparou; `responded` diz se o turno
+// teve resposta do servidor (speaking_start) — wake sem resposta é o candidato
+// mais forte a falso disparo. Retorna false se não enviou (sem auth/frame grande).
+bool sendWakeClipPart(uint32_t clipId, uint16_t part, uint16_t parts, float prob,
+                      bool responded, const uint8_t *pcm, size_t len);
+
 // Envia ping de aplicação (servidor responde pong se autenticado).
 void sendPing();
 

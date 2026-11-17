@@ -56,6 +56,7 @@ static int strideStep = 0;
 
 static volatile bool detectedFlag = false;
 static float lastProb = 0.0f;
+static volatile float detectionProb = 0.0f; // escrito no wakeTask, lido no loop()
 
 // Estatísticas de custo. Dois acumuladores distintos de propósito:
 // `totalWorkUs` soma TODO o trabalho (preprocessador de cada slice + Invoke do
@@ -368,6 +369,7 @@ static void runFeature() {
   for (int i = 0; i < WAKE_SLIDING_WINDOW; i++) sum += recentProbs[i];
 
   if (sum > WAKE_PROB_CUTOFF * WAKE_SLIDING_WINDOW) {
+    detectionProb = sum / WAKE_SLIDING_WINDOW;
     detectedFlag = true;
     ignoreWindows = WAKE_REARM_WINDOWS;
     Serial.printf("[wake] DETECTADO (média %.3f)\n", sum / WAKE_SLIDING_WINDOW);
@@ -447,6 +449,8 @@ float cpuLoadPct() {
 }
 
 float lastProbability() { return lastProb; }
+
+float detectionProbability() { return detectionProb; }
 
 void resetStats() {
   totalWorkUs = 0;

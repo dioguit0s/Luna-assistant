@@ -188,6 +188,25 @@
 #define WAKE_PREROLL_MS 240
 #define WAKE_PREROLL_CHUNKS (WAKE_PREROLL_MS / 20) // chunks de 20ms
 
+// Coleta de clipes de wake (material de treino, ver wake-training/README.md,
+// "Coleta de disparos reais"). A cada wake, os últimos WAKE_CLIP_MS que o
+// detector ouviu são guardados na PSRAM e enviados ao servidor como `wake_clip`
+// DEPOIS que o turno acaba (volta a IDLE_LISTENING) — nunca disputam banda com
+// o áudio do turno, então não entram no TTFAB. O servidor só grava com
+// WAKE_CLIP_DIR configurado; sem isso descarta. 2 s cobrem a janela de 1,5 s
+// do modelo com folga. Custa 2 * WAKE_CLIP_CHUNKS * ~642 B de PSRAM (~128 KB).
+#define WAKE_CLIP_UPLOAD 1
+#define WAKE_CLIP_MS 2000
+#define WAKE_CLIP_CHUNKS (WAKE_CLIP_MS / 20) // chunks de 20ms
+// Frames enviados por iteração do loop(): cada sendBIN pode bloquear com Wi-Fi
+// ruim, e o loop() é quem cuida de ws.loop() e da FSM. 100 frames saem em ~25
+// iterações, poucas dezenas de ms no caso normal.
+#define WAKE_CLIP_FRAMES_PER_LOOP 4
+// Espera em IDLE_LISTENING antes de começar a subir: um speaking_start que
+// chegue depois de a janela pós-wake fechar ainda rotula o clipe como "com
+// resposta" (e a última parte leva o valor definitivo ao servidor).
+#define WAKE_CLIP_SEND_DELAY_MS 3000
+
 // Bipe curto de confirmação, empurrado pelo buffer de playback (não pelo I2S
 // direto) para não disputar o barramento com o playbackTask.
 #define WAKE_CHIRP_FREQ_HZ 1200

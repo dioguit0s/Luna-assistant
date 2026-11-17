@@ -3,6 +3,7 @@ export const AUDIO_CHUNK_SIZE = 640;
 export type MessageType =
   | 'auth'
   | 'audio_chunk'
+  | 'wake_clip'
   | 'activity_end'
   | 'speaking_start'
   | 'audio_response'
@@ -29,6 +30,16 @@ export interface MessageEnvelope {
   action?: 'on' | 'off';
   /** `command_result`: entidade acionada no Home Assistant. */
   entity_id?: string;
+  /** `wake_clip`: identifica o clipe (uptime do satélite no disparo). */
+  clip_id?: number;
+  /** `wake_clip`: índice desta parte, de 0 a `parts - 1`, em ordem. */
+  part?: number;
+  /** `wake_clip`: total de partes do clipe. */
+  parts?: number;
+  /** `wake_clip`: média da janela deslizante que disparou o wake. */
+  prob?: number;
+  /** `wake_clip`: se o turno desse wake teve resposta (`speaking_start`). */
+  responded?: boolean;
 }
 
 export function createEnvelope(

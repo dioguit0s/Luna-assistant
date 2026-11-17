@@ -28,7 +28,8 @@ src/
 │   └── logTap.ts         #   cópia de cada linha para o diagnóstico, sem transcrição
 ├── diagnostics/          # diagnóstico do painel (v2), alimentado só pelo log
 │   ├── Diagnostics.ts    #   ttfab → série, erros → error_log, buffer do log ao vivo
-│   └── DiagnosticsStore.ts#  tabelas latency_samples e error_log, poda 30 d / 10 mil
+│   ├── DiagnosticsStore.ts#  tabelas latency_samples e error_log, poda 30 d / 10 mil
+│   └── WakeClipStore.ts  #   `wake_clip` → WAV + JSON em WAKE_CLIP_DIR (treino da wake word)
 ├── time/clock.ts         # relógio único do processo
 ├── ws/                   # camada de transporte
 │   ├── WsServer.ts       #   servidor WS + HTTP /health, auth, fan-out por sala
