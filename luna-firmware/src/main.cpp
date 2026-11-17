@@ -611,6 +611,15 @@ static void updateStatusLed() {
 // Setup / Loop
 // ============================================================================
 void setup() {
+  // Serial é o USB CDC nativo (HWCDC). Com o cabo num PC SEM monitor aberto, o
+  // host enumera mas não lê: cada write esperava 100 ms por bloco, até 20
+  // vezes (~2 s por printf). O loop() parava segundos a cada log e o WebSocket
+  // não era atendido — config_ack, device_info e alarmes chegavam com 5-10 s de
+  // atraso, e tudo "funcionava" assim que alguém abria o monitor. Sem timeout,
+  // o log é descartado quando ninguém lê; o buffer maior segura as rajadas
+  // (boot, wake stats) com o monitor aberto.
+  Serial.setTxBufferSize(4096);
+  Serial.setTxTimeoutMs(0);
   Serial.begin(115200);
   // USB Serial/JTAG (HWCDC): o USB reenumera no boot e o monitor leva um instante
   // para reconectar. Sem esta espera, o banner e os primeiros logs se perdem.
