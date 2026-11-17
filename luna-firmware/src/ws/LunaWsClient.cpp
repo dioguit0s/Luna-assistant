@@ -1,8 +1,10 @@
 #include "LunaWsClient.h"
 #include "Auth.h"
 #include "config.h"
+#include "version.h"
 #include <ArduinoJson.h>
 #include <WebSocketsClient.h>
+#include <WiFi.h>
 
 namespace LunaWsClient {
 
@@ -11,6 +13,13 @@ static String roomId;
 static String deviceId;
 static String authSecret;
 static bool authenticated = false;
+
+// IP anunciado no último device_info desta conexão (0 = ainda não mandou).
+// O loop() compara com o IP atual e reenvia se mudou (DHCP renovou com outro
+// endereço sem derrubar o socket).
+static uint32_t announcedIp = 0;
+static uint32_t lastIpCheckMs = 0;
+static const uint32_t IP_CHECK_INTERVAL_MS = 2000;
 
 static SimpleCb authOkCb = nullptr;
 static SimpleCb speakingStartCb = nullptr;
@@ -37,6 +46,33 @@ static void sendAuth() {
   Serial.println("[ws] auth enviado");
 }
 
+// Satélite descreve a si mesmo: versão do firmware, IP, MAC e saúde barata de
+// coletar. Mandado logo após auth_ok e de novo se o IP mudar. Servidor antigo
+// loga como "Mensagem de controle ignorada" e segue (ver protocolo-websocket.md).
+static void sendDeviceInfo() {
+  const IPAddress ip = WiFi.localIP();
+
+  JsonDocument doc;
+  doc["type"] = "device_info";
+  doc["room_id"] = roomId;
+  doc["ts"] = (uint32_t)millis();
+  doc["fw_version"] = FW_VERSION;
+  doc["fw_build"] = FW_BUILD;
+  doc["ip"] = ip.toString();
+  doc["mac"] = WiFi.macAddress();
+  doc["rssi"] = (int)WiFi.RSSI();
+  doc["free_heap"] = (uint32_t)ESP.getFreeHeap();
+  doc["uptime_ms"] = (uint32_t)millis();
+
+  String out;
+  serializeJson(doc, out);
+  // Só marca como anunciado se saiu: senão o loop() tenta de novo em 2 s.
+  if (!ws.sendTXT(out)) return;
+  announcedIp = (uint32_t)ip;
+  Serial.printf("[ws] device_info enviado (%s+%s, ip=%s)\n", FW_VERSION, FW_BUILD,
+                ip.toString().c_str());
+}
+
 static void handleTextFrame(const uint8_t *payload, size_t length) {
   JsonDocument doc;
   if (deserializeJson(doc, payload, length) != DeserializationError::Ok) {
@@ -47,6 +83,7 @@ static void handleTextFrame(const uint8_t *payload, size_t length) {
   if (strcmp(type, "auth_ok") == 0) {
     authenticated = true;
     Serial.println("[ws] auth_ok");
+    sendDeviceInfo();
     if (authOkCb) authOkCb();
   } else if (strcmp(type, "auth_error") == 0) {
     const char *reason = doc["reason"] | "desconhecido";
@@ -113,6 +150,7 @@ static void onWsEvent(WStype_t type, uint8_t *payload, size_t length) {
   case WStype_CONNECTED:
     Serial.printf("[ws] conectado — autenticando (heap: %u)\n", ESP.getFreeHeap());
     authenticated = false;
+    announcedIp = 0;
     sendAuth();
     break;
   case WStype_DISCONNECTED:
@@ -147,7 +185,16 @@ void begin(const char *host, uint16_t port, const char *path, const String &room
   ws.enableHeartbeat(15000, 3000, 2);
 }
 
-void loop() { ws.loop(); }
+void loop() {
+  ws.loop();
+
+  if (!authenticated) return;
+  const uint32_t now = millis();
+  if (now - lastIpCheckMs < IP_CHECK_INTERVAL_MS) return;
+  lastIpCheckMs = now;
+  const uint32_t ip = (uint32_t)WiFi.localIP();
+  if (ip != 0 && ip != announcedIp) sendDeviceInfo();
+}
 
 bool isConnected() { return ws.isConnected(); }
 

@@ -396,6 +396,9 @@ describe('API admin', () => {
     const sat = res.body.satellites.find((s: { device_id: string }) => s.device_id === 'esp32-aa');
     assert.equal(sat.name, 'Quarto');
     assert.equal(sat.online, false);
+    // Nunca conectou: sem device_info nem endereço — o painel mostra "desconhecida".
+    assert.equal(sat.device_info, null);
+    assert.equal(sat.remote_address, null);
   });
 
   it('lista e cancela lembretes', async () => {

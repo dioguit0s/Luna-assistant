@@ -243,6 +243,17 @@ function connect(): WebSocket {
 
       if (envelope.type === 'auth_ok') {
         console.log('Autenticado. Fale no microfone (Ctrl+C para sair).');
+        // Bancada também é satélite: sem IP local (o servidor usa o endereço do
+        // socket), versão do package.json quando rodado via npm.
+        ws.send(
+          serializeControlMessage(
+            createEnvelope('device_info', cfg.roomId, {
+              fw_version: process.env.npm_package_version ?? 'dev',
+              fw_build: 'client-test',
+              uptime_ms: Math.round(process.uptime() * 1000),
+            }),
+          ),
+        );
         void (async () => {
           try {
             playback = await startPlayback();

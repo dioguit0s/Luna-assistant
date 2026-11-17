@@ -72,6 +72,14 @@ pio run -t upload       # grava
 pio device monitor      # log serial (115200)
 ```
 
+### Versão do firmware
+
+`custom_fw_version` no `platformio.ini` é a versão (semver) — **suba a cada release**. O
+build (SHA curto do último commit que tocou `luna-firmware/`, `.dirty` com mudança não
+commitada) é anexado sozinho por
+`tools/fw_version.py`. O boot loga `Firmware: 0.4.0+abc1234` e o satélite anuncia os dois
+no `device_info`, que é o que aparece na tela de Satélites do painel.
+
 ## Validação faseada
 
 1. **Captura (INMP441):** use `AudioCapture::lastPeak()` (0..32767) para conferir o mic —

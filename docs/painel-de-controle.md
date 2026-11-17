@@ -57,7 +57,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Nome amigável por satélite | API + Persist | v1 |
 | Desconectar ou bloquear um satélite (aparelho perdido) | API + Persist | v2 ✔ |
 | "Tocar som / piscar LED" para identificar | Proto + FW | depois |
-| Versão do firmware, IP, sinal do Wi-Fi | Proto + FW | depois |
+| Versão do firmware, IP, sinal do Wi-Fi (`device_info`) | Proto + FW | ✔ |
 | Trocar a sala sem recompilar (hoje `ROOM_ID` é compilado) | Proto + FW | depois |
 | Rotacionar o segredo (`SecretStore::setAuthSecret` existe, nada o aciona) | Proto + FW | depois |
 | Provisionar satélite novo por USB (Wi-Fi, servidor e segredo na NVS) | Tela + FW | depois |
@@ -155,7 +155,7 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 |---|---|
 | `GET status` | Versão, `release` (`{ sha, deployed_at }` do `release.json` que o CI grava, ou `null`), uptime, satélites online, semáforo por conexão (`ha`, `provider`, `weather`, `calendar`: `ok`/`error`/`unknown`/`off`) e os 5 próximos lembretes |
 | `GET bootstrap` | Porta, caminho do banco, nível de log — só leitura, sem segredo |
-| `GET satellites` | Conectados agora + vistos desde o boot + nomeados; `online`, `connected_since`, `last_seen_at` |
+| `GET satellites` | Conectados agora + vistos desde o boot + nomeados; `online`, `connected_since`, `last_seen_at`, `device_info` (`fw_version`, `fw_build`, `ip`, `mac`, `rssi`, `free_heap`, `uptime_ms`, `received_at` — `null` se o satélite nunca mandou, e o painel mostra "desconhecida") e `remote_address` (endereço do socket, fallback do IP) |
 | `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove; `{ "blocked": true }` recusa o satélite no handshake e derruba a conexão aberta (v2) |
 | `POST satellites/:device_id/disconnect` | Fecha as conexões do satélite; ele reconecta sozinho — v2 |
 | `GET backup` | Configuração de runtime (sem nenhum campo de segredo) e lembretes vivos, `format: "luna-backup"`, `version: 1` — v2 |

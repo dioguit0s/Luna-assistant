@@ -5,6 +5,7 @@ export type MessageType =
   | 'audio_chunk'
   | 'wake_clip'
   | 'activity_end'
+  | 'device_info'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
@@ -40,6 +41,20 @@ export interface MessageEnvelope {
   prob?: number;
   /** `wake_clip`: se o turno desse wake teve resposta (`speaking_start`). */
   responded?: boolean;
+  /** `device_info`: versão do firmware (semver) ou do app, no desktop. */
+  fw_version?: string;
+  /** `device_info`: build do firmware (SHA curto do git, ou `dev`). */
+  fw_build?: string;
+  /** `device_info`: IP local do satélite (IPv4 no firmware; o desktop pode mandar IPv6). */
+  ip?: string;
+  /** `device_info`: MAC do satélite. */
+  mac?: string;
+  /** `device_info`: sinal do Wi-Fi em dBm. Ausente fora de Wi-Fi (desktop). */
+  rssi?: number;
+  /** `device_info`: heap livre em bytes no envio. */
+  free_heap?: number;
+  /** `device_info`: uptime do satélite em ms no envio. */
+  uptime_ms?: number;
 }
 
 export function createEnvelope(

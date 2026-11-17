@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include "config.h"
+#include "version.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -571,6 +572,7 @@ void setup() {
   // para reconectar. Sem esta espera, o banner e os primeiros logs se perdem.
   delay(1200);
   Serial.println("\n=== Luna — Satélite ESP32-S3 (Épico 2) ===");
+  Serial.printf("Firmware: %s+%s\n", FW_VERSION, FW_BUILD);
   Serial.printf("PSRAM: %s\n", psramFound() ? "detectada" : "AUSENTE");
   Serial.printf("Boot anterior: %s\n", resetReasonStr(esp_reset_reason()));
 

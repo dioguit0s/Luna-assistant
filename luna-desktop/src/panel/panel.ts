@@ -841,6 +841,27 @@ pages.push({
 
 // ─── 02 Satélites ────────────────────────────────────────────────────────
 
+/** `0.4.0+abc1234`; satélite que nunca mandou `device_info` (firmware antigo) = desconhecida. */
+function firmwareLabel(s: any): string {
+  const info = s.device_info;
+  if (!info?.fw_version) return 'DESCONHECIDA';
+  return info.fw_build ? `${info.fw_version}+${info.fw_build}` : info.fw_version;
+}
+
+/** IP que o satélite anunciou; sem `device_info`, o endereço do socket. */
+function ipLabel(s: any): { text: string; viaSocket: boolean } {
+  if (s.device_info?.ip) return { text: s.device_info.ip, viaSocket: false };
+  if (s.remote_address) return { text: s.remote_address, viaSocket: true };
+  return { text: '—', viaSocket: false };
+}
+
+/** dBm → nota grosseira, nas faixas de sempre do Wi-Fi 2.4 GHz. */
+function rssiLabel(rssi: number | null | undefined): { text: string; tone: string } {
+  if (typeof rssi !== 'number') return { text: '—', tone: 'fg' };
+  const grade = rssi >= -60 ? 'ÓTIMO' : rssi >= -70 ? 'BOM' : rssi >= -80 ? 'FRACO' : 'RUIM';
+  return { text: `${rssi} dBm · ${grade}`, tone: rssi >= -70 ? '' : 'amber' };
+}
+
 let selectedSatellite: string | null = null;
 let editingSatellite: string | null = null;
 /** `device_id` com o S/N de bloqueio aberto. */
@@ -863,7 +884,7 @@ pages.push({
     }
     if (!sats.some((s) => s.device_id === selectedSatellite)) selectedSatellite = sats[0].device_id;
 
-    const cols = '150px 150px 100px 96px 100px minmax(0,1fr)';
+    const cols = '150px 150px 100px 96px 128px 100px minmax(0,1fr)';
     const rows = sats.map((s) => {
       const selected = s.device_id === selectedSatellite;
       let nameCell: HTMLElement;
@@ -920,6 +941,7 @@ pages.push({
         nameCell,
         h('span', { class: 'ellipsis' }, s.room_id ?? '—'),
         h('span', { class: s.blocked ? 'amber' : s.online ? 'hi' : 'fg' }, s.blocked ? '⊘ BLOQUEADO' : s.online ? '▣ ONLINE' : '— OFFLINE'),
+        h('span', { class: `raw nowrap ellipsis${s.device_info?.fw_version ? '' : ' fg'}`, title: firmwareLabel(s) }, firmwareLabel(s)),
         h('span', {}, s.online ? formatStamp(s.connected_since) : '—'),
         h('span', {}, formatAgo(s.last_seen_at)),
       );
@@ -928,7 +950,7 @@ pages.push({
     const table = h(
       'div',
       { class: 'tbl', style: 'flex:1;min-width:0' },
-      grid(cols, { class: 'tbl-head strong' }, h('span', {}, 'DEVICE_ID'), h('span', {}, 'NOME'), h('span', {}, 'SALA'), h('span', {}, 'ESTADO'), h('span', {}, 'CONECTADO DESDE'), h('span', {}, 'ÚLTIMO SINAL')),
+      grid(cols, { class: 'tbl-head strong' }, h('span', {}, 'DEVICE_ID'), h('span', {}, 'NOME'), h('span', {}, 'SALA'), h('span', {}, 'ESTADO'), h('span', {}, 'FIRMWARE'), h('span', {}, 'CONECTADO DESDE'), h('span', {}, 'ÚLTIMO SINAL')),
       ...rows,
       h(
         'div',
@@ -940,7 +962,6 @@ pages.push({
     );
 
     const sel = sats.find((s) => s.device_id === selectedSatellite)!;
-    const future = (label: string): HTMLElement => grid('96px 1fr', { class: 'grid dim', style: 'align-items:start' }, h('span', {}, label), h('span', {}, 'INDISPONÍVEL NESTA VERSÃO'));
     // Bloquear pede S/N: corta o aparelho até alguém desbloquear aqui.
     const blockControls: HTMLElement = (() => {
       if (sel.blocked) {
@@ -977,10 +998,13 @@ pages.push({
       kv('ESTADO', sel.blocked ? '⊘ BLOQUEADO' : sel.online ? '▣ ONLINE' : '— OFFLINE', sel.blocked ? 'amber' : sel.online ? '' : 'fg'),
       kv('CONECTADO DESDE', sel.online ? formatStamp(sel.connected_since) : '—'),
       kv('ÚLTIMO SINAL', formatAgo(sel.last_seen_at)),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, sel.online ? '── APARELHO ──────────────────' : '── APARELHO · ÚLTIMO VISTO ────'),
+      kv('FIRMWARE', h('span', { class: 'raw', title: firmwareLabel(sel) }, firmwareLabel(sel)), sel.device_info?.fw_version ? '' : 'fg'),
+      // Sem `device_info`, o IP é o endereço do socket: em cinza, com o porquê no tooltip.
+      kv('IP', h('span', { class: 'raw', title: ipLabel(sel).viaSocket ? 'ENDEREÇO DO SOCKET — O SATÉLITE NÃO ANUNCIOU IP' : '' }, ipLabel(sel).text), ipLabel(sel).viaSocket ? 'fg' : ''),
+      kv('MAC', h('span', { class: 'raw' }, sel.device_info?.mac ?? '—')),
+      kv('WI-FI', rssiLabel(sel.device_info?.rssi).text, rssiLabel(sel.device_info?.rssi).tone),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── RECURSOS FUTUROS ──────────'),
-      future('FIRMWARE'),
-      future('IP'),
-      future('SINAL WI-FI'),
       cmd('IDENTIFICAR', () => undefined, { disabled: true, first: true }),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── ACESSO ─────────────────────'),
       h(

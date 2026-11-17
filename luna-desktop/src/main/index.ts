@@ -154,6 +154,7 @@ function connectServer(config: DesktopConfig): void {
     roomId: config.roomId,
     authSecret: config.authSecret,
     deviceId: config.deviceId,
+    appVersion: app.getVersion(),
   });
   wsClient = client;
 

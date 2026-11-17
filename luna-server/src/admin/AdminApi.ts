@@ -327,6 +327,8 @@ export class AdminApi {
         online: false,
         connectedSince: null,
         lastSeenAt: null,
+        deviceInfo: null,
+        remoteAddress: null,
       }));
     return [...listed, ...offlineNamed].map((s) => ({
       device_id: s.deviceId,
@@ -336,6 +338,21 @@ export class AdminApi {
       online: s.online,
       connected_since: s.connectedSince,
       last_seen_at: s.lastSeenAt,
+      // `null` = satélite nunca mandou `device_info` (firmware anterior ao
+      // tipo) nesta conexão: o painel mostra "versão desconhecida".
+      device_info: s.deviceInfo
+        ? {
+            fw_version: s.deviceInfo.fwVersion ?? null,
+            fw_build: s.deviceInfo.fwBuild ?? null,
+            ip: s.deviceInfo.ip ?? null,
+            mac: s.deviceInfo.mac ?? null,
+            rssi: s.deviceInfo.rssi ?? null,
+            free_heap: s.deviceInfo.freeHeap ?? null,
+            uptime_ms: s.deviceInfo.uptimeMs ?? null,
+            received_at: s.deviceInfo.receivedAt,
+          }
+        : null,
+      remote_address: s.remoteAddress,
     }));
   }
 

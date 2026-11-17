@@ -18,6 +18,7 @@ import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import type { AlarmRinger } from '../reminders/AlarmRinger.js';
 import { validateAuthToken } from './auth.js';
 import { parseBinaryMessage } from './messageParser.js';
+import { normalizeRemoteAddress, parseDeviceInfo, type DeviceInfo } from './deviceInfo.js';
 import type { WakeClipStore } from '../diagnostics/WakeClipStore.js';
 import {
   createEnvelope,
@@ -32,6 +33,10 @@ interface ClientState {
   authenticated: boolean;
   lastSeenAt: number;
   connectedAt: number;
+  /** Endereço do outro lado do socket — fallback do IP sem `device_info`. */
+  remoteAddress: string | null;
+  /** Último `device_info` desta conexão; `null` em firmware que não manda. */
+  deviceInfo: DeviceInfo | null;
 }
 
 /** Um satélite como o painel o vê: conectado agora ou visto desde o boot. */
@@ -43,6 +48,14 @@ export interface SatelliteInfo {
   connectedSince: number | null;
   /** Último sinal de vida (ping, áudio, auth). */
   lastSeenAt: number;
+  /**
+   * Último `device_info` (versão, IP, sinal). Sobrevive à queda, para o painel
+   * mostrar a última versão conhecida de um satélite offline; zera quando ele
+   * reconecta, até o `device_info` novo chegar.
+   */
+  deviceInfo: DeviceInfo | null;
+  /** Endereço remoto da última conexão. */
+  remoteAddress: string | null;
 }
 
 /**
@@ -130,7 +143,15 @@ export class WsServer {
    * o painel mostrar "offline" para um aparelho que caiu. Em memória de
    * propósito: sem histórico persistido, some no restart.
    */
-  private readonly seenSatellites = new Map<string, { roomId: string; lastSeenAt: number }>();
+  private readonly seenSatellites = new Map<
+    string,
+    { roomId: string; lastSeenAt: number; deviceInfo: DeviceInfo | null; remoteAddress: string | null }
+  >();
+  /**
+   * Endereço remoto por socket, gravado no 'connection' — antes da auth, que é
+   * quando o `ClientState` nasce.
+   */
+  private readonly remoteAddresses = new WeakMap<WebSocket, string | null>();
   private adminHandler: HttpRouteHandler | null = null;
   private providerName: () => string;
 
@@ -221,6 +242,8 @@ export class WsServer {
         online: false,
         connectedSince: null,
         lastSeenAt: seen.lastSeenAt,
+        deviceInfo: seen.deviceInfo,
+        remoteAddress: seen.remoteAddress,
       });
     }
     for (const state of this.clients.values()) {
@@ -231,6 +254,8 @@ export class WsServer {
         online: true,
         connectedSince: state.connectedAt,
         lastSeenAt: state.lastSeenAt,
+        deviceInfo: state.deviceInfo,
+        remoteAddress: state.remoteAddress,
       });
     }
     return [...byDevice.values()].sort((a, b) => a.roomId.localeCompare(b.roomId));
@@ -365,8 +390,10 @@ export class WsServer {
     // 640 bytes de PCM + um header JSON pequeno; 64KB sobra folga generosa.
     this.wss = new WebSocketServer({ server: this.httpServer, maxPayload: 64 * 1024 });
 
-    this.wss.on('connection', (ws) => {
-      getLogger().info({ event: 'ws_connect' }, 'Cliente WebSocket conectado');
+    this.wss.on('connection', (ws, req) => {
+      const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress);
+      this.remoteAddresses.set(ws, remoteAddress);
+      getLogger().info({ event: 'ws_connect', remote_address: remoteAddress }, 'Cliente WebSocket conectado');
 
       this.pendingAuthTimers.set(
         ws,
@@ -534,6 +561,10 @@ export class WsServer {
         }
         break;
 
+      case 'device_info':
+        if (state?.authenticated) this.handleDeviceInfo(state, envelope);
+        break;
+
       case 'ping':
         if (state?.authenticated) {
           ws.send(serializeControlMessage(createEnvelope('pong', envelope.room_id)));
@@ -634,14 +665,19 @@ export class WsServer {
     }
 
     const now = Date.now();
+    const remoteAddress = this.remoteAddresses.get(ws) ?? null;
     this.clients.set(ws, {
       roomId: room_id,
       deviceId: device_id,
       authenticated: true,
       lastSeenAt: now,
       connectedAt: now,
+      remoteAddress,
+      deviceInfo: null,
     });
-    this.seenSatellites.set(device_id, { roomId: room_id, lastSeenAt: now });
+    // `deviceInfo` zera: o que valia era da conexão anterior, talvez de outro
+    // firmware. Satélite antigo, que nunca manda `device_info`, fica "desconhecida".
+    this.seenSatellites.set(device_id, { roomId: room_id, lastSeenAt: now, deviceInfo: null, remoteAddress });
     this.indexClient(ws, room_id);
     this.roomManager.registerClient(room_id);
 
@@ -650,6 +686,28 @@ export class WsServer {
     getLogger().info(
       { room_id, device_id, event: 'auth_ok' },
       'Cliente autenticado',
+    );
+  }
+
+  private handleDeviceInfo(
+    state: ClientState,
+    envelope: NonNullable<ReturnType<typeof parseControlMessage>>,
+  ): void {
+    const info = parseDeviceInfo(envelope, Date.now());
+    state.deviceInfo = info;
+    const seen = this.seenSatellites.get(state.deviceId);
+    if (seen) seen.deviceInfo = info;
+    getLogger().info(
+      {
+        event: 'device_info',
+        room_id: state.roomId,
+        device_id: state.deviceId,
+        fw_version: info.fwVersion,
+        fw_build: info.fwBuild,
+        ip: info.ip,
+        rssi: info.rssi,
+      },
+      `Satélite ${state.deviceId}: firmware ${info.fwVersion ?? '?'}+${info.fwBuild ?? '?'}, IP ${info.ip ?? state.remoteAddress ?? '?'}`,
     );
   }
 

@@ -87,6 +87,9 @@ de bancada em Node aceita qualquer tamanho.
 | `part` / `parts` | `number` | só em `wake_clip` | Índice desta parte (0 a `parts - 1`, em ordem) e total de partes |
 | `prob` | `number` | só em `wake_clip` | Média da janela deslizante que disparou (a que passou de `WAKE_PROB_CUTOFF`) |
 | `responded` | `boolean` | só em `wake_clip` | Se o turno desse wake teve `speaking_start`. `false` é o candidato mais forte a falso disparo |
+| `fw_version` / `fw_build` | `string` | só em `device_info` | Versão (semver) e build (SHA curto do git, `dev` sem git) do firmware; no desktop, a versão do app e sem build |
+| `ip` / `mac` | `string` | só em `device_info` | IP local (IPv4 no firmware; o desktop manda o endereço local do socket, que pode ser IPv6) e MAC do satélite |
+| `rssi` / `free_heap` / `uptime_ms` | `number` | só em `device_info` | Sinal do Wi-Fi (dBm), heap livre (bytes) e uptime (ms) no momento do envio |
 
 **`room_id` precisa casar `/^[a-z0-9_]{1,64}$/`** e é a mesma string do `area_id` do
 Home Assistant — o HA é a fonte de verdade dos cômodos. Ver [`infra/README.md`](../infra/README.md).
@@ -107,6 +110,7 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 | `audio_chunk` | **binário** | A cada 20 ms enquanto a FSM está em `ACTIVE_STREAMING` |
 | `wake_clip` | **binário** | Depois de um turno aberto por wake word, de volta a `IDLE_LISTENING`: os últimos ~2 s que o detector ouviu, em partes de 640 bytes. Ver [Clipes de wake](#clipes-de-wake-wake_clip) |
 | `activity_end` | texto | Push-to-talk: fim de fala explícito. Só tem efeito com `GEMINI_MANUAL_ACTIVITY=true` |
+| `device_info` | texto | Logo após `auth_ok`, e de novo se o IP mudar: o satélite descreve a si mesmo. Ver [Descrição do satélite](#descrição-do-satélite-device_info) |
 | `ping` | texto | Keep-alive a cada 10 s (`PING_INTERVAL_MS`). Ignorado antes da autenticação |
 
 ### Servidor → Satélite
@@ -144,6 +148,33 @@ acaba**, manda em frames binários como o `audio_chunk`:
 - Firmware que manda `wake_clip` para um servidor anterior a este tipo: cada parte vira um
   aviso "Mensagem JSON inválida" no log, sem outro efeito. Atualize o servidor primeiro.
 - Desligado no firmware com `WAKE_CLIP_UPLOAD 0` (`config.h`).
+
+***
+
+### Descrição do satélite (`device_info`)
+
+O canal pelo qual o satélite conta ao servidor quem ele é. Inaugurado para o painel mostrar
+versão e IP; configuração por satélite e OTA reaproveitam o mesmo tipo.
+
+```
+{"type":"device_info","room_id":"sala","fw_version":"0.4.0","fw_build":"abc1234","ip":"192.168.0.42","mac":"A1:B2:C3:D4:E5:F6","rssi":-61,"free_heap":182340,"uptime_ms":95000,"ts":95000}
+```
+
+- **Todos os campos são opcionais.** O servidor descarta campo com tipo errado, texto acima
+  de 64 caracteres ou fora do ASCII imprimível, e guarda o resto
+  ([`deviceInfo.ts`](../luna-server/src/ws/deviceInfo.ts)). Antes do `auth_ok`, é ignorado.
+- **Quando:** o firmware manda logo após `auth_ok` e confere o IP a cada 2 s, reenviando se
+  mudou. O desktop manda a cada `auth_ok`; o IP dele é o endereço local do socket, que não
+  muda sem a conexão cair.
+- **Versão no firmware:** `FW_VERSION` vem de `custom_fw_version` no `platformio.ini` (subir a
+  cada release) e `FW_BUILD` do SHA curto do último commit que tocou `luna-firmware/`, com `.dirty` se há
+  mudança não commitada ali. O build identifica a origem, não o binário: o OTA compara a versão. Ver [`tools/fw_version.py`](../luna-firmware/tools/fw_version.py).
+- **Compatibilidade:** satélite antigo que nunca manda `device_info` aparece no painel como
+  "versão desconhecida", com o IP tirado do endereço do socket. Firmware novo contra servidor
+  antigo: o tipo cai no "Mensagem de controle ignorada" e nada mais acontece.
+- **Ciclo de vida no servidor:** o último `device_info` fica no estado da conexão e sobrevive à
+  queda (o painel mostra a última versão conhecida de um satélite offline). Zera na
+  reconexão, até o novo chegar: o firmware pode ter mudado no meio.
 
 ***
 
