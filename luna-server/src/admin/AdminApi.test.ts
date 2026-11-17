@@ -158,6 +158,7 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
         }));
       }) as unknown as typeof fetch,
       disconnectSatellite: (deviceId) => server.disconnectDevice(deviceId, 'desconectado pelo painel'),
+      setSatelliteConfig: (deviceId, patch) => server.setSatelliteConfig(deviceId, patch, 300),
       onRestart: () => {
         harness.restarts += 1;
       },
@@ -612,6 +613,141 @@ describe('API admin', () => {
     assert.equal((await call(h, 'POST', '/admin/v1/satellites/ninguem/disconnect')).body.closed, 0);
   });
 
+  describe('trocar a sala do satélite (set_config)', () => {
+    /**
+     * Satélite falso que responde `set_config` como o firmware: grava, manda
+     * `config_ack` e reconecta autenticando na sala nova.
+     */
+    function answerLikeFirmware(h: Harness, deviceId: string, ws: WebSocket, reply: (msg: any) => any): void {
+      ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type !== 'set_config') return;
+        const ack = reply(msg);
+        ws.send(serializeControlMessage({ ...createEnvelope('config_ack', msg.room_id), request_id: msg.request_id, ...ack } as never));
+        if (ack.reconnect) {
+          ws.close();
+          void authenticate(h, deviceId, msg.config.room_id).then((s) => reconnected.push(s.ws));
+        }
+      });
+    }
+    const reconnected: WebSocket[] = [];
+    after(() => reconnected.forEach((ws) => ws.terminate()));
+
+    it('aplica, o satélite reconecta e aparece na sala nova', async () => {
+      const deviceId = 'esp32-muda-sala';
+      const s = await authenticate(h, deviceId, 'sala_de_estar');
+      let seen: any = null;
+      answerLikeFirmware(h, deviceId, s.ws, (msg) => {
+        seen = msg;
+        return { ok: true, reconnect: true, results: { room_id: { ok: true } } };
+      });
+
+      const res = await call(h, 'PUT', `/admin/v1/satellites/${deviceId}/config`, { room_id: 'quarto' });
+      assert.equal(res.status, 200);
+      assert.deepEqual(res.body, { device_id: deviceId, room_id: 'quarto', previous_room_id: 'sala_de_estar', reconnect: true });
+      assert.equal(seen.room_id, 'sala_de_estar', 'envelope vai na sala da conexão atual');
+      assert.deepEqual(seen.config, { room_id: 'quarto' });
+      assert.equal(typeof seen.request_id, 'string');
+
+      let sat: any = null;
+      for (let i = 0; i < 50 && sat?.room_id !== 'quarto'; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        sat = (await call(h, 'GET', '/admin/v1/satellites')).body.satellites.find((x: any) => x.device_id === deviceId);
+      }
+      assert.equal(sat.room_id, 'quarto');
+      assert.equal(sat.online, true);
+    });
+
+    it('satélite ocupado com um turno: 409 e nada muda', async () => {
+      const s = await authenticate(h, 'esp32-ocupado', 'cozinha');
+      answerLikeFirmware(h, 'esp32-ocupado', s.ws, () => ({
+        ok: false,
+        reconnect: false,
+        reason: 'ocupado',
+        results: { room_id: { ok: false, error: 'ocupado' } },
+      }));
+      const res = await call(h, 'PUT', '/admin/v1/satellites/esp32-ocupado/config', { room_id: 'quarto' });
+      assert.equal(res.status, 409);
+      assert.match(res.body.error, /ocupado/);
+      s.ws.terminate();
+    });
+
+    it('firmware antigo, que ignora set_config: timeout vira 504 com a explicação', async () => {
+      const s = await authenticate(h, 'esp32-antigo', 'cozinha');
+      const res = await call(h, 'PUT', '/admin/v1/satellites/esp32-antigo/config', { room_id: 'quarto' });
+      assert.equal(res.status, 504);
+      assert.match(res.body.error, /firmware anterior/);
+      // A conexão segue de pé: o servidor não derruba quem não entende o tipo.
+      assert.equal(s.ws.readyState, WebSocket.OPEN);
+      s.ws.terminate();
+    });
+
+    it('cliente que responde "não suportado" (desktop): 409', async () => {
+      const s = await authenticate(h, 'desktop-uuid', 'escritorio');
+      answerLikeFirmware(h, 'desktop-uuid', s.ws, () => ({
+        ok: false,
+        reconnect: false,
+        results: { room_id: { ok: false, error: 'não suportado' } },
+      }));
+      const res = await call(h, 'PUT', '/admin/v1/satellites/desktop-uuid/config', { room_id: 'quarto' });
+      assert.equal(res.status, 409);
+      assert.match(res.body.error, /não suporta/);
+      s.ws.terminate();
+    });
+
+    it('offline é 409; sala fora do formato é 422 sem falar com o satélite', async () => {
+      const off = await call(h, 'PUT', '/admin/v1/satellites/ninguem/config', { room_id: 'quarto' });
+      assert.equal(off.status, 409);
+      assert.match(off.body.error, /offline/);
+
+      const s = await authenticate(h, 'esp32-formato', 'cozinha');
+      let asked = false;
+      s.ws.on('message', (data) => {
+        if (JSON.parse(data.toString()).type === 'set_config') asked = true;
+      });
+      for (const room_id of ['Sala De Estar', '', 'a'.repeat(65), 42]) {
+        const res = await call(h, 'PUT', '/admin/v1/satellites/esp32-formato/config', { room_id });
+        assert.equal(res.status, 422);
+        assert.equal(res.body.field, 'room_id');
+      }
+      assert.equal((await call(h, 'PUT', '/admin/v1/satellites/esp32-formato/config', {})).status, 422);
+      assert.equal(asked, false);
+      s.ws.terminate();
+    });
+
+    it('conexão que cai antes do config_ack: 409 na hora, sem esperar o timeout', async () => {
+      const s = await authenticate(h, 'esp32-cai', 'cozinha');
+      s.ws.on('message', (data) => {
+        if (JSON.parse(data.toString()).type === 'set_config') s.ws.terminate();
+      });
+      const res = await call(h, 'PUT', '/admin/v1/satellites/esp32-cai/config', { room_id: 'quarto' });
+      assert.equal(res.status, 409);
+      assert.match(res.body.error, /caiu/);
+    });
+
+    it('config_ack de outro satélite não fecha o pedido alheio', async () => {
+      const target = await authenticate(h, 'esp32-alvo', 'cozinha');
+      const intruder = await authenticate(h, 'esp32-intruso', 'cozinha');
+      target.ws.on('message', (data) => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type !== 'set_config') return;
+        intruder.ws.send(
+          serializeControlMessage({
+            ...createEnvelope('config_ack', 'cozinha'),
+            request_id: msg.request_id,
+            ok: true,
+            reconnect: false,
+            results: { room_id: { ok: true } },
+          } as never),
+        );
+      });
+      const res = await call(h, 'PUT', '/admin/v1/satellites/esp32-alvo/config', { room_id: 'quarto' });
+      assert.equal(res.status, 504);
+      target.ws.terminate();
+      intruder.ws.terminate();
+    });
+  });
+
   it('backup não leva segredo nenhum, nem mascarado', async () => {
     const res = await call(h, 'GET', '/admin/v1/backup');
     assert.equal(res.status, 200);
@@ -702,7 +838,7 @@ describe('API admin', () => {
 });
 
 /** Abre um WebSocket de satélite de verdade contra o harness e manda `auth`. */
-async function authenticate(h: Harness, deviceId: string): Promise<{ ws: WebSocket; reply: any }> {
+async function authenticate(h: Harness, deviceId: string, roomId = 'quarto'): Promise<{ ws: WebSocket; reply: any }> {
   const ws = new WebSocket(h.baseUrl.replace('http', 'ws'));
   await new Promise<void>((resolve, reject) => {
     ws.once('open', () => resolve());
@@ -711,7 +847,7 @@ async function authenticate(h: Harness, deviceId: string): Promise<{ ws: WebSock
   const reply = new Promise<any>((resolve) => ws.once('message', (data) => resolve(JSON.parse(data.toString()))));
   ws.send(
     serializeControlMessage({
-      ...createEnvelope('auth', 'quarto', {}),
+      ...createEnvelope('auth', roomId, {}),
       device_id: deviceId,
       token: computeAuthToken(config.wsAuthSecret, deviceId),
     } as never),

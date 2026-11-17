@@ -166,9 +166,11 @@ cd luna-firmware && cp include/secrets.h.example include/secrets.h
 Preencha `WIFI_SSID`, `WIFI_PASS`, `LUNA_HOST` (IP do servidor na LAN), `ROOM_ID`
 (idêntico ao `area_id` do HA) e `WS_AUTH_SECRET` (idêntico ao do servidor).
 
-> O `WS_AUTH_SECRET` do `secrets.h` só é usado no **provisionamento do primeiro boot**:
-> o firmware grava na NVS e passa a ler de lá. Para trocar depois, `pio run -t erase`
-> ou `SecretStore::setAuthSecret()`.
+> O `secrets.h` inteiro só é usado no **provisionamento do primeiro boot**: o firmware
+> grava Wi-Fi, servidor, sala e segredo na NVS e passa a ler de lá. A sala se troca
+> depois pelo painel (**Satélites**), sem USB. Para mudar Wi-Fi, servidor ou segredo,
+> `pio run -t erase` ou `LUNA_FORCE_PROVISION 1` (ver o
+> [README do firmware](../luna-firmware/README.md#configuração-e-provisionamento)).
 
 ```bash
 cd luna-firmware && pio run -t upload -t monitor
@@ -229,7 +231,8 @@ cd luna-desktop && npm run test:wakeword
 ### Adicionar um cômodo
 
 1. Crie a área no Home Assistant e **anote o `area_id`**.
-2. Use essa string exata no `ROOM_ID` do satélite (`secrets.h` ou `.env` do desktop).
+2. Use essa string exata como sala do satélite: no painel (**Satélites → SALA**) para um
+   satélite já instalado, no `ROOM_ID` do `secrets.h` para um novo, ou no `.env` do desktop.
 3. Se quiser um rótulo falável ("a cozinha"), acrescente em `ROOM_LABELS`
    ([`luna-system-prompt.ts`](../luna-server/src/prompts/luna-system-prompt.ts)). Sem
    isso a Luna diz `o ambiente "cozinha"` — funciona, mas soa robótico.

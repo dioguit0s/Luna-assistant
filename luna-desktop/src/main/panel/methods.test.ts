@@ -80,6 +80,14 @@ describe('métodos do painel', () => {
     assert.deepEqual(recorded[0]!.body, { name: 'Quarto' });
   });
 
+  it('trocar a sala vai para a rota de config do satélite', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.setSatelliteRoom']!('a1:b2', 'quarto');
+    assert.equal(recorded[0]!.url, 'http://192.168.0.20:8080/admin/v1/satellites/a1%3Ab2/config');
+    assert.equal(recorded[0]!.method, 'PUT');
+    assert.deepEqual(recorded[0]!.body, { room_id: 'quarto' });
+  });
+
   it('recusa grupo de configuração fora da lista sem chamar o servidor', async () => {
     const { methods, recorded } = setup();
     const result = await methods['server.saveSettings']!('rooms', {});

@@ -16,6 +16,11 @@ export type MessageType =
   // Satélite → servidor, logo após auth_ok: versão, IP e saúde (ver
   // docs/protocolo-websocket.md). Todos os campos opcionais.
   | 'device_info'
+  // Servidor → satélite: o painel mudando configuração (hoje só a sala), e a
+  // resposta. Este cliente não aplica nada — responde "não suportado" para a
+  // rota do painel não ficar esperando o timeout (ver docs/protocolo-websocket.md).
+  | 'set_config'
+  | 'config_ack'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
@@ -49,6 +54,16 @@ export interface MessageEnvelope {
   free_heap?: number;
   /** `device_info`: uptime do satélite em ms no envio. */
   uptime_ms?: number;
+  /** `set_config` e `config_ack`: casa a resposta com o pedido. */
+  request_id?: string;
+  /** `set_config`: campos a mudar, todos opcionais. Hoje só `room_id`. */
+  config?: Record<string, unknown>;
+  /** `config_ack`: se todos os campos foram aplicados. */
+  ok?: boolean;
+  /** `config_ack`: resultado por campo pedido. */
+  results?: Record<string, { ok: boolean; error?: string }>;
+  /** `config_ack`: se o satélite vai reconectar para a mudança valer. */
+  reconnect?: boolean;
 }
 
 export function createEnvelope(
@@ -57,6 +72,24 @@ export function createEnvelope(
   extra: Partial<MessageEnvelope> = {},
 ): MessageEnvelope {
   return { type, room_id: roomId, ts: Date.now(), ...extra };
+}
+
+/**
+ * `config_ack` recusando todo campo de um `set_config`: a sala deste cliente
+ * vem da configuração local, não da NVS de um ESP32. Sem resposta, a rota do
+ * painel esperaria o timeout inteiro para dizer a mesma coisa.
+ */
+export function unsupportedConfigAck(request: MessageEnvelope, roomId: string): MessageEnvelope {
+  const fields =
+    request.config && typeof request.config === 'object' && !Array.isArray(request.config)
+      ? Object.keys(request.config)
+      : [];
+  return createEnvelope('config_ack', roomId, {
+    request_id: typeof request.request_id === 'string' ? request.request_id : '',
+    ok: false,
+    reconnect: false,
+    results: Object.fromEntries(fields.map((f) => [f, { ok: false, error: 'não suportado' }])),
+  });
 }
 
 export function serializeControlMessage(envelope: MessageEnvelope): string {

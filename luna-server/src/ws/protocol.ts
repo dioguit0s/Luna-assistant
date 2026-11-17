@@ -6,6 +6,8 @@ export type MessageType =
   | 'wake_clip'
   | 'activity_end'
   | 'device_info'
+  | 'config_ack'
+  | 'set_config'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
@@ -55,6 +57,27 @@ export interface MessageEnvelope {
   free_heap?: number;
   /** `device_info`: uptime do satélite em ms no envio. */
   uptime_ms?: number;
+  /** `set_config` e `config_ack`: casa a resposta com o pedido. */
+  request_id?: string;
+  /** `set_config`: campos a mudar, todos opcionais. Hoje só `room_id`. */
+  config?: SatelliteConfigPatch;
+  /** `config_ack`: se todos os campos foram aplicados. */
+  ok?: boolean;
+  /** `config_ack`: resultado por campo pedido. */
+  results?: Record<string, ConfigFieldResult>;
+  /** `config_ack`: se o satélite vai reconectar para a mudança valer (troca de sala). */
+  reconnect?: boolean;
+}
+
+/** Corpo do `config` de um `set_config`. Campo ausente = não mexer. */
+export interface SatelliteConfigPatch {
+  room_id?: string;
+}
+
+export interface ConfigFieldResult {
+  ok: boolean;
+  /** Motivo da recusa: `ocupado`, `não suportado`, formato inválido, falha na NVS. */
+  error?: string;
 }
 
 export function createEnvelope(

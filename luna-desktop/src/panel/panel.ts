@@ -655,6 +655,7 @@ async function show(id: string): Promise<void> {
     pendingEscape = null;
     confirmingReminder = null;
     confirmingBlock = null;
+    if (roomChange?.phase === 'confirm') roomChange = null;
     restoreState.confirming = false;
     if (restart.phase === 'confirm') restart.phase = 'idle';
     typeInto($('screen-title'), page.title, { cps: 45, cursor: 'hi' });
@@ -862,6 +863,171 @@ function rssiLabel(rssi: number | null | undefined): { text: string; tone: strin
   return { text: `${rssi} dBm · ${grade}`, tone: rssi >= -70 ? '' : 'amber' };
 }
 
+/** Mesmo formato do servidor (ROOM_ID_PATTERN) e do area_id do HA. */
+const ROOM_ID_RE = /^[a-z0-9_]{1,64}$/;
+/** Quanto o painel espera o satélite voltar na sala nova antes de avisar. */
+const ROOM_RECONNECT_WAIT_MS = 20_000;
+
+/**
+ * Troca de sala de um satélite: o S/N, o envio (o servidor espera o
+ * `config_ack`) e a espera da reconexão na sala nova. Sobrevive aos repaints
+ * do poll; o desfecho fica na tela até a próxima troca.
+ */
+let roomChange: {
+  deviceId: string;
+  target: string;
+  phase: 'confirm' | 'sending' | 'waiting' | 'done' | 'failed';
+  detail: string;
+} | null = null;
+/** Texto digitado no campo de sala, por satélite — o repaint não apaga. */
+let roomDraft: { deviceId: string; value: string } | null = null;
+
+function repaintSatellites(): void {
+  if (currentPage?.id === 'satellites') void renderCurrent();
+}
+
+async function applyRoomChange(deviceId: string, target: string): Promise<void> {
+  if (!roomChange || roomChange.deviceId !== deviceId) return;
+  roomChange = { ...roomChange, phase: 'sending', detail: '' };
+  repaintSatellites();
+
+  const label = `SALA ${deviceId} → ${target.toUpperCase()}`;
+  const result = await window.panel.call('server.setSatelliteRoom', deviceId, target);
+  if (!result.ok) {
+    roomChange = { deviceId, target, phase: 'failed', detail: errorOf(result).toUpperCase() };
+    say(`${label} ... FALHA: ${errorOf(result)}`, 'warn');
+    repaintSatellites();
+    return;
+  }
+  roomDraft = null;
+  if (!result.body?.reconnect) {
+    roomChange = { deviceId, target, phase: 'done', detail: `JÁ ESTAVA EM ${target.toUpperCase()}` };
+    say(`${label} ... JÁ ESTAVA NESTA SALA`);
+    repaintSatellites();
+    return;
+  }
+
+  roomChange = { deviceId, target, phase: 'waiting', detail: '' };
+  say(`${label} ... GRAVADO NO SATÉLITE · AGUARDANDO RECONEXÃO`);
+  repaintSatellites();
+
+  // O satélite derruba a conexão e reautentica com o room_id novo; é a lista
+  // de satélites que conta quando isso aconteceu.
+  const deadline = Date.now() + ROOM_RECONNECT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (roomChange?.deviceId !== deviceId || roomChange.phase !== 'waiting') return;
+    const list = await window.panel.call('server.satellites');
+    const sat = list.ok ? (list.body.satellites as any[]).find((x) => x.device_id === deviceId) : null;
+    if (sat?.online && sat.room_id === target) {
+      roomChange = { deviceId, target, phase: 'done', detail: `RECONECTOU EM ${target.toUpperCase()}` };
+      say(`${label} ... RECONECTOU NA SALA NOVA`);
+      repaintSatellites();
+      return;
+    }
+  }
+  if (roomChange?.deviceId !== deviceId || roomChange.phase !== 'waiting') return;
+  roomChange = { deviceId, target, phase: 'failed', detail: 'GRAVADO NO SATÉLITE, MAS ELE AINDA NÃO VOLTOU — CONFIRA WI-FI E ENERGIA' };
+  say(`${label} ... SEM RECONEXÃO EM ${ROOM_RECONNECT_WAIT_MS / 1000}S`, 'warn');
+  repaintSatellites();
+}
+
+/** Bloco SALA do detalhe: campo, sugestões, S/N e o desfecho da troca. */
+function satelliteRoomControls(sel: any, knownRooms: string[]): HTMLElement {
+  const mine = roomChange?.deviceId === sel.device_id ? roomChange : null;
+  const inFlight = mine?.phase === 'sending' || mine?.phase === 'waiting';
+  const canChange = sel.online && !sel.blocked && !inFlight;
+  const box = h('div', { style: 'display:flex;flex-direction:column;gap:6px;align-items:stretch' });
+
+  if (mine?.phase === 'confirm') {
+    box.append(
+      confirmLine(
+        `MOVER PARA ${mine.target.toUpperCase()}? (S/N)`,
+        { yes: '[ S ]', no: '[ N ]' },
+        () => void applyRoomChange(sel.device_id, mine.target),
+        () => {
+          roomChange = null;
+          void renderCurrent();
+        },
+      ),
+    );
+    return box;
+  }
+
+  const saved = roomDraft;
+  const draft = saved && saved.deviceId === sel.device_id ? saved.value : (sel.room_id ?? '');
+  const input = h('input', {
+    class: 'box-input raw',
+    value: draft,
+    maxLength: 64,
+    spellcheck: 'false',
+    autocomplete: 'off',
+    'aria-label': `Sala nova de ${sel.device_id}`,
+    style: 'flex:1;min-width:0',
+    disabled: !canChange,
+  }) as HTMLInputElement;
+  const hint = h('span', { class: 'small amber', style: 'line-height:1.5', role: 'status' });
+  const normalized = (): string => input.value.trim().toLowerCase();
+  const begin = (): void => {
+    const target = normalized();
+    if (!ROOM_ID_RE.test(target) || target === sel.room_id) return;
+    roomChange = { deviceId: sel.device_id, target, phase: 'confirm', detail: '' };
+    void renderCurrent();
+  };
+  const apply = cmd('MUDAR', begin, { first: true, disabled: true, ariaLabel: `Mudar a sala de ${sel.device_id}` });
+  const refresh = (): void => {
+    const v = normalized();
+    apply.disabled = !canChange || !ROOM_ID_RE.test(v) || v === sel.room_id;
+    hint.textContent = v && !ROOM_ID_RE.test(v) ? 'SÓ a-z, 0-9 E _ — O AREA_ID DO HA' : '';
+  };
+  input.addEventListener('input', () => {
+    roomDraft = { deviceId: sel.device_id, value: input.value };
+    refresh();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !apply.disabled) begin();
+    if (e.key === 'Escape') {
+      roomDraft = null;
+      input.value = sel.room_id ?? '';
+      refresh();
+      input.blur();
+    }
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
+  refresh();
+  box.append(h('div', { style: 'display:flex;gap:6px;align-items:center' }, input, apply), hint);
+
+  const suggestions = knownRooms.filter((r) => r !== sel.room_id).slice(0, 8);
+  if (canChange && suggestions.length > 0) {
+    box.append(
+      h(
+        'div',
+        { style: 'display:flex;flex-wrap:wrap;gap:2px 6px', role: 'group', 'aria-label': 'Salas conhecidas' },
+        ...suggestions.map((room, i) =>
+          cmd(room, () => {
+            input.value = room;
+            roomDraft = { deviceId: sel.device_id, value: room };
+            refresh();
+            input.focus();
+          }, { raw: true, tone: 'quiet', first: i === 0, ariaLabel: `Usar a sala ${room}` }),
+        ),
+      ),
+    );
+  }
+
+  const status = ((): { text: string; tone: string } => {
+    if (mine?.phase === 'sending') return { text: `ENVIANDO ${mine.target.toUpperCase()} AO SATÉLITE…`, tone: 'hi' };
+    if (mine?.phase === 'waiting') return { text: `GRAVADO · AGUARDANDO RECONEXÃO EM ${mine.target.toUpperCase()}…`, tone: 'hi' };
+    if (mine?.phase === 'done') return { text: `▣ ${mine.detail}`, tone: 'hi' };
+    if (mine?.phase === 'failed') return { text: `▲ ${mine.detail}`, tone: 'amber' };
+    if (sel.blocked) return { text: 'DESBLOQUEIE ANTES DE TROCAR A SALA.', tone: 'fg' };
+    if (!sel.online) return { text: 'SÓ COM O SATÉLITE ONLINE — A SALA VIVE NA NVS DELE.', tone: 'fg' };
+    return { text: 'ELE RECONECTA SOZINHO NA SALA NOVA. SEM USB.', tone: '' };
+  })();
+  box.append(h('span', { class: `small ${status.tone}`, style: 'line-height:1.6', role: 'status' }, status.text));
+  return box;
+}
+
 let selectedSatellite: string | null = null;
 let editingSatellite: string | null = null;
 /** `device_id` com o S/N de bloqueio aberto. */
@@ -873,9 +1039,19 @@ pages.push({
   title: 'SATÉLITES REGISTRADOS',
   pollMs: 10000,
   async render(root) {
-    const result = await window.panel.call('server.satellites');
+    const [result, roomsRes] = await Promise.all([window.panel.call('server.satellites'), window.panel.call('server.rooms')]);
     if (!result.ok) return serverUnavailable(root, result);
     const sats = result.body.satellites as any[];
+    // Sugestões do campo de sala: salas com satélite + áreas do HA + mapeadas.
+    // Sem a rota (servidor antigo), sobram as salas dos próprios satélites.
+    const knownRooms = [
+      ...new Set([
+        ...(roomsRes.ok ? (roomsRes.body.rooms as any[]).map((r) => r.room_id) : []),
+        ...sats.map((s) => s.room_id),
+      ]),
+    ]
+      .filter((r): r is string => typeof r === 'string' && ROOM_ID_RE.test(r))
+      .sort();
     const online = sats.filter((s) => s.online).length;
     setMeta(`${sats.length} REGISTRADOS · ${online} ONLINE`);
     if (sats.length === 0) {
@@ -1004,6 +1180,8 @@ pages.push({
       kv('IP', h('span', { class: 'raw', title: ipLabel(sel).viaSocket ? 'ENDEREÇO DO SOCKET — O SATÉLITE NÃO ANUNCIOU IP' : '' }, ipLabel(sel).text), ipLabel(sel).viaSocket ? 'fg' : ''),
       kv('MAC', h('span', { class: 'raw' }, sel.device_info?.mac ?? '—')),
       kv('WI-FI', rssiLabel(sel.device_info?.rssi).text, rssiLabel(sel.device_info?.rssi).tone),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, '── SALA ───────────────────────'),
+      satelliteRoomControls(sel, knownRooms),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── RECURSOS FUTUROS ──────────'),
       cmd('IDENTIFICAR', () => undefined, { disabled: true, first: true }),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── ACESSO ─────────────────────'),

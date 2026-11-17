@@ -7,6 +7,7 @@ import {
   createEnvelope,
   parseIncomingMessage,
   serializeControlMessage,
+  unsupportedConfigAck,
 } from './protocol.js';
 import { readWavPcm16, writeWavPcm16, generateSilence, playPcm16 } from './wav.js';
 
@@ -263,6 +264,14 @@ function connect(): WebSocket {
             ws.close();
           }
         })();
+        return;
+      }
+
+      if (envelope.type === 'set_config') {
+        // Bancada não tem NVS: a sala vem do .env. Responde para o painel não
+        // esperar o timeout.
+        console.log('set_config recebido — não suportado na bancada (sala vem do .env)');
+        ws.send(serializeControlMessage(unsupportedConfigAck(envelope, cfg.roomId)));
         return;
       }
 

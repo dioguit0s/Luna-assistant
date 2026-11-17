@@ -4,6 +4,7 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AppConfig } from '../config/env.js';
@@ -24,6 +25,9 @@ import {
   createEnvelope,
   parseControlMessage,
   serializeControlMessage,
+  type ConfigFieldResult,
+  type MessageEnvelope,
+  type SatelliteConfigPatch,
 } from './protocol.js';
 import { getLogger } from '../logging/logger.js';
 
@@ -57,6 +61,35 @@ export interface SatelliteInfo {
   /** Endereço remoto da última conexão. */
   remoteAddress: string | null;
 }
+
+/** Resposta do satélite a um `set_config` (ver docs/protocolo-websocket.md). */
+export interface SatelliteConfigAck {
+  ok: boolean;
+  results: Record<string, ConfigFieldResult>;
+  /** Satélite vai reconectar para a mudança valer (troca de sala). */
+  reconnect: boolean;
+  /** Recusa da mensagem inteira: `ocupado`, `config vazia`. */
+  reason: string | null;
+  /** Sala da conexão que recebeu o pedido. */
+  previousRoomId: string;
+}
+
+/** Por que um `set_config` não teve resposta. */
+export class SatelliteConfigError extends Error {
+  constructor(
+    readonly code: 'offline' | 'timeout' | 'disconnected',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Espera do `config_ack`. O firmware responde na hora (grava na NVS e manda);
+ * a folga é para Wi-Fi ruim. Fica abaixo dos 5 s do cliente admin do desktop
+ * (`REQUEST_TIMEOUT_MS`), senão o painel desistiria antes do servidor.
+ */
+export const CONFIG_ACK_TIMEOUT_MS = 3_000;
 
 /**
  * Rota HTTP extra no mesmo servidor do `/health` — a API admin (ADR 010,
@@ -153,6 +186,17 @@ export class WsServer {
    */
   private readonly remoteAddresses = new WeakMap<WebSocket, string | null>();
   private adminHandler: HttpRouteHandler | null = null;
+  /** `set_config` esperando `config_ack`, por `request_id`. */
+  private readonly pendingConfigs = new Map<
+    string,
+    {
+      ws: WebSocket;
+      resolve: (ack: SatelliteConfigAck) => void;
+      reject: (err: SatelliteConfigError) => void;
+      timer: NodeJS.Timeout;
+      previousRoomId: string;
+    }
+  >();
   private providerName: () => string;
 
   constructor(
@@ -225,6 +269,51 @@ export class WsServer {
       );
     }
     return closed;
+  }
+
+  /**
+   * Manda `set_config` ao satélite conectado e espera o `config_ack`. A NVS do
+   * satélite é a fonte da verdade da configuração: nada aqui é persistido.
+   *
+   * Com mais de uma conexão do mesmo `device_id` (a velha ainda não caiu pelo
+   * reaper), vai para a mais recente — é a que está de fato ouvindo.
+   *
+   * Firmware anterior ao tipo ignora a mensagem: vira `timeout`.
+   */
+  setSatelliteConfig(
+    deviceId: string,
+    config: SatelliteConfigPatch,
+    timeoutMs = CONFIG_ACK_TIMEOUT_MS,
+  ): Promise<SatelliteConfigAck> {
+    let target: { ws: WebSocket; state: ClientState } | null = null;
+    for (const [ws, state] of this.clients) {
+      if (!state.authenticated || state.deviceId !== deviceId || ws.readyState !== WebSocket.OPEN) continue;
+      if (!target || state.connectedAt >= target.state.connectedAt) target = { ws, state };
+    }
+    if (!target) {
+      return Promise.reject(new SatelliteConfigError('offline', 'satélite offline'));
+    }
+
+    const { ws, state } = target;
+    const requestId = randomUUID();
+    return new Promise<SatelliteConfigAck>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingConfigs.delete(requestId);
+        reject(new SatelliteConfigError('timeout', `sem config_ack em ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingConfigs.set(requestId, { ws, resolve, reject, timer, previousRoomId: state.roomId });
+      try {
+        ws.send(
+          serializeControlMessage(createEnvelope('set_config', state.roomId, { request_id: requestId, config })),
+        );
+      } catch (err) {
+        clearTimeout(timer);
+        this.pendingConfigs.delete(requestId);
+        reject(
+          new SatelliteConfigError('disconnected', `falha ao enviar: ${err instanceof Error ? err.message : String(err)}`),
+        );
+      }
+    });
   }
 
   /** O `/health` mostra o provider efetivo, que o painel pode trocar a quente. */
@@ -486,6 +575,9 @@ export class WsServer {
       clearTimeout(timer);
     }
     this.pendingAuthTimers.clear();
+    for (const ws of new Set([...this.pendingConfigs.values()].map((p) => p.ws))) {
+      this.rejectPendingConfigs(ws);
+    }
 
     // `terminate()`, não `close()`: um satélite que não responde ao handshake
     // de close (Wi-Fi degradado, já sem energia) faria `httpServer.close()`
@@ -563,6 +655,10 @@ export class WsServer {
 
       case 'device_info':
         if (state?.authenticated) this.handleDeviceInfo(state, envelope);
+        break;
+
+      case 'config_ack':
+        if (state?.authenticated) this.handleConfigAck(ws, state, envelope);
         break;
 
       case 'ping':
@@ -711,7 +807,32 @@ export class WsServer {
     );
   }
 
+  private handleConfigAck(ws: WebSocket, state: ClientState, envelope: MessageEnvelope): void {
+    const requestId = typeof envelope.request_id === 'string' ? envelope.request_id : '';
+    const pending = this.pendingConfigs.get(requestId);
+    // Só a conexão que recebeu o pedido responde por ele: um `request_id`
+    // ecoado por outro satélite não fecha o pedido alheio.
+    if (!pending || pending.ws !== ws) {
+      getLogger().debug({ event: 'config_ack_unmatched', device_id: state.deviceId }, 'config_ack sem pedido pendente');
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingConfigs.delete(requestId);
+    pending.resolve(parseConfigAck(envelope, pending.previousRoomId));
+  }
+
+  /** Pedidos desta conexão não vão mais ter resposta. */
+  private rejectPendingConfigs(ws: WebSocket): void {
+    for (const [requestId, pending] of this.pendingConfigs) {
+      if (pending.ws !== ws) continue;
+      clearTimeout(pending.timer);
+      this.pendingConfigs.delete(requestId);
+      pending.reject(new SatelliteConfigError('disconnected', 'conexão caiu antes do config_ack'));
+    }
+  }
+
   private async handleDisconnect(ws: WebSocket): Promise<void> {
+    this.rejectPendingConfigs(ws);
     const state = this.clients.get(ws);
     if (state) {
       // Antes de qualquer await: `releaseRoom` e o drain de áudio pendente não
@@ -733,4 +854,31 @@ export class WsServer {
     }
     this.clients.delete(ws);
   }
+}
+
+/**
+ * `config_ack` do fio → resultado tipado. Defensivo: campo de tipo errado vira
+ * recusa, nunca exceção — o firmware é a única cópia do contrato sem CI.
+ */
+function parseConfigAck(envelope: MessageEnvelope, previousRoomId: string): SatelliteConfigAck {
+  const results: Record<string, ConfigFieldResult> = {};
+  const raw = envelope.results;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') continue;
+      const v = value as { ok?: unknown; error?: unknown };
+      results[key] = {
+        ok: v.ok === true,
+        ...(typeof v.error === 'string' ? { error: v.error.slice(0, 120) } : {}),
+      };
+    }
+  }
+  const allFieldsOk = Object.values(results).every((r) => r.ok);
+  return {
+    ok: envelope.ok === true && allFieldsOk,
+    results,
+    reconnect: envelope.reconnect === true,
+    reason: typeof envelope.reason === 'string' ? envelope.reason.slice(0, 120) : null,
+    previousRoomId,
+  };
 }

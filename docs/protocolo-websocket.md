@@ -90,6 +90,11 @@ de bancada em Node aceita qualquer tamanho.
 | `fw_version` / `fw_build` | `string` | só em `device_info` | Versão (semver) e build (SHA curto do git, `dev` sem git) do firmware; no desktop, a versão do app e sem build |
 | `ip` / `mac` | `string` | só em `device_info` | IP local (IPv4 no firmware; o desktop manda o endereço local do socket, que pode ser IPv6) e MAC do satélite |
 | `rssi` / `free_heap` / `uptime_ms` | `number` | só em `device_info` | Sinal do Wi-Fi (dBm), heap livre (bytes) e uptime (ms) no momento do envio |
+| `request_id` | `string` | só em `set_config` / `config_ack` | Gerado pelo servidor; o satélite ecoa no `config_ack` |
+| `config` | `object` | só em `set_config` | Campos a mudar, todos opcionais. Hoje só `room_id` |
+| `ok` | `boolean` | só em `config_ack` | Se **todos** os campos pedidos foram aplicados |
+| `results` | `object` | só em `config_ack` | `{ "<campo>": { "ok": bool, "error"?: string } }`, um por campo pedido |
+| `reconnect` | `boolean` | só em `config_ack` | O satélite vai cair e reautenticar para a mudança valer (troca de sala) |
 
 **`room_id` precisa casar `/^[a-z0-9_]{1,64}$/`** e é a mesma string do `area_id` do
 Home Assistant — o HA é a fonte de verdade dos cômodos. Ver [`infra/README.md`](../infra/README.md).
@@ -111,6 +116,7 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 | `wake_clip` | **binário** | Depois de um turno aberto por wake word, de volta a `IDLE_LISTENING`: os últimos ~2 s que o detector ouviu, em partes de 640 bytes. Ver [Clipes de wake](#clipes-de-wake-wake_clip) |
 | `activity_end` | texto | Push-to-talk: fim de fala explícito. Só tem efeito com `GEMINI_MANUAL_ACTIVITY=true` |
 | `device_info` | texto | Logo após `auth_ok`, e de novo se o IP mudar: o satélite descreve a si mesmo. Ver [Descrição do satélite](#descrição-do-satélite-device_info) |
+| `config_ack` | texto | Resposta a um `set_config`. Ver [Configuração em runtime](#configuração-em-runtime-set_config--config_ack) |
 | `ping` | texto | Keep-alive a cada 10 s (`PING_INTERVAL_MS`). Ignorado antes da autenticação |
 
 ### Servidor → Satélite
@@ -123,6 +129,7 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 | `audio_response` | **binário** | Chunk de áudio da resposta, paceado (ver abaixo) |
 | `speaking_end` | texto | Fim da fala. O satélite espera 150 ms (`AEC_RESUME_DELAY_MS`) e reativa a captura |
 | `command_result` | texto | Resultado de uma automação despachada ao Home Assistant |
+| `set_config` | texto | Painel mudando a configuração do satélite (hoje só a sala). Ver [Configuração em runtime](#configuração-em-runtime-set_config--config_ack) |
 | `pong` | texto | Resposta ao `ping` |
 
 Mensagens de controle de tipo desconhecido são **logadas e ignoradas**, não derrubam
@@ -154,7 +161,8 @@ acaba**, manda em frames binários como o `audio_chunk`:
 ### Descrição do satélite (`device_info`)
 
 O canal pelo qual o satélite conta ao servidor quem ele é. Inaugurado para o painel mostrar
-versão e IP; configuração por satélite e OTA reaproveitam o mesmo tipo.
+versão e IP; o OTA reaproveita o mesmo tipo. A configuração (sala, e depois volume e LED) vai
+no sentido contrário, por `set_config`.
 
 ```
 {"type":"device_info","room_id":"sala","fw_version":"0.4.0","fw_build":"abc1234","ip":"192.168.0.42","mac":"A1:B2:C3:D4:E5:F6","rssi":-61,"free_heap":182340,"uptime_ms":95000,"ts":95000}
@@ -178,13 +186,57 @@ versão e IP; configuração por satélite e OTA reaproveitam o mesmo tipo.
 
 ***
 
+### Configuração em runtime (`set_config` / `config_ack`)
+
+O canal servidor → satélite para mudar configuração sem USB. Inaugurado para trocar a sala
+pelo painel (`PUT /admin/v1/satellites/:id/config`); volume, LED e sensibilidade da wake word
+reaproveitam o mesmo par.
+
+```
+servidor → {"type":"set_config","room_id":"sala_de_estar","request_id":"5f0c…","config":{"room_id":"quarto"},"ts":1720000000000}
+satélite → {"type":"config_ack","room_id":"sala_de_estar","request_id":"5f0c…","ok":true,"reconnect":true,"results":{"room_id":{"ok":true}},"ts":95000}
+```
+
+- **Envelope na sala atual.** O `room_id` do envelope é o da conexão; o novo vai dentro de
+  `config`. O satélite responde com a sala antiga também: o novo só vale na próxima conexão.
+- **Campos opcionais, resultado por campo.** Campo que o satélite não conhece volta com
+  `error: "não suportado"` — é o que deixa o servidor mandar campos novos antes de todo
+  satélite saber aplicá-los. `ok` é `true` só com todos aplicados.
+- **Troca de sala reconecta.** A sala vem da autenticação, não do envelope (`WsServer.ts`),
+  então não dá para trocar a quente na mesma conexão. O firmware valida o formato (o mesmo do
+  servidor, `/^[a-z0-9_]{1,64}$/`), grava na NVS, responde `config_ack` com
+  `reconnect: true` e ~300 ms depois derruba a conexão; o WebSocket reconecta sozinho (2 s) e
+  o `auth` já sai com o `room_id` novo. A sala sobrevive a reboot e queda de energia. Sala
+  inválida é recusada e a anterior fica. Pedir a sala em que ele já está responde `ok` com
+  `reconnect: false`.
+- **Turno em andamento: recusa com `ocupado`.** Decisão: o satélite só aplica em
+  `IDLE_LISTENING`; fora dele, todo campo volta `{ "ok": false, "error": "ocupado" }` com
+  `reason: "ocupado"`, e o painel mostra "tente de novo". Recusar é previsível e não deixa
+  mudança pendurada para "quando voltar ao repouso" (que pode nunca vir, e que o painel não
+  teria como acompanhar). Em open-mic (sem wake word) a FSM fica em `ACTIVE_STREAMING` para
+  sempre; ali só `RESPONDING` conta como ocupado, senão a sala nunca poderia ser trocada.
+- **Timeout no servidor: 3 s** (`CONFIG_ACK_TIMEOUT_MS`), abaixo dos 5 s do cliente admin do
+  desktop. O `config_ack` só fecha o pedido se vier da mesma conexão que recebeu o
+  `set_config`; conexão que cai antes da resposta falha o pedido na hora.
+- **Compatibilidade.** Firmware anterior ao tipo ignora `set_config` (cai no `strcmp` sem
+  ramo): a rota responde `504` explicando. Desktop e bancada respondem `config_ack` com
+  "não suportado" em todo campo — a sala deles vem da configuração local. Firmware novo
+  contra servidor antigo: nunca recebe `set_config`, nada muda; um `config_ack` solto cairia no
+  "Mensagem de controle ignorada".
+- **Fonte da verdade é a NVS do satélite.** O servidor não persiste a sala: a mudança fica só
+  no log (`satellite_room_changed`, com `from`/`to`). Ver o provisionamento em
+  [`luna-firmware/README.md`](../luna-firmware/README.md).
+
+***
+
 ## Autenticação
 
 ```
 token = HMAC-SHA256(key = WS_AUTH_SECRET, message = device_id)   // hex
 ```
 
-O segredo base vive na NVS do ESP32 e no `.env` do servidor; nunca trafega pela rede.
+O segredo base vive na NVS do ESP32 (`ConfigStore`, junto de Wi-Fi, servidor e sala) e no
+`.env` do servidor; nunca trafega pela rede.
 A comparação no servidor usa `timingSafeEqual` ([`auth.ts`](../luna-server/src/ws/auth.ts)).
 
 Sequência:

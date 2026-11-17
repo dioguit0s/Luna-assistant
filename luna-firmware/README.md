@@ -50,19 +50,50 @@ modelo streaming a cada 2 features em vez de 1.
 > da tabela padrão de 4 MB. A partição `nvs` é a mesma, então o segredo gravado na NVS
 > sobrevive à troca (não precisa de `erase`).
 
-## Configuração
+## Configuração e provisionamento
+
+A configuração do satélite (Wi-Fi, servidor, sala e segredo) vive na **NVS** do ESP32, não
+no binário ([`src/ws/ConfigStore.cpp`](src/ws/ConfigStore.cpp)). O `secrets.h` só a
+**provisiona**:
 
 ```bash
 cp include/secrets.h.example include/secrets.h
 # edite include/secrets.h: Wi-Fi, IP do servidor, ROOM_ID e WS_AUTH_SECRET
+pio run -t upload
 ```
 
 > `WS_AUTH_SECRET` **deve ser idêntico** ao do `.env` do `luna-server`.
 > `device_id` do satélite = MAC do ESP32 (automático).
->
-> O segredo fica na **NVS** do ESP32: o valor do `secrets.h` é gravado nela no
-> primeiro boot e, dali em diante, é a NVS que manda. Para trocar o segredo,
-> apague a NVS com `pio run -t erase` e grave de novo.
+
+No boot, cada chave é semeada a partir do valor compilado **só se estiver vazia na NVS e o
+valor compilado não for vazio**. Daí:
+
+| Situação | O que acontece |
+|---|---|
+| Satélite novo, firmware com `secrets.h` real | A NVS é provisionada com tudo; o log mostra `[nvs] … provisionado a partir do secrets.h` |
+| Satélite já provisionado, firmware com outro `secrets.h` | **A NVS manda** — o compilado é ignorado. Mudar Wi-Fi no `secrets.h` e regravar não muda nada |
+| Binário genérico (campos vazios, ou sem `secrets.h`) num satélite provisionado | Conecta normalmente, com o que está na NVS. É o binário que pode ser publicado (o repositório é público) e o pré-requisito da OTA |
+| Binário genérico num satélite novo | Não conecta: o log mostra `[erro] satélite não provisionado` e o LED fica em "sem Wi-Fi" |
+
+O boot loga a configuração em uso, sem senha nem segredo:
+`[nvs] config: wifi="minha-rede" servidor=192.168.0.10:8080 sala=quarto segredo=definido`.
+
+**Trocar a sala:** pelo painel, em **Satélites → SALA**, sem cabo e sem recompilar. O servidor
+manda `set_config`, o satélite grava na NVS e reconecta na sala nova em poucos segundos
+([protocolo](../docs/protocolo-websocket.md#configuração-em-runtime-set_config--config_ack)).
+Só com o satélite ocioso: no meio de uma conversa ele recusa com "ocupado".
+
+**Trocar Wi-Fi, servidor ou segredo** (ainda sem canal pela rede):
+
+- `#define LUNA_FORCE_PROVISION 1` no `secrets.h`, gravar, deixar bootar uma vez e **voltar
+  para 0**: os valores compilados não vazios sobrescrevem os da NVS. A sala também — confira o
+  `ROOM_ID` antes, ou a escolhida pelo painel se perde.
+- ou apagar tudo com `pio run -t erase` e gravar de novo com o `secrets.h` real.
+
+> **Binário genérico para publicar:** compile sem `include/secrets.h` (o build avisa com
+> `#warning`) ou com todos os campos vazios. Antes de publicar, confira que nenhuma
+> credencial ficou nele: `strings .pio/build/*/firmware.bin | grep -i <sua-rede>` não pode
+> achar nada.
 
 ## Build / flash / monitor
 

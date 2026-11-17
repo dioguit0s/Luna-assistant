@@ -212,6 +212,7 @@ async function main(): Promise<void> {
       calendarStatus: () => calendarClient.lastStatus(),
       diagnostics,
       disconnectSatellite: (deviceId) => wsServer.disconnectDevice(deviceId, 'desconectado pelo painel'),
+      setSatelliteConfig: (deviceId, patch) => wsServer.setSatelliteConfig(deviceId, patch),
       onRestart: () => requestRestart(),
     }).handle,
   );

@@ -1,5 +1,6 @@
 #include "LunaWsClient.h"
 #include "Auth.h"
+#include "ConfigStore.h"
 #include "config.h"
 #include "version.h"
 #include <ArduinoJson.h>
@@ -25,6 +26,14 @@ static SimpleCb authOkCb = nullptr;
 static SimpleCb speakingStartCb = nullptr;
 static SimpleCb speakingEndCb = nullptr;
 static AudioResponseCb audioResponseCb = nullptr;
+static BoolCb configBusyCb = nullptr;
+
+// Troca de sala aceita: a sala vem da autenticação (WsServer.ts), então a
+// conexão atual precisa cair e reautenticar com o room_id novo. Adiado para o
+// loop() — dá tempo do config_ack sair antes do close, e não fecha a socket de
+// dentro do próprio callback de evento dela.
+static uint32_t reconnectAtMs = 0;
+static const uint32_t CONFIG_RECONNECT_DELAY_MS = 300;
 
 // Frame de saída: header JSON + PCM concatenados.
 // 256 de header: o `wake_clip` tem ~130 bytes de campos fixos + room_id de até 64.
@@ -73,6 +82,78 @@ static void sendDeviceInfo() {
                 ip.toString().c_str());
 }
 
+// set_config: servidor (painel) mudando a configuração em runtime. Campos
+// opcionais dentro de `config`; cada um recebe ok/erro no config_ack. Hoje só
+// `room_id` existe — o resto responde "não suportado", que é o que permite o
+// servidor mandar campos novos antes de todo satélite saber aplicá-los.
+static void handleSetConfig(JsonDocument &doc) {
+  const char *requestId = doc["request_id"] | "";
+  JsonObjectConst config = doc["config"].as<JsonObjectConst>();
+
+  JsonDocument ack;
+  ack["type"] = "config_ack";
+  ack["room_id"] = roomId; // sala desta conexão, a que o servidor conhece
+  ack["request_id"] = requestId;
+  JsonObject results = ack["results"].to<JsonObject>();
+
+  bool allOk = true;
+  bool reconnect = false;
+  const bool busy = configBusyCb && configBusyCb();
+
+  if (config.isNull() || config.size() == 0) {
+    allOk = false;
+    ack["reason"] = "config vazia";
+  } else if (busy) {
+    allOk = false;
+    ack["reason"] = "ocupado";
+  }
+
+  for (JsonPairConst kv : config) {
+    JsonObject r = results[kv.key().c_str()].to<JsonObject>();
+    if (busy) {
+      r["ok"] = false;
+      r["error"] = "ocupado";
+      continue;
+    }
+    if (strcmp(kv.key().c_str(), "room_id") == 0) {
+      const String next = kv.value().is<const char *>() ? String(kv.value().as<const char *>()) : String();
+      if (!ConfigStore::isValidRoomId(next)) {
+        r["ok"] = false;
+        r["error"] = "room_id fora do formato [a-z0-9_]{1,64}";
+        allOk = false;
+      } else if (next == roomId) {
+        r["ok"] = true; // já está nesta sala: nada a gravar nem reconectar
+      } else if (!ConfigStore::setRoomId(next)) {
+        r["ok"] = false;
+        r["error"] = "falha ao gravar na NVS";
+        allOk = false;
+      } else {
+        r["ok"] = true;
+        Serial.printf("[cfg] sala %s -> %s (gravada na NVS) — reconectando\n", roomId.c_str(),
+                      next.c_str());
+        roomId = next;
+        reconnect = true;
+      }
+    } else {
+      r["ok"] = false;
+      r["error"] = "não suportado";
+      allOk = false;
+    }
+  }
+
+  if (busy) Serial.println("[cfg] set_config recusado: satélite ocupado com um turno");
+
+  ack["ok"] = allOk;
+  ack["reconnect"] = reconnect;
+  ack["ts"] = (uint32_t)millis();
+
+  String out;
+  serializeJson(ack, out);
+  ws.sendTXT(out);
+
+  if (reconnect) reconnectAtMs = millis() + CONFIG_RECONNECT_DELAY_MS;
+}
+
 static void handleTextFrame(const uint8_t *payload, size_t length) {
   JsonDocument doc;
   if (deserializeJson(doc, payload, length) != DeserializationError::Ok) {
@@ -93,6 +174,8 @@ static void handleTextFrame(const uint8_t *payload, size_t length) {
     if (speakingStartCb) speakingStartCb();
   } else if (strcmp(type, "speaking_end") == 0) {
     if (speakingEndCb) speakingEndCb();
+  } else if (strcmp(type, "set_config") == 0) {
+    if (authenticated) handleSetConfig(doc);
   } else if (strcmp(type, "pong") == 0) {
     // keep-alive ok
   }
@@ -188,6 +271,15 @@ void begin(const char *host, uint16_t port, const char *path, const String &room
 void loop() {
   ws.loop();
 
+  if (reconnectAtMs != 0 && (int32_t)(millis() - reconnectAtMs) >= 0) {
+    reconnectAtMs = 0;
+    authenticated = false;
+    // O próprio WebSocketsClient reconecta (setReconnectInterval) e o
+    // WStype_CONNECTED manda o auth já com o roomId novo.
+    ws.disconnect();
+    return;
+  }
+
   if (!authenticated) return;
   const uint32_t now = millis();
   if (now - lastIpCheckMs < IP_CHECK_INTERVAL_MS) return;
@@ -246,5 +338,6 @@ void onAuthOk(SimpleCb cb) { authOkCb = cb; }
 void onSpeakingStart(SimpleCb cb) { speakingStartCb = cb; }
 void onSpeakingEnd(SimpleCb cb) { speakingEndCb = cb; }
 void onAudioResponse(AudioResponseCb cb) { audioResponseCb = cb; }
+void onConfigBusy(BoolCb cb) { configBusyCb = cb; }
 
 } // namespace LunaWsClient

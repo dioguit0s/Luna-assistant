@@ -3,11 +3,13 @@
 
 // Cliente WebSocket do satélite. Fala o protocolo do luna-server:
 //   auth -> auth_ok | speaking_start | audio_response | speaking_end | pong
+//   set_config -> config_ack (+ reconexão quando a sala muda)
 // Envelope de áudio = header JSON + PCM binário no MESMO frame.
 namespace LunaWsClient {
 
 typedef void (*AudioResponseCb)(const uint8_t *pcm, size_t len);
 typedef void (*SimpleCb)();
+typedef bool (*BoolCb)();
 
 void begin(const char *host, uint16_t port, const char *path, const String &roomId,
            const String &deviceId, const String &authSecret);
@@ -37,5 +39,10 @@ void onAuthOk(SimpleCb cb);
 void onSpeakingStart(SimpleCb cb);
 void onSpeakingEnd(SimpleCb cb);
 void onAudioResponse(AudioResponseCb cb);
+
+// Diz se o satélite está no meio de um turno. Com ele ocupado, `set_config` é
+// recusado com erro "ocupado" (o painel tenta de novo) — ver ConfigStore.h e
+// docs/protocolo-websocket.md. Sem callback, nunca está ocupado.
+void onConfigBusy(BoolCb cb);
 
 } // namespace LunaWsClient

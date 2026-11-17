@@ -24,8 +24,9 @@ import { sanitizeLabel } from '../orchestrator/tools/setReminder.js';
 import { nextOccurrenceAfter } from '../reminders/recurrence.js';
 import { MAX_IN_SECONDS, MIN_IN_SECONDS } from '../reminders/resolveOnce.js';
 import type { RepeatRule } from '../reminders/ReminderStore.js';
-import type { SatelliteInfo } from '../ws/WsServer.js';
-import { SERVER_RELEASE, SERVER_VERSION } from '../ws/WsServer.js';
+import type { SatelliteConfigAck, SatelliteInfo } from '../ws/WsServer.js';
+import { SERVER_RELEASE, SERVER_VERSION, SatelliteConfigError } from '../ws/WsServer.js';
+import type { SatelliteConfigPatch } from '../ws/protocol.js';
 import { getLogger } from '../logging/logger.js';
 import { LEVEL_VALUES, type LogLevelName, type LogRecord } from '../logging/logTap.js';
 import type { Diagnostics, LogFilter } from '../diagnostics/Diagnostics.js';
@@ -59,6 +60,11 @@ export interface AdminApiDeps {
   diagnostics: Diagnostics;
   /** Fecha as conexões de um `device_id` — ver `WsServer.disconnectDevice`. */
   disconnectSatellite: (deviceId: string) => number;
+  /**
+   * `set_config` ao satélite conectado, esperando o `config_ack` — ver
+   * `WsServer.setSatelliteConfig`. Rejeita com `SatelliteConfigError`.
+   */
+  setSatelliteConfig: (deviceId: string, config: SatelliteConfigPatch) => Promise<SatelliteConfigAck>;
   /** Shutdown gracioso; o `Restart=always` da unit traz o processo de volta. */
   onRestart: () => void;
   fetchImpl?: typeof fetch;
@@ -201,6 +207,9 @@ export class AdminApi {
         return { body: { satellites: this.satellites() } };
       case 'PUT satellites/:id':
         return { body: this.updateSatellite(id!, await readJson(req)) };
+      case 'PUT satellites/:id/:action':
+        if (action === 'config') return { body: await this.configureSatellite(id!, await readJson(req)) };
+        break;
       case 'POST satellites/:id/:action':
         if (action === 'disconnect') return { body: this.disconnectSatellite(id!) };
         break;
@@ -393,6 +402,77 @@ export class AdminApi {
       );
     }
     return { device_id: deviceId, name: next.names[deviceId] ?? null, blocked: next.blocked.includes(deviceId) };
+  }
+
+  /**
+   * `{ room_id }`: troca a sala do satélite sem USB. Manda `set_config`, espera
+   * o `config_ack` e só então responde. Nada é persistido aqui — a NVS do
+   * satélite é a fonte da verdade; a mudança fica no log. Com `reconnect`, o
+   * satélite cai e volta autenticado na sala nova em poucos segundos: o painel
+   * acompanha pela lista de satélites.
+   */
+  private async configureSatellite(deviceId: string, body: unknown): Promise<unknown> {
+    const roomId = field(body, 'room_id');
+    if (roomId === undefined) throw new HttpError(422, 'envie "room_id"', 'room_id');
+    if (typeof roomId !== 'string' || !ROOM_ID_PATTERN.test(roomId)) {
+      throw new HttpError(422, 'room_id: só minúsculas, dígitos e _ (1 a 64), como o area_id do HA', 'room_id');
+    }
+
+    let ack: SatelliteConfigAck;
+    try {
+      ack = await this.deps.setSatelliteConfig(deviceId, { room_id: roomId });
+    } catch (err) {
+      if (err instanceof SatelliteConfigError) {
+        getLogger().warn(
+          { event: 'satellite_config_failed', device_id: deviceId, room_id: roomId, reason: err.code, via: 'admin' },
+          `Troca de sala de ${deviceId} para ${roomId} sem resposta: ${err.message}`,
+        );
+        if (err.code === 'offline') {
+          throw new HttpError(409, 'satélite offline — a sala só pode ser trocada com ele conectado');
+        }
+        if (err.code === 'timeout') {
+          throw new HttpError(504, 'o satélite não respondeu — firmware anterior ao set_config não suporta trocar a sala pelo painel');
+        }
+        throw new HttpError(409, 'a conexão do satélite caiu antes da resposta — confira a sala quando ele voltar');
+      }
+      throw err;
+    }
+
+    const field_ = ack.results.room_id;
+    if (!ack.ok || !field_?.ok) {
+      const error = field_?.error ?? ack.reason ?? 'recusado pelo satélite';
+      getLogger().warn(
+        { event: 'satellite_config_refused', device_id: deviceId, room_id: roomId, error, via: 'admin' },
+        `Satélite ${deviceId} recusou a sala ${roomId}: ${error}`,
+      );
+      if (error === 'ocupado') {
+        throw new HttpError(409, 'satélite ocupado com uma conversa — tente de novo quando ele voltar ao repouso');
+      }
+      if (error === 'não suportado') {
+        throw new HttpError(409, 'este satélite não suporta trocar a sala pelo painel', 'room_id');
+      }
+      throw new HttpError(422, `satélite recusou: ${error}`, 'room_id');
+    }
+
+    getLogger().info(
+      {
+        event: 'satellite_room_changed',
+        device_id: deviceId,
+        from: ack.previousRoomId,
+        to: roomId,
+        reconnect: ack.reconnect,
+        via: 'admin',
+      },
+      ack.reconnect
+        ? `Satélite ${deviceId}: sala ${ack.previousRoomId} → ${roomId} (gravada na NVS, reconectando)`
+        : `Satélite ${deviceId}: já estava na sala ${roomId}`,
+    );
+    return {
+      device_id: deviceId,
+      room_id: roomId,
+      previous_room_id: ack.previousRoomId,
+      reconnect: ack.reconnect,
+    };
   }
 
   private disconnectSatellite(deviceId: string): unknown {

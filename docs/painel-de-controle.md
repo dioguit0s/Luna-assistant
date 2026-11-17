@@ -58,8 +58,8 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Desconectar ou bloquear um satélite (aparelho perdido) | API + Persist | v2 ✔ |
 | "Tocar som / piscar LED" para identificar | Proto + FW | depois |
 | Versão do firmware, IP, sinal do Wi-Fi (`device_info`) | Proto + FW | ✔ |
-| Trocar a sala sem recompilar (hoje `ROOM_ID` é compilado) | Proto + FW | depois |
-| Rotacionar o segredo (`SecretStore::setAuthSecret` existe, nada o aciona) | Proto + FW | depois |
+| Trocar a sala sem recompilar (`set_config`; a sala vive na NVS do satélite) | Proto + FW | ✔ |
+| Rotacionar o segredo (`ConfigStore::setAuthSecret` existe, nada o aciona; o canal `set_config` já serve) | Proto + FW | depois |
 | Provisionar satélite novo por USB (Wi-Fi, servidor e segredo na NVS) | Tela + FW | depois |
 | Volume, brilho do LED, sensibilidade da wake word por satélite | Proto + FW | depois |
 | Atualização de firmware pela rede (OTA) | FW + API | depois |
@@ -158,6 +158,7 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `GET satellites` | Conectados agora + vistos desde o boot + nomeados; `online`, `connected_since`, `last_seen_at`, `device_info` (`fw_version`, `fw_build`, `ip`, `mac`, `rssi`, `free_heap`, `uptime_ms`, `received_at` — `null` se o satélite nunca mandou, e o painel mostra "desconhecida") e `remote_address` (endereço do socket, fallback do IP) |
 | `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove; `{ "blocked": true }` recusa o satélite no handshake e derruba a conexão aberta (v2) |
 | `POST satellites/:device_id/disconnect` | Fecha as conexões do satélite; ele reconecta sozinho — v2 |
+| `PUT satellites/:device_id/config` | `{ "room_id": "quarto" }` — manda `set_config` ao satélite conectado e só responde depois do `config_ack` (até 3 s): `200 { device_id, room_id, previous_room_id, reconnect }`. `409` offline, ocupado com um turno, conexão caiu no meio ou cliente que não suporta (desktop, bancada); `504` sem resposta (firmware anterior ao tipo); `422` sala fora do formato ou recusada. Nada é persistido no servidor — a NVS do satélite é a fonte da verdade; a troca fica no log (`satellite_room_changed`) |
 | `GET backup` | Configuração de runtime (sem nenhum campo de segredo) e lembretes vivos, `format: "luna-backup"`, `version: 1` — v2 |
 | `POST restore` | `{ backup, reminders: "keep" \| "replace" }`, até 1 MB. Valida todos os grupos antes de gravar; cada um entra como patch (segredo ausente mantém o gravado). `replace` cancela os lembretes vivos e recria os do arquivo, pulando único que já passou — v2 |
 | `GET rooms` | Salas (de satélite, áreas do HA, mapeadas), área efetiva e o que o `list_devices` veria nelas |

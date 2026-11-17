@@ -2,10 +2,37 @@
 #include "config.h"
 #include "version.h"
 
+// secrets.h só provisiona a NVS (ver ConfigStore.h). Sem ele, ou com campos
+// vazios, sai um binário genérico: funciona num satélite já provisionado e é
+// o único tipo de binário que pode ser publicado (repositório público, OTA).
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
-#error "Crie include/secrets.h a partir de include/secrets.h.example"
+#warning "include/secrets.h ausente — binário genérico, só funciona em satélite já provisionado"
+#endif
+#ifndef WIFI_SSID
+#define WIFI_SSID ""
+#endif
+#ifndef WIFI_PASS
+#define WIFI_PASS ""
+#endif
+#ifndef LUNA_HOST
+#define LUNA_HOST ""
+#endif
+#ifndef LUNA_PORT
+#define LUNA_PORT 0
+#endif
+#ifndef LUNA_WS_PATH
+#define LUNA_WS_PATH "/"
+#endif
+#ifndef ROOM_ID
+#define ROOM_ID ""
+#endif
+#ifndef WS_AUTH_SECRET
+#define WS_AUTH_SECRET ""
+#endif
+#ifndef LUNA_FORCE_PROVISION
+#define LUNA_FORCE_PROVISION 0
 #endif
 
 #include "esp_heap_caps.h"
@@ -18,7 +45,7 @@
 #include "ui/StatusLed.h"
 #include "wake/WakeWord.h"
 #include "ws/LunaWsClient.h"
-#include "ws/SecretStore.h"
+#include "ws/ConfigStore.h"
 #include "ws/WifiManager.h"
 
 // --- Estruturas de troca entre tasks ---
@@ -33,7 +60,8 @@ static StreamBufferHandle_t wakeBuffer = nullptr;     // captura -> detector de 
 static TaskHandle_t wakeTaskHandle = nullptr;
 
 static uint32_t seqCounter = 0;
-static bool wsStarted = false;
+static bool wsStarted = false;       // já tentou iniciar o WS (uma vez, no 1º Wi-Fi)
+static bool wsClientRunning = false; // o WS de fato foi iniciado (config completa)
 static uint32_t lastPingMs = 0;
 static uint32_t lastAuthedMs = 0;
 static uint32_t lastWarnMs = 0;
@@ -94,6 +122,22 @@ static const char *resetReasonStr(esp_reset_reason_t r) {
 static void onAuthOk() {
   StateMachine::reset(); // recupera se a conexão caiu durante RESPONDING
   Serial.println("[luna] autenticado — aguardando wake word");
+}
+
+// set_config (troca de sala pelo painel) só é aplicado com o satélite parado:
+// trocar no meio de um turno derrubaria a resposta em curso. Em open-mic a FSM
+// fica em ACTIVE_STREAMING para sempre — ali só RESPONDING conta como ocupado,
+// senão a sala nunca poderia ser trocada. Ver docs/protocolo-websocket.md.
+static bool configBusy() {
+  switch (StateMachine::current()) {
+  case StateMachine::State::IDLE_LISTENING:
+    return false;
+  case StateMachine::State::ACTIVE_STREAMING:
+    return StateMachine::wakeWordAvailable();
+  case StateMachine::State::RESPONDING:
+  default:
+    return true;
+  }
 }
 
 static uint32_t responseBytes = 0;
@@ -577,7 +621,8 @@ void setup() {
   Serial.printf("Boot anterior: %s\n", resetReasonStr(esp_reset_reason()));
 
   StatusLed::begin();
-  SecretStore::begin();
+  ConfigStore::begin({WIFI_SSID, WIFI_PASS, LUNA_HOST, (uint16_t)LUNA_PORT, ROOM_ID,
+                      WS_AUTH_SECRET, LUNA_FORCE_PROVISION != 0});
 
   if (!AudioCapture::begin()) Serial.println("[erro] AudioCapture I2S0 falhou");
   if (!AudioPlayback::begin()) Serial.println("[erro] AudioPlayback I2S1 falhou");
@@ -646,7 +691,15 @@ void setup() {
   LunaWsClient::onSpeakingEnd(onSpeakingEnd);
   LunaWsClient::onAudioResponse(onAudioResponse);
 
-  WifiManager::begin(WIFI_SSID, WIFI_PASS);
+  LunaWsClient::onConfigBusy(configBusy);
+
+  // As Strings do ConfigStore vivem até o fim do programa: o WifiManager guarda
+  // só os ponteiros.
+  if (ConfigStore::wifiSsid().length() == 0) {
+    Serial.println("[erro] satélite não provisionado: sem Wi-Fi na NVS nem no secrets.h");
+  } else {
+    WifiManager::begin(ConfigStore::wifiSsid().c_str(), ConfigStore::wifiPass().c_str());
+  }
 
   xTaskCreatePinnedToCore(captureTask, "capture", 4096, nullptr, 3, nullptr, 1);
   xTaskCreatePinnedToCore(playbackTask, "playback", 4096, nullptr, 3, nullptr, 0);
@@ -665,14 +718,23 @@ void loop() {
 
   // Inicia o WebSocket assim que o Wi-Fi conectar pela primeira vez.
   if (!wsStarted && WifiManager::isConnected()) {
-    LunaWsClient::begin(LUNA_HOST, LUNA_PORT, LUNA_WS_PATH, ROOM_ID,
-                        WifiManager::deviceId(),
-                        SecretStore::authSecret(WS_AUTH_SECRET));
-    wsStarted = true;
-    Serial.printf("[luna] WS -> ws://%s:%u%s\n", LUNA_HOST, (unsigned)LUNA_PORT, LUNA_WS_PATH);
+    wsStarted = true; // tentado uma vez só: sem config, não adianta repetir
+    const String &host = ConfigStore::lunaHost();
+    const uint16_t port = ConfigStore::lunaPort();
+    if (host.length() == 0 || port == 0 || ConfigStore::roomId().length() == 0 ||
+        ConfigStore::authSecret().length() == 0) {
+      Serial.println("[erro] satélite não provisionado: falta servidor, sala ou segredo — "
+                     "grave um firmware com o secrets.h real (ver README)");
+    } else {
+      LunaWsClient::begin(host.c_str(), port, LUNA_WS_PATH, ConfigStore::roomId(),
+                          WifiManager::deviceId(), ConfigStore::authSecret());
+      wsClientRunning = true;
+      Serial.printf("[luna] WS -> ws://%s:%u%s (sala %s)\n", host.c_str(), (unsigned)port,
+                    LUNA_WS_PATH, ConfigStore::roomId().c_str());
+    }
   }
 
-  if (wsStarted) LunaWsClient::loop();
+  if (wsClientRunning) LunaWsClient::loop();
 
   // Só entrega o "fim de resposta" à FSM quando o buffer de playback (PSRAM)
   // esvaziou de verdade — ver o porquê em onSpeakingEnd() acima. A partir daí

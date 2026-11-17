@@ -12,6 +12,7 @@ import {
   parseIncomingMessage,
   serializeControlMessage,
   buildAudioMessage,
+  unsupportedConfigAck,
   type MessageEnvelope,
 } from './protocol.js';
 
@@ -168,6 +169,15 @@ export class LunaWsClient extends EventEmitter {
     if (envelope.type === 'auth_error') {
       this.lastAuthError = true;
       this.emit('authError', envelope.reason);
+      return;
+    }
+
+    if (envelope.type === 'set_config') {
+      // A sala do desktop vem da configuração local (Este computador): a troca
+      // pelo painel é só para os satélites ESP32.
+      if (this.authenticated && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeControlMessage(unsupportedConfigAck(envelope, this.opts.roomId)));
+      }
       return;
     }
 
