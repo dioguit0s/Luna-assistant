@@ -28,6 +28,7 @@ tudo em um clique. O front door do repositório é o [README da raiz](../README.
 - [ADR 009 — Inventário por cômodo](adr/009-inventario-por-comodo.md)
 - [ADR 010 — Painel de controle: API admin e configuração no SQLite](adr/010-painel-de-controle-e-api-admin.md) (proposto)
 - [ADR 011 — Agenda por voz: integração com o Compasso](adr/011-agenda-compasso.md)
+- [ADR 012 — OTA de firmware: release no GitHub, servidor como proxy, rollback por autenticação](adr/012-ota-de-firmware.md) (proposto)
 
 ## Features / módulos
 

@@ -289,3 +289,21 @@
 #define WIFI_BACKOFF_START_MS 1000    // backoff exponencial: 1s, 2s, 4s...
 #define WIFI_BACKOFF_MAX_MS 60000     // ...até 60s
 #define WIFI_ATTEMPT_TIMEOUT_MS 8000  // janela mínima para uma associação concluir
+
+// --- OTA (atualização de firmware pela rede, ver src/ota/OtaUpdater.h e ADR 012) ---
+// Prazo para a imagem nova autenticar no servidor depois do primeiro boot. Sem
+// auth_ok até lá, ela é marcada inválida e o satélite reinicia na anterior.
+// Folga para Wi-Fi lento e servidor reiniciando; o servidor espera 7 min
+// (OtaManager, rebootMs) antes de dar a OTA como perdida — mantenha abaixo disso.
+#define OTA_VALIDATE_TIMEOUT_MS 300000
+// Download parado (sem byte novo) antes de desistir e seguir na versão atual.
+#define OTA_READ_TIMEOUT_MS 15000
+// Entre o ota_result e o reinício: dá tempo da mensagem sair pela socket.
+#define OTA_REBOOT_DELAY_MS 1000
+// Gravou com o WebSocket caído: espera reconectar para mandar o ota_result até
+// este teto, e reinicia de qualquer jeito (o device_info da versão nova confirma).
+#define OTA_RESULT_MAX_WAIT_MS 10000
+// ota_progress: a cada 5 pontos percentuais, ou a cada tanto mesmo parado
+// (é o que mostra ao servidor que o download ainda está vivo).
+#define OTA_PROGRESS_STEP_PCT 5
+#define OTA_PROGRESS_HEARTBEAT_MS 5000

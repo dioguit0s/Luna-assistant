@@ -655,6 +655,7 @@ async function show(id: string): Promise<void> {
     pendingEscape = null;
     confirmingReminder = null;
     confirmingBlock = null;
+    if (roomChange?.phase === 'confirm') roomChange = null;
     restoreState.confirming = false;
     if (restart.phase === 'confirm') restart.phase = 'idle';
     typeInto($('screen-title'), page.title, { cps: 45, cursor: 'hi' });
@@ -841,6 +842,405 @@ pages.push({
 
 // ─── 02 Satélites ────────────────────────────────────────────────────────
 
+/** `0.4.0+abc1234`; satélite que nunca mandou `device_info` (firmware antigo) = desconhecida. */
+function firmwareLabel(s: any): string {
+  const info = s.device_info;
+  if (!info?.fw_version) return 'DESCONHECIDA';
+  return info.fw_build ? `${info.fw_version}+${info.fw_build}` : info.fw_version;
+}
+
+/** IP que o satélite anunciou; sem `device_info`, o endereço do socket. */
+function ipLabel(s: any): { text: string; viaSocket: boolean } {
+  if (s.device_info?.ip) return { text: s.device_info.ip, viaSocket: false };
+  if (s.remote_address) return { text: s.remote_address, viaSocket: true };
+  return { text: '—', viaSocket: false };
+}
+
+/** dBm → nota grosseira, nas faixas de sempre do Wi-Fi 2.4 GHz. */
+function rssiLabel(rssi: number | null | undefined): { text: string; tone: string } {
+  if (typeof rssi !== 'number') return { text: '—', tone: 'fg' };
+  const grade = rssi >= -60 ? 'ÓTIMO' : rssi >= -70 ? 'BOM' : rssi >= -80 ? 'FRACO' : 'RUIM';
+  return { text: `${rssi} dBm · ${grade}`, tone: rssi >= -70 ? '' : 'amber' };
+}
+
+/** Mesmo formato do servidor (ROOM_ID_PATTERN) e do area_id do HA. */
+const ROOM_ID_RE = /^[a-z0-9_]{1,64}$/;
+/** Quanto o painel espera o satélite voltar na sala nova antes de avisar. */
+const ROOM_RECONNECT_WAIT_MS = 20_000;
+
+/**
+ * Troca de sala de um satélite: o S/N, o envio (o servidor espera o
+ * `config_ack`) e a espera da reconexão na sala nova. Sobrevive aos repaints
+ * do poll; o desfecho fica na tela até a próxima troca.
+ */
+let roomChange: {
+  deviceId: string;
+  target: string;
+  phase: 'confirm' | 'sending' | 'waiting' | 'done' | 'failed';
+  detail: string;
+} | null = null;
+/** Texto digitado no campo de sala, por satélite — o repaint não apaga. */
+let roomDraft: { deviceId: string; value: string } | null = null;
+
+function repaintSatellites(): void {
+  if (currentPage?.id === 'satellites') void renderCurrent();
+}
+
+async function applyRoomChange(deviceId: string, target: string): Promise<void> {
+  if (!roomChange || roomChange.deviceId !== deviceId) return;
+  roomChange = { ...roomChange, phase: 'sending', detail: '' };
+  repaintSatellites();
+
+  const label = `SALA ${deviceId} → ${target.toUpperCase()}`;
+  const result = await window.panel.call('server.setSatelliteRoom', deviceId, target);
+  if (!result.ok) {
+    roomChange = { deviceId, target, phase: 'failed', detail: errorOf(result).toUpperCase() };
+    say(`${label} ... FALHA: ${errorOf(result)}`, 'warn');
+    repaintSatellites();
+    return;
+  }
+  roomDraft = null;
+  if (!result.body?.reconnect) {
+    roomChange = { deviceId, target, phase: 'done', detail: `JÁ ESTAVA EM ${target.toUpperCase()}` };
+    say(`${label} ... JÁ ESTAVA NESTA SALA`);
+    repaintSatellites();
+    return;
+  }
+
+  roomChange = { deviceId, target, phase: 'waiting', detail: '' };
+  say(`${label} ... GRAVADO NO SATÉLITE · AGUARDANDO RECONEXÃO`);
+  repaintSatellites();
+
+  // O satélite derruba a conexão e reautentica com o room_id novo; é a lista
+  // de satélites que conta quando isso aconteceu.
+  const deadline = Date.now() + ROOM_RECONNECT_WAIT_MS;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    if (roomChange?.deviceId !== deviceId || roomChange.phase !== 'waiting') return;
+    const list = await window.panel.call('server.satellites');
+    const sat = list.ok ? (list.body.satellites as any[]).find((x) => x.device_id === deviceId) : null;
+    if (sat?.online && sat.room_id === target) {
+      roomChange = { deviceId, target, phase: 'done', detail: `RECONECTOU EM ${target.toUpperCase()}` };
+      say(`${label} ... RECONECTOU NA SALA NOVA`);
+      repaintSatellites();
+      return;
+    }
+  }
+  if (roomChange?.deviceId !== deviceId || roomChange.phase !== 'waiting') return;
+  roomChange = { deviceId, target, phase: 'failed', detail: 'GRAVADO NO SATÉLITE, MAS ELE AINDA NÃO VOLTOU — CONFIRA WI-FI E ENERGIA' };
+  say(`${label} ... SEM RECONEXÃO EM ${ROOM_RECONNECT_WAIT_MS / 1000}S`, 'warn');
+  repaintSatellites();
+}
+
+/** Bloco SALA do detalhe: campo, sugestões, S/N e o desfecho da troca. */
+function satelliteRoomControls(sel: any, knownRooms: string[]): HTMLElement {
+  const mine = roomChange?.deviceId === sel.device_id ? roomChange : null;
+  const inFlight = mine?.phase === 'sending' || mine?.phase === 'waiting';
+  const canChange = sel.online && !sel.blocked && !inFlight;
+  const box = h('div', { style: 'display:flex;flex-direction:column;gap:6px;align-items:stretch' });
+
+  if (mine?.phase === 'confirm') {
+    box.append(
+      confirmLine(
+        `MOVER PARA ${mine.target.toUpperCase()}? (S/N)`,
+        { yes: '[ S ]', no: '[ N ]' },
+        () => void applyRoomChange(sel.device_id, mine.target),
+        () => {
+          roomChange = null;
+          void renderCurrent();
+        },
+      ),
+    );
+    return box;
+  }
+
+  const saved = roomDraft;
+  const draft = saved && saved.deviceId === sel.device_id ? saved.value : (sel.room_id ?? '');
+  const input = h('input', {
+    class: 'box-input raw',
+    value: draft,
+    maxLength: 64,
+    spellcheck: 'false',
+    autocomplete: 'off',
+    'aria-label': `Sala nova de ${sel.device_id}`,
+    style: 'flex:1;min-width:0',
+    disabled: !canChange,
+  }) as HTMLInputElement;
+  const hint = h('span', { class: 'small amber', style: 'line-height:1.5', role: 'status' });
+  const normalized = (): string => input.value.trim().toLowerCase();
+  const begin = (): void => {
+    const target = normalized();
+    if (!ROOM_ID_RE.test(target) || target === sel.room_id) return;
+    roomChange = { deviceId: sel.device_id, target, phase: 'confirm', detail: '' };
+    void renderCurrent();
+  };
+  const apply = cmd('MUDAR', begin, { first: true, disabled: true, ariaLabel: `Mudar a sala de ${sel.device_id}` });
+  const refresh = (): void => {
+    const v = normalized();
+    apply.disabled = !canChange || !ROOM_ID_RE.test(v) || v === sel.room_id;
+    hint.textContent = v && !ROOM_ID_RE.test(v) ? 'SÓ a-z, 0-9 E _ — O AREA_ID DO HA' : '';
+  };
+  input.addEventListener('input', () => {
+    roomDraft = { deviceId: sel.device_id, value: input.value };
+    refresh();
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !apply.disabled) begin();
+    if (e.key === 'Escape') {
+      roomDraft = null;
+      input.value = sel.room_id ?? '';
+      refresh();
+      input.blur();
+    }
+  });
+  input.addEventListener('click', (e) => e.stopPropagation());
+  refresh();
+  box.append(h('div', { style: 'display:flex;gap:6px;align-items:center' }, input, apply), hint);
+
+  const suggestions = knownRooms.filter((r) => r !== sel.room_id).slice(0, 8);
+  if (canChange && suggestions.length > 0) {
+    box.append(
+      h(
+        'div',
+        { style: 'display:flex;flex-wrap:wrap;gap:2px 6px', role: 'group', 'aria-label': 'Salas conhecidas' },
+        ...suggestions.map((room, i) =>
+          cmd(room, () => {
+            input.value = room;
+            roomDraft = { deviceId: sel.device_id, value: room };
+            refresh();
+            input.focus();
+          }, { raw: true, tone: 'quiet', first: i === 0, ariaLabel: `Usar a sala ${room}` }),
+        ),
+      ),
+    );
+  }
+
+  const status = ((): { text: string; tone: string } => {
+    if (mine?.phase === 'sending') return { text: `ENVIANDO ${mine.target.toUpperCase()} AO SATÉLITE…`, tone: 'hi' };
+    if (mine?.phase === 'waiting') return { text: `GRAVADO · AGUARDANDO RECONEXÃO EM ${mine.target.toUpperCase()}…`, tone: 'hi' };
+    if (mine?.phase === 'done') return { text: `▣ ${mine.detail}`, tone: 'hi' };
+    if (mine?.phase === 'failed') return { text: `▲ ${mine.detail}`, tone: 'amber' };
+    if (sel.blocked) return { text: 'DESBLOQUEIE ANTES DE TROCAR A SALA.', tone: 'fg' };
+    if (!sel.online) return { text: 'SÓ COM O SATÉLITE ONLINE — A SALA VIVE NA NVS DELE.', tone: 'fg' };
+    return { text: 'ELE RECONECTA SOZINHO NA SALA NOVA. SEM USB.', tone: '' };
+  })();
+  box.append(h('span', { class: `small ${status.tone}`, style: 'line-height:1.6', role: 'status' }, status.text));
+  return box;
+}
+
+// ─── firmware (OTA, ADR 012) ───
+
+/** Compara semver; pré-release vem antes da final. Mesma regra do servidor. */
+function compareSemver(a: string, b: string): number {
+  const parse = (v: string): { nums: number[]; pre: string | null } => {
+    const [core, ...pre] = v.split('-');
+    return { nums: (core ?? '').split('.').map((n) => Number(n) || 0), pre: pre.length ? pre.join('-') : null };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa.nums[i] ?? 0) - (pb.nums[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  if (pa.pre === pb.pre) return 0;
+  if (pa.pre === null) return 1;
+  if (pb.pre === null) return -1;
+  return pa.pre.localeCompare(pb.pre);
+}
+
+/**
+ * Satélite ESP32 (atualizável pela rede): o firmware manda `fw_build`; o
+ * desktop e a bancada mandam só a versão do app (ver protocolo, device_info).
+ */
+function isFirmwareSatellite(s: any): boolean {
+  return typeof s.device_info?.fw_build === 'string' && typeof s.device_info?.fw_version === 'string';
+}
+
+const OTA_ACTIVE = new Set(['downloading', 'sending', 'rebooting']);
+/** Repaint mais rápido que o poll da tela enquanto uma OTA anda. */
+const OTA_POLL_MS = 1500;
+let otaRepaintTimer: ReturnType<typeof setTimeout> | null = null;
+/** Versão escolhida no seletor, por satélite — o repaint não volta para a mais nova. */
+let otaChoice: { deviceId: string; version: string } | null = null;
+/** S/N aberto para atualizar este satélite nesta versão. */
+let otaConfirm: { deviceId: string; version: string } | null = null;
+/** Pedido em voo (antes do 202): segura o botão. */
+let otaSending: string | null = null;
+
+function scheduleOtaRepaint(): void {
+  if (otaRepaintTimer) return;
+  otaRepaintTimer = setTimeout(() => {
+    otaRepaintTimer = null;
+    if (currentPage?.id === 'satellites') void renderCurrent(true);
+  }, OTA_POLL_MS);
+}
+
+/** "Atualização disponível": a mais nova estável acima da que roda. */
+function updateAvailable(s: any, latest: string | null): boolean {
+  return Boolean(latest && isFirmwareSatellite(s) && compareSemver(latest, s.device_info.fw_version) > 0);
+}
+
+/** `[████████░░░░░░░░]  52%` — barra em caracteres de bloco, como o resto do terminal. */
+function progressBar(percent: number, width = 16): string {
+  const p = Math.max(0, Math.min(100, Math.round(percent)));
+  const full = Math.round((p / 100) * width);
+  return `[${'█'.repeat(full)}${'░'.repeat(width - full)}] ${String(p).padStart(3, ' ')}%`;
+}
+
+function otaStateLine(ota: any): { text: string; tone: string } {
+  const v = String(ota.target_version ?? '?').toUpperCase();
+  switch (ota.state) {
+    case 'downloading':
+      return { text: `BAIXANDO ${v} DO GITHUB E CONFERINDO SHA-256…`, tone: 'hi' };
+    case 'sending':
+      return { text: `SATÉLITE GRAVANDO ${v} — NÃO DESLIGUE`, tone: 'hi' };
+    case 'rebooting':
+      return { text: `GRAVADO · REINICIANDO EM ${v} E AGUARDANDO ELE VOLTAR…`, tone: 'hi' };
+    case 'ok':
+      return { text: `▣ ATUALIZADO PARA ${v}`, tone: 'hi' };
+    case 'rolled_back':
+      return { text: `▲ REVERTIDO — ${String(ota.error ?? '').toUpperCase()}`, tone: 'amber' };
+    case 'failed':
+    default:
+      return { text: `▲ FALHOU: ${String(ota.error ?? 'sem motivo').toUpperCase()}`, tone: 'amber' };
+  }
+}
+
+async function startOta(deviceId: string, version: string): Promise<void> {
+  otaConfirm = null;
+  otaSending = deviceId;
+  repaintSatellites();
+  const label = `FIRMWARE ${deviceId} → ${version}`;
+  const result = await window.panel.call('server.updateFirmware', deviceId, version);
+  otaSending = null;
+  if (!result.ok) say(`${label} ... FALHA: ${errorOf(result)}`, 'warn');
+  else say(`${label} ... INICIADO · BAIXANDO NO NÚCLEO`);
+  repaintSatellites();
+}
+
+/** Bloco FIRMWARE do detalhe: disponível, seletor de versão, S/N, progresso e desfecho. */
+function firmwareControls(sel: any, releasesRes: PanelResult): HTMLElement {
+  const box = h('div', { style: 'display:flex;flex-direction:column;gap:6px;align-items:stretch' });
+  const releases: any[] = releasesRes.ok ? (releasesRes.body?.releases ?? []) : [];
+  const latest: string | null = releasesRes.ok ? (releasesRes.body?.latest ?? null) : null;
+  const current: string | null = sel.device_info?.fw_version ?? null;
+  const ota = sel.ota ?? null;
+  const active = Boolean(ota && OTA_ACTIVE.has(ota.state));
+
+  box.append(kv('DISPONÍVEL', h('span', { class: 'raw' }, latest ?? '—'), latest ? '' : 'fg'));
+  if (updateAvailable(sel, latest)) {
+    box.append(h('span', { class: 'small hi' }, `▲ ATUALIZAÇÃO DISPONÍVEL: ${current} → ${latest}`));
+  }
+
+  if (ota) {
+    const line = otaStateLine(ota);
+    if (active) {
+      box.append(
+        h(
+          'span',
+          { class: 'raw meter', role: 'progressbar', 'aria-label': 'Progresso da atualização', 'aria-valuenow': String(ota.percent ?? 0), 'aria-valuemin': '0', 'aria-valuemax': '100' },
+          progressBar(ota.percent ?? 0),
+        ),
+      );
+      scheduleOtaRepaint();
+    }
+    box.append(h('span', { class: `small ${line.tone}`, style: 'line-height:1.6', role: 'status' }, line.text));
+  }
+
+  if (!isFirmwareSatellite(sel)) {
+    box.append(
+      h(
+        'span',
+        { class: 'small fg', style: 'line-height:1.6' },
+        sel.device_info ? 'SÓ SATÉLITES ESP32 ATUALIZAM PELA REDE.' : 'VERSÃO DESCONHECIDA — FIRMWARE ANTERIOR À OTA: GRAVE UMA VEZ POR USB.',
+      ),
+    );
+    return box;
+  }
+  if (!releasesRes.ok) {
+    box.append(h('span', { class: 'small amber', style: 'line-height:1.6' }, `▲ LISTA DE VERSÕES INDISPONÍVEL: ${errorOf(releasesRes).toUpperCase()}`));
+    return box;
+  }
+  if (releases.length === 0) {
+    box.append(h('span', { class: 'small fg', style: 'line-height:1.6' }, 'NENHUMA RELEASE FW-V* PUBLICADA NO GITHUB.'));
+    return box;
+  }
+  if (releasesRes.body?.stale) {
+    box.append(h('span', { class: 'small amber', style: 'line-height:1.6' }, '▲ GITHUB INACESSÍVEL — LISTA DA ÚLTIMA CONSULTA'));
+  }
+
+  const choice =
+    otaChoice && otaChoice.deviceId === sel.device_id && releases.some((r) => r.version === otaChoice!.version)
+      ? otaChoice.version
+      : (latest ?? releases[0].version);
+  const chosen = releases.find((r) => r.version === choice) ?? releases[0];
+  const cmp = current ? compareSemver(chosen.version, current) : 1;
+  const verb = cmp > 0 ? 'ATUALIZAR' : cmp < 0 ? 'VOLTAR' : 'REINSTALAR';
+  // Mesma versão e mesmo build: a imagem anterior é idêntica à nova, e uma
+  // reversão chegaria com o mesmo device_info — o servidor daria "ok" sem
+  // saber. Não há o que ganhar; o botão fica desligado.
+  const runningBuild = String(sel.device_info?.fw_build ?? '').slice(0, 7);
+  const identical = cmp === 0 && Boolean(chosen.manifest?.build) && chosen.manifest.build === runningBuild;
+
+  const confirming = otaConfirm;
+  if (confirming && confirming.deviceId === sel.device_id) {
+    const target = confirming.version;
+    box.append(
+      confirmLine(
+        `${verb} PARA ${target}? (S/N)`,
+        { yes: '[ S ]', no: '[ N ]' },
+        () => void startOta(sel.device_id, target),
+        () => {
+          otaConfirm = null;
+          void renderCurrent();
+        },
+      ),
+    );
+    return box;
+  }
+
+  const canStart = sel.online && !sel.blocked && !active && !identical && otaSending !== sel.device_id;
+  box.append(
+    cycler(
+      releases.map((r) => ({
+        value: r.version as string,
+        label: `${r.version}${r.version === latest ? ' · MAIS NOVA' : ''}${r.version === current ? ' · ATUAL' : ''}${r.prerelease ? ' · PRÉ' : ''}`,
+        raw: true,
+      })),
+      releases.findIndex((r) => r.version === chosen.version),
+      (version) => {
+        otaChoice = { deviceId: sel.device_id, version };
+        void renderCurrent(true);
+      },
+      'versão',
+    ),
+  );
+  if (chosen.changelog) {
+    box.append(
+      h('span', { class: 'small', style: 'line-height:1.5;white-space:pre-line;max-height:72px;overflow:hidden', title: chosen.changelog }, chosen.changelog),
+    );
+  }
+  box.append(
+    cmd(
+      `${verb} → ${chosen.version}`,
+      () => {
+        otaConfirm = { deviceId: sel.device_id, version: chosen.version };
+        void renderCurrent();
+      },
+      { first: true, disabled: !canStart, tone: cmp < 0 ? 'amber' : undefined, ariaLabel: `${verb} o firmware de ${sel.device_id} para ${chosen.version}` },
+    ),
+  );
+  const hint = identical
+    ? 'JÁ ESTÁ NESTA VERSÃO E NESTE BUILD.'
+    : sel.blocked
+    ? 'DESBLOQUEIE ANTES DE ATUALIZAR.'
+    : !sel.online
+      ? 'SÓ COM O SATÉLITE ONLINE E EM REPOUSO.'
+      : 'MANTÉM SALA, WI-FI E SEGREDO. IMAGEM QUE NÃO AUTENTICA VOLTA SOZINHA.';
+  box.append(h('span', { class: 'small', style: 'line-height:1.6' }, hint));
+  return box;
+}
+
 let selectedSatellite: string | null = null;
 let editingSatellite: string | null = null;
 /** `device_id` com o S/N de bloqueio aberto. */
@@ -852,9 +1252,24 @@ pages.push({
   title: 'SATÉLITES REGISTRADOS',
   pollMs: 10000,
   async render(root) {
-    const result = await window.panel.call('server.satellites');
+    const [result, roomsRes, releasesRes] = await Promise.all([
+      window.panel.call('server.satellites'),
+      window.panel.call('server.rooms'),
+      window.panel.call('server.firmwareReleases'),
+    ]);
     if (!result.ok) return serverUnavailable(root, result);
+    const latestFirmware: string | null = releasesRes.ok ? (releasesRes.body?.latest ?? null) : null;
     const sats = result.body.satellites as any[];
+    // Sugestões do campo de sala: salas com satélite + áreas do HA + mapeadas.
+    // Sem a rota (servidor antigo), sobram as salas dos próprios satélites.
+    const knownRooms = [
+      ...new Set([
+        ...(roomsRes.ok ? (roomsRes.body.rooms as any[]).map((r) => r.room_id) : []),
+        ...sats.map((s) => s.room_id),
+      ]),
+    ]
+      .filter((r): r is string => typeof r === 'string' && ROOM_ID_RE.test(r))
+      .sort();
     const online = sats.filter((s) => s.online).length;
     setMeta(`${sats.length} REGISTRADOS · ${online} ONLINE`);
     if (sats.length === 0) {
@@ -863,7 +1278,7 @@ pages.push({
     }
     if (!sats.some((s) => s.device_id === selectedSatellite)) selectedSatellite = sats[0].device_id;
 
-    const cols = '150px 150px 100px 96px 100px minmax(0,1fr)';
+    const cols = '150px 150px 100px 96px 128px 100px minmax(0,1fr)';
     const rows = sats.map((s) => {
       const selected = s.device_id === selectedSatellite;
       let nameCell: HTMLElement;
@@ -920,6 +1335,15 @@ pages.push({
         nameCell,
         h('span', { class: 'ellipsis' }, s.room_id ?? '—'),
         h('span', { class: s.blocked ? 'amber' : s.online ? 'hi' : 'fg' }, s.blocked ? '⊘ BLOQUEADO' : s.online ? '▣ ONLINE' : '— OFFLINE'),
+        h(
+          'span',
+          {
+            class: `raw nowrap ellipsis${s.device_info?.fw_version ? '' : ' fg'}`,
+            title: updateAvailable(s, latestFirmware) ? `${firmwareLabel(s)} — ${latestFirmware} disponível` : firmwareLabel(s),
+          },
+          // ▲ = há versão mais nova publicada; ◌ = OTA andando agora.
+          `${s.ota && OTA_ACTIVE.has(s.ota.state) ? '◌ ' : updateAvailable(s, latestFirmware) ? '▲ ' : ''}${firmwareLabel(s)}`,
+        ),
         h('span', {}, s.online ? formatStamp(s.connected_since) : '—'),
         h('span', {}, formatAgo(s.last_seen_at)),
       );
@@ -928,19 +1352,18 @@ pages.push({
     const table = h(
       'div',
       { class: 'tbl', style: 'flex:1;min-width:0' },
-      grid(cols, { class: 'tbl-head strong' }, h('span', {}, 'DEVICE_ID'), h('span', {}, 'NOME'), h('span', {}, 'SALA'), h('span', {}, 'ESTADO'), h('span', {}, 'CONECTADO DESDE'), h('span', {}, 'ÚLTIMO SINAL')),
+      grid(cols, { class: 'tbl-head strong' }, h('span', {}, 'DEVICE_ID'), h('span', {}, 'NOME'), h('span', {}, 'SALA'), h('span', {}, 'ESTADO'), h('span', {}, 'FIRMWARE'), h('span', {}, 'CONECTADO DESDE'), h('span', {}, 'ÚLTIMO SINAL')),
       ...rows,
       h(
         'div',
         { class: 'tbl-foot' },
         h('span', {}, `${sats.length} SATÉLITES · ${online} ONLINE · ${sats.length - online} OFFLINE`),
         h('span', { class: 'spacer' }),
-        h('span', {}, 'CLIQUE NO NOME PARA RENOMEAR · ENTER SALVA · ESC CANCELA'),
+        h('span', {}, `${latestFirmware ? `FIRMWARE MAIS NOVO ${latestFirmware} · ▲ DISPONÍVEL · ` : ''}CLIQUE NO NOME PARA RENOMEAR · ENTER SALVA · ESC CANCELA`),
       ),
     );
 
     const sel = sats.find((s) => s.device_id === selectedSatellite)!;
-    const future = (label: string): HTMLElement => grid('96px 1fr', { class: 'grid dim', style: 'align-items:start' }, h('span', {}, label), h('span', {}, 'INDISPONÍVEL NESTA VERSÃO'));
     // Bloquear pede S/N: corta o aparelho até alguém desbloquear aqui.
     const blockControls: HTMLElement = (() => {
       if (sel.blocked) {
@@ -977,10 +1400,17 @@ pages.push({
       kv('ESTADO', sel.blocked ? '⊘ BLOQUEADO' : sel.online ? '▣ ONLINE' : '— OFFLINE', sel.blocked ? 'amber' : sel.online ? '' : 'fg'),
       kv('CONECTADO DESDE', sel.online ? formatStamp(sel.connected_since) : '—'),
       kv('ÚLTIMO SINAL', formatAgo(sel.last_seen_at)),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, sel.online ? '── APARELHO ──────────────────' : '── APARELHO · ÚLTIMO VISTO ────'),
+      kv('FIRMWARE', h('span', { class: 'raw', title: firmwareLabel(sel) }, firmwareLabel(sel)), sel.device_info?.fw_version ? '' : 'fg'),
+      // Sem `device_info`, o IP é o endereço do socket: em cinza, com o porquê no tooltip.
+      kv('IP', h('span', { class: 'raw', title: ipLabel(sel).viaSocket ? 'ENDEREÇO DO SOCKET — O SATÉLITE NÃO ANUNCIOU IP' : '' }, ipLabel(sel).text), ipLabel(sel).viaSocket ? 'fg' : ''),
+      kv('MAC', h('span', { class: 'raw' }, sel.device_info?.mac ?? '—')),
+      kv('WI-FI', rssiLabel(sel.device_info?.rssi).text, rssiLabel(sel.device_info?.rssi).tone),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, '── FIRMWARE ───────────────────'),
+      firmwareControls(sel, releasesRes),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, '── SALA ───────────────────────'),
+      satelliteRoomControls(sel, knownRooms),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── RECURSOS FUTUROS ──────────'),
-      future('FIRMWARE'),
-      future('IP'),
-      future('SINAL WI-FI'),
       cmd('IDENTIFICAR', () => undefined, { disabled: true, first: true }),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── ACESSO ─────────────────────'),
       h(

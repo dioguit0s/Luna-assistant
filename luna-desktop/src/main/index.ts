@@ -154,6 +154,7 @@ function connectServer(config: DesktopConfig): void {
     roomId: config.roomId,
     authSecret: config.authSecret,
     deviceId: config.deviceId,
+    appVersion: app.getVersion(),
   });
   wsClient = client;
 
@@ -371,6 +372,15 @@ if (!gotLock) {
     wakeword.on('fatalError', (message) => {
       session?.setSidecarHealthy(false);
       tray?.notify('Luna — wake word indisponível', message);
+    });
+    wakeword.on('provisioning', (stage) => {
+      // O sidecar só emite a primeira etapa de cada preparação.
+      tray?.notify(
+        'Luna — preparando a wake word',
+        stage === 'create-venv'
+          ? 'Primeira execução: instalando o ambiente Python (até um minuto).'
+          : 'Atualizando as dependências da wake word (até um minuto).',
+      );
     });
     wakeword.on('restartScheduled', (delayMs) => {
       console.log(`[luna-desktop] wakeword: reiniciando em ${Math.round(delayMs / 1000)}s`);

@@ -115,6 +115,13 @@ function int(value: unknown, name: string, min: number, max: number): number {
   return value as number;
 }
 
+/** Mesmo formato que o servidor aceita: semver, sem o prefixo `fw-v`. */
+function semver(value: unknown): string {
+  const v = str(value, 'version');
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]{1,32})?$/.test(v)) throw new TypeError('argumento "version" inválido');
+  return v;
+}
+
 const seg = encodeURIComponent;
 
 function ok(body: unknown): PanelResult {
@@ -135,6 +142,17 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
     'server.blockSatellite': (deviceId, blocked) =>
       admin.request('PUT', `satellites/${seg(str(deviceId, 'device_id'))}`, { blocked: bool(blocked, 'blocked') }),
     'server.disconnectSatellite': (deviceId) => admin.request('POST', `satellites/${seg(str(deviceId, 'device_id'))}/disconnect`),
+    // Troca de sala: o servidor manda `set_config` e só responde depois do
+    // `config_ack` do satélite (ou do timeout dele, abaixo dos 5 s do cliente).
+    'server.setSatelliteRoom': (deviceId, roomId) =>
+      admin.request('PUT', `satellites/${seg(str(deviceId, 'device_id'))}/config`, { room_id: str(roomId, 'room_id') }),
+    // OTA de firmware (ADR 012): releases publicadas no GitHub (o servidor
+    // busca e guarda em cache), abrir a atualização e acompanhá-la.
+    'server.firmwareReleases': (refresh) =>
+      admin.request('GET', refresh === true ? 'firmware/releases?refresh=1' : 'firmware/releases'),
+    'server.updateFirmware': (deviceId, version) =>
+      admin.request('POST', `satellites/${seg(str(deviceId, 'device_id'))}/ota`, { version: semver(version) }),
+    'server.otaStatus': (deviceId) => admin.request('GET', `satellites/${seg(str(deviceId, 'device_id'))}/ota`),
     'server.rooms': () => admin.request('GET', 'rooms'),
     'server.mapRoom': (roomId, area) =>
       admin.request('PUT', `rooms/${seg(str(roomId, 'room_id'))}`, {

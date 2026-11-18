@@ -247,7 +247,7 @@ Placa confirmada: **ESP32-S3 N16R8** (`board_build.arduino.memory_type = qio_opi
 - `src/fsm/`: a FSM não aciona mais o LED — só expõe `current()`,
   `wakeWordAvailable()` e `msSinceVoice()`. ✅
 - Trigger atual é **open-mic** (sem botão); a FSM já está estruturada para o botão e o wake word. ✅
-- Segredo de auth armazenado na **NVS** (`src/ws/SecretStore.cpp`); `secrets.h` só provisiona o primeiro boot. ✅
+- Wi-Fi, servidor, sala e segredo de auth armazenados na **NVS** (`src/ws/ConfigStore.cpp`); `secrets.h` só provisiona o primeiro boot. ✅
 
 **Critério de aceite atingido** (forma adaptada, sem botão): falar e ouvir a resposta da Luna no speaker de forma inteligível.
 

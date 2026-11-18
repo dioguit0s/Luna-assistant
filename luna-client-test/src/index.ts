@@ -7,6 +7,8 @@ import {
   createEnvelope,
   parseIncomingMessage,
   serializeControlMessage,
+  unsupportedConfigAck,
+  unsupportedOtaResult,
 } from './protocol.js';
 import { readWavPcm16, writeWavPcm16, generateSilence, playPcm16 } from './wav.js';
 
@@ -243,6 +245,17 @@ function connect(): WebSocket {
 
       if (envelope.type === 'auth_ok') {
         console.log('Autenticado. Fale no microfone (Ctrl+C para sair).');
+        // Bancada também é satélite: sem IP local (o servidor usa o endereço do
+        // socket), versão do package.json quando rodado via npm.
+        ws.send(
+          serializeControlMessage(
+            createEnvelope('device_info', cfg.roomId, {
+              fw_version: process.env.npm_package_version ?? 'dev',
+              fw_build: 'client-test',
+              uptime_ms: Math.round(process.uptime() * 1000),
+            }),
+          ),
+        );
         void (async () => {
           try {
             playback = await startPlayback();
@@ -252,6 +265,22 @@ function connect(): WebSocket {
             ws.close();
           }
         })();
+        return;
+      }
+
+      if (envelope.type === 'set_config') {
+        // Bancada não tem NVS: a sala vem do .env. Responde para o painel não
+        // esperar o timeout.
+        console.log('set_config recebido — não suportado na bancada (sala vem do .env)');
+        ws.send(serializeControlMessage(unsupportedConfigAck(envelope, cfg.roomId)));
+        return;
+      }
+
+      if (envelope.type === 'ota_start') {
+        // Bancada não tem firmware: recusa na hora, para o painel não esperar
+        // o timeout e achar que é um firmware antigo.
+        console.log(`ota_start recebido (${String(envelope.version)}) — não suportado na bancada`);
+        ws.send(serializeControlMessage(unsupportedOtaResult(cfg.roomId)));
         return;
       }
 

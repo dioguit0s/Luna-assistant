@@ -320,4 +320,80 @@ describe('WsServer: endereçamento por sala', () => {
     await connectSatellite(ROOM, 'esp32-sala-2');
     assert.equal(server.sendToRoom(ROOM, serializeControlMessage(createEnvelope('pong', ROOM))), 2);
   });
+
+  // ─── device_info ──────────────────────────────────────────────────────
+  // Mora aqui pelo harness (WsServer real + satélite autenticado), não por ter
+  // a ver com endereçamento.
+
+  /** Manda `device_info` e espera o `pong` de um ping logo atrás: chegou na ordem. */
+  async function sendDeviceInfo(
+    sat: { ws: WebSocket; received: Collector },
+    extra: Partial<MessageEnvelope>,
+  ): Promise<void> {
+    const pongs = sat.received.types().filter((t) => t === 'pong').length;
+    sat.ws.send(serializeControlMessage(createEnvelope('device_info', ROOM, extra)));
+    sat.ws.send(serializeControlMessage(createEnvelope('ping', ROOM)));
+    await sat.received.until(
+      () => sat.received.types().filter((t) => t === 'pong').length > pongs,
+      'pong depois do device_info',
+    );
+  }
+
+  it('satélite sem device_info aparece com deviceInfo null e o endereço remoto', async () => {
+    await connectSatellite(ROOM, 'esp32-antigo');
+    const [sat] = server.listSatellites();
+    assert.equal(sat.deviceInfo, null);
+    assert.equal(sat.remoteAddress, '127.0.0.1');
+  });
+
+  it('guarda o último device_info, mantém offline e zera na reconexão', async () => {
+    const primeira = await connectSatellite(ROOM, 'esp32-novo');
+    await sendDeviceInfo(primeira, { fw_version: '0.4.0', fw_build: 'abc1234', ip: '192.168.0.42', rssi: -60 });
+    let [sat] = server.listSatellites();
+    assert.equal(sat.deviceInfo?.fwVersion, '0.4.0');
+    assert.equal(sat.deviceInfo?.fwBuild, 'abc1234');
+    assert.equal(sat.deviceInfo?.ip, '192.168.0.42');
+    assert.equal(sat.deviceInfo?.rssi, -60);
+
+    // IP mudou: o reenvio substitui.
+    await sendDeviceInfo(primeira, { fw_version: '0.4.0', fw_build: 'abc1234', ip: '192.168.0.43' });
+    [sat] = server.listSatellites();
+    assert.equal(sat.deviceInfo?.ip, '192.168.0.43');
+    assert.equal(sat.deviceInfo?.rssi, undefined);
+
+    // Offline: a última versão conhecida continua lá.
+    primeira.ws.close();
+    const deadline = Date.now() + 2_000;
+    while (server.listSatellites()[0]?.online) {
+      assert.ok(Date.now() < deadline, 'timeout esperando o satélite cair');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    [sat] = server.listSatellites();
+    assert.equal(sat.online, false);
+    assert.equal(sat.deviceInfo?.fwVersion, '0.4.0');
+
+    // Reconectou (talvez com outro firmware): desconhecida até o device_info novo.
+    await connectSatellite(ROOM, 'esp32-novo');
+    [sat] = server.listSatellites();
+    assert.equal(sat.online, true);
+    assert.equal(sat.deviceInfo, null);
+  });
+
+  it('device_info antes da auth é ignorado', async () => {
+    const ws = new WebSocket(wsUrl);
+    openSockets.push(ws);
+    await new Promise<void>((resolve) => ws.on('open', () => resolve()));
+    ws.send(serializeControlMessage(createEnvelope('device_info', ROOM, { fw_version: '9.9.9' })));
+    const received = collect(ws);
+    ws.send(
+      serializeControlMessage(
+        createEnvelope('auth', ROOM, {
+          device_id: 'esp32-apressado',
+          token: computeAuthToken(config.wsAuthSecret, 'esp32-apressado'),
+        }),
+      ),
+    );
+    await received.until(() => received.types().includes('auth_ok'), 'auth_ok');
+    assert.equal(server.listSatellites()[0].deviceInfo, null);
+  });
 });

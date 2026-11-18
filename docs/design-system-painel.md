@@ -157,5 +157,6 @@ O design é um protótipo com dados falsos; a implementação segue a API admin 
 - **"Forçar escuta"** é uma ação (`[ FORÇAR ESCUTA AGORA ]`), não um toggle.
 - **Reinício do núcleo** acompanha o `server.status` de verdade até o processo novo
   responder (desiste em 60 s), em vez de uma contagem fixa.
-- **Satélites:** firmware, IP, sinal Wi-Fi e "identificar" aparecem desabilitados como
-  "indisponível nesta versão" — dependem de protocolo e firmware (ver inventário).
+- **Satélites:** "identificar" aparece desabilitado como recurso futuro. A coluna FIRMWARE
+  marca `▲` quando há versão mais nova publicada e `◌` com OTA em andamento; o progresso da
+  OTA é uma barra de blocos `[████░░░░]  52%` (`.meter`), não um `<progress>`.

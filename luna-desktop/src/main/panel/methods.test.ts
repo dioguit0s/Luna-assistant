@@ -80,6 +80,37 @@ describe('métodos do painel', () => {
     assert.deepEqual(recorded[0]!.body, { name: 'Quarto' });
   });
 
+  it('trocar a sala vai para a rota de config do satélite', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.setSatelliteRoom']!('a1:b2', 'quarto');
+    assert.equal(recorded[0]!.url, 'http://192.168.0.20:8080/admin/v1/satellites/a1%3Ab2/config');
+    assert.equal(recorded[0]!.method, 'PUT');
+    assert.deepEqual(recorded[0]!.body, { room_id: 'quarto' });
+  });
+
+  it('OTA: listar releases, atualizar e acompanhar vão às rotas de firmware', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.firmwareReleases']!();
+    await methods['server.firmwareReleases']!(true);
+    await methods['server.updateFirmware']!('a1:b2', '0.6.0');
+    await methods['server.otaStatus']!('a1:b2');
+    assert.equal(recorded[0]!.url, 'http://192.168.0.20:8080/admin/v1/firmware/releases');
+    assert.equal(recorded[1]!.url, 'http://192.168.0.20:8080/admin/v1/firmware/releases?refresh=1');
+    assert.equal(recorded[2]!.url, 'http://192.168.0.20:8080/admin/v1/satellites/a1%3Ab2/ota');
+    assert.equal(recorded[2]!.method, 'POST');
+    assert.deepEqual(recorded[2]!.body, { version: '0.6.0' });
+    assert.equal(recorded[3]!.method, 'GET');
+  });
+
+  it('OTA: versão fora do formato não chega ao servidor', async () => {
+    const { methods, recorded } = setup();
+    for (const v of ['fw-v0.6.0', 'latest', 6, '0.6']) {
+      const result = await methods['server.updateFirmware']!('a1:b2', v);
+      assert.equal(result.ok, false);
+    }
+    assert.equal(recorded.length, 0);
+  });
+
   it('recusa grupo de configuração fora da lista sem chamar o servidor', async () => {
     const { methods, recorded } = setup();
     const result = await methods['server.saveSettings']!('rooms', {});

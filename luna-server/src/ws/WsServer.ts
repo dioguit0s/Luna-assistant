@@ -4,6 +4,7 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { WebSocketServer, WebSocket } from 'ws';
 import type { AppConfig } from '../config/env.js';
@@ -18,11 +19,15 @@ import type { ReminderScheduler } from '../reminders/ReminderScheduler.js';
 import type { AlarmRinger } from '../reminders/AlarmRinger.js';
 import { validateAuthToken } from './auth.js';
 import { parseBinaryMessage } from './messageParser.js';
+import { normalizeRemoteAddress, parseDeviceInfo, type DeviceInfo } from './deviceInfo.js';
 import type { WakeClipStore } from '../diagnostics/WakeClipStore.js';
 import {
   createEnvelope,
   parseControlMessage,
   serializeControlMessage,
+  type ConfigFieldResult,
+  type MessageEnvelope,
+  type SatelliteConfigPatch,
 } from './protocol.js';
 import { getLogger } from '../logging/logger.js';
 
@@ -32,6 +37,25 @@ interface ClientState {
   authenticated: boolean;
   lastSeenAt: number;
   connectedAt: number;
+  /** Endereço do outro lado do socket — fallback do IP sem `device_info`. */
+  remoteAddress: string | null;
+  /**
+   * Endereço local do socket: o IP do servidor como este satélite o enxerga.
+   * É o host da URL de OTA (o satélite baixa a imagem do mesmo IP do WS).
+   */
+  localAddress: string | null;
+  /** Último `device_info` desta conexão; `null` em firmware que não manda. */
+  deviceInfo: DeviceInfo | null;
+}
+
+/**
+ * Eventos de OTA vindos dos satélites — implementado pelo `OtaManager`
+ * (ver `src/ota/`). Interface aqui para o `WsServer` não depender da OTA.
+ */
+export interface OtaEvents {
+  handleProgress(deviceId: string, percent: unknown): void;
+  handleResult(deviceId: string, ok: unknown, error: unknown): void;
+  handleDeviceInfo(deviceId: string, fwVersion: string | null, fwBuild: string | null, connectedAt: number): void;
 }
 
 /** Um satélite como o painel o vê: conectado agora ou visto desde o boot. */
@@ -43,7 +67,44 @@ export interface SatelliteInfo {
   connectedSince: number | null;
   /** Último sinal de vida (ping, áudio, auth). */
   lastSeenAt: number;
+  /**
+   * Último `device_info` (versão, IP, sinal). Sobrevive à queda, para o painel
+   * mostrar a última versão conhecida de um satélite offline; zera quando ele
+   * reconecta, até o `device_info` novo chegar.
+   */
+  deviceInfo: DeviceInfo | null;
+  /** Endereço remoto da última conexão. */
+  remoteAddress: string | null;
 }
+
+/** Resposta do satélite a um `set_config` (ver docs/protocolo-websocket.md). */
+export interface SatelliteConfigAck {
+  ok: boolean;
+  results: Record<string, ConfigFieldResult>;
+  /** Satélite vai reconectar para a mudança valer (troca de sala). */
+  reconnect: boolean;
+  /** Recusa da mensagem inteira: `ocupado`, `config vazia`. */
+  reason: string | null;
+  /** Sala da conexão que recebeu o pedido. */
+  previousRoomId: string;
+}
+
+/** Por que um `set_config` não teve resposta. */
+export class SatelliteConfigError extends Error {
+  constructor(
+    readonly code: 'offline' | 'timeout' | 'disconnected',
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Espera do `config_ack`. O firmware responde na hora (grava na NVS e manda);
+ * a folga é para Wi-Fi ruim. Fica abaixo dos 5 s do cliente admin do desktop
+ * (`REQUEST_TIMEOUT_MS`), senão o painel desistiria antes do servidor.
+ */
+export const CONFIG_ACK_TIMEOUT_MS = 3_000;
 
 /**
  * Rota HTTP extra no mesmo servidor do `/health` — a API admin (ADR 010,
@@ -130,8 +191,32 @@ export class WsServer {
    * o painel mostrar "offline" para um aparelho que caiu. Em memória de
    * propósito: sem histórico persistido, some no restart.
    */
-  private readonly seenSatellites = new Map<string, { roomId: string; lastSeenAt: number }>();
+  private readonly seenSatellites = new Map<
+    string,
+    { roomId: string; lastSeenAt: number; deviceInfo: DeviceInfo | null; remoteAddress: string | null }
+  >();
+  /**
+   * Endereço remoto por socket, gravado no 'connection' — antes da auth, que é
+   * quando o `ClientState` nasce.
+   */
+  private readonly remoteAddresses = new WeakMap<WebSocket, string | null>();
+  /** Endereço local por socket, pelo mesmo motivo — ver `ClientState.localAddress`. */
+  private readonly localAddresses = new WeakMap<WebSocket, string | null>();
   private adminHandler: HttpRouteHandler | null = null;
+  /** Rotas HTTP fora da API admin (a imagem de OTA), na ordem de registro. */
+  private readonly httpRoutes: HttpRouteHandler[] = [];
+  private otaEvents: OtaEvents | null = null;
+  /** `set_config` esperando `config_ack`, por `request_id`. */
+  private readonly pendingConfigs = new Map<
+    string,
+    {
+      ws: WebSocket;
+      resolve: (ack: SatelliteConfigAck) => void;
+      reject: (err: SatelliteConfigError) => void;
+      timer: NodeJS.Timeout;
+      previousRoomId: string;
+    }
+  >();
   private providerName: () => string;
 
   constructor(
@@ -170,6 +255,65 @@ export class WsServer {
     this.adminHandler = handler;
   }
 
+  /**
+   * Rota HTTP extra sem o portão da API admin — hoje só a imagem de OTA
+   * (`/ota/<token>.bin`), que o satélite baixa sem token admin.
+   */
+  addHttpRoute(handler: HttpRouteHandler): void {
+    this.httpRoutes.push(handler);
+  }
+
+  /** Destino de `ota_progress`, `ota_result` e `device_info`. */
+  setOtaEvents(events: OtaEvents): void {
+    this.otaEvents = events;
+  }
+
+  /** Conexão autenticada e aberta mais recente do `device_id` — a que está de fato ouvindo. */
+  private latestConnection(deviceId: string): { ws: WebSocket; state: ClientState } | null {
+    let target: { ws: WebSocket; state: ClientState } | null = null;
+    for (const [ws, state] of this.clients) {
+      if (!state.authenticated || state.deviceId !== deviceId || ws.readyState !== WebSocket.OPEN) continue;
+      if (!target || state.connectedAt >= target.state.connectedAt) target = { ws, state };
+    }
+    return target;
+  }
+
+  /** O que a OTA precisa da conexão atual do satélite; `null` offline. */
+  otaConnection(deviceId: string): {
+    localAddress: string | null;
+    port: number | null;
+    remoteAddress: string | null;
+    fwVersion: string | null;
+    fwBuild: string | null;
+  } | null {
+    const target = this.latestConnection(deviceId);
+    if (!target) return null;
+    const { state } = target;
+    return {
+      localAddress: state.localAddress,
+      port: this.port,
+      remoteAddress: state.remoteAddress,
+      fwVersion: state.deviceInfo?.fwVersion ?? null,
+      fwBuild: state.deviceInfo?.fwBuild ?? null,
+    };
+  }
+
+  /** `ota_start` à conexão mais recente do satélite. `false` = não saiu. */
+  sendOtaStart(deviceId: string, payload: { url: string; version: string; sha256: string; size: number }): boolean {
+    const target = this.latestConnection(deviceId);
+    if (!target) return false;
+    try {
+      target.ws.send(serializeControlMessage(createEnvelope('ota_start', target.state.roomId, payload)));
+      return true;
+    } catch (err) {
+      getLogger().warn(
+        { event: 'ota_start_send_failed', device_id: deviceId, err: err instanceof Error ? err.message : String(err) },
+        'Falha ao enviar ota_start',
+      );
+      return false;
+    }
+  }
+
   /** `device_id`s bloqueados pelo painel — lido a cada handshake. */
   private isBlocked: (deviceId: string) => boolean = () => false;
   /**
@@ -206,6 +350,47 @@ export class WsServer {
     return closed;
   }
 
+  /**
+   * Manda `set_config` ao satélite conectado e espera o `config_ack`. A NVS do
+   * satélite é a fonte da verdade da configuração: nada aqui é persistido.
+   *
+   * Com mais de uma conexão do mesmo `device_id` (a velha ainda não caiu pelo
+   * reaper), vai para a mais recente — é a que está de fato ouvindo.
+   *
+   * Firmware anterior ao tipo ignora a mensagem: vira `timeout`.
+   */
+  setSatelliteConfig(
+    deviceId: string,
+    config: SatelliteConfigPatch,
+    timeoutMs = CONFIG_ACK_TIMEOUT_MS,
+  ): Promise<SatelliteConfigAck> {
+    const target = this.latestConnection(deviceId);
+    if (!target) {
+      return Promise.reject(new SatelliteConfigError('offline', 'satélite offline'));
+    }
+
+    const { ws, state } = target;
+    const requestId = randomUUID();
+    return new Promise<SatelliteConfigAck>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingConfigs.delete(requestId);
+        reject(new SatelliteConfigError('timeout', `sem config_ack em ${timeoutMs}ms`));
+      }, timeoutMs);
+      this.pendingConfigs.set(requestId, { ws, resolve, reject, timer, previousRoomId: state.roomId });
+      try {
+        ws.send(
+          serializeControlMessage(createEnvelope('set_config', state.roomId, { request_id: requestId, config })),
+        );
+      } catch (err) {
+        clearTimeout(timer);
+        this.pendingConfigs.delete(requestId);
+        reject(
+          new SatelliteConfigError('disconnected', `falha ao enviar: ${err instanceof Error ? err.message : String(err)}`),
+        );
+      }
+    });
+  }
+
   /** O `/health` mostra o provider efetivo, que o painel pode trocar a quente. */
   setProviderNameSource(source: () => string): void {
     this.providerName = source;
@@ -221,6 +406,8 @@ export class WsServer {
         online: false,
         connectedSince: null,
         lastSeenAt: seen.lastSeenAt,
+        deviceInfo: seen.deviceInfo,
+        remoteAddress: seen.remoteAddress,
       });
     }
     for (const state of this.clients.values()) {
@@ -231,6 +418,8 @@ export class WsServer {
         online: true,
         connectedSince: state.connectedAt,
         lastSeenAt: state.lastSeenAt,
+        deviceInfo: state.deviceInfo,
+        remoteAddress: state.remoteAddress,
       });
     }
     return [...byDevice.values()].sort((a, b) => a.roomId.localeCompare(b.roomId));
@@ -357,6 +546,9 @@ export class WsServer {
         return;
       }
       if (this.adminHandler?.(req, res)) return;
+      for (const route of this.httpRoutes) {
+        if (route(req, res)) return;
+      }
       res.writeHead(404).end();
     });
 
@@ -365,8 +557,11 @@ export class WsServer {
     // 640 bytes de PCM + um header JSON pequeno; 64KB sobra folga generosa.
     this.wss = new WebSocketServer({ server: this.httpServer, maxPayload: 64 * 1024 });
 
-    this.wss.on('connection', (ws) => {
-      getLogger().info({ event: 'ws_connect' }, 'Cliente WebSocket conectado');
+    this.wss.on('connection', (ws, req) => {
+      const remoteAddress = normalizeRemoteAddress(req.socket.remoteAddress);
+      this.remoteAddresses.set(ws, remoteAddress);
+      this.localAddresses.set(ws, normalizeRemoteAddress(req.socket.localAddress));
+      getLogger().info({ event: 'ws_connect', remote_address: remoteAddress }, 'Cliente WebSocket conectado');
 
       this.pendingAuthTimers.set(
         ws,
@@ -459,6 +654,9 @@ export class WsServer {
       clearTimeout(timer);
     }
     this.pendingAuthTimers.clear();
+    for (const ws of new Set([...this.pendingConfigs.values()].map((p) => p.ws))) {
+      this.rejectPendingConfigs(ws);
+    }
 
     // `terminate()`, não `close()`: um satélite que não responde ao handshake
     // de close (Wi-Fi degradado, já sem energia) faria `httpServer.close()`
@@ -531,6 +729,28 @@ export class WsServer {
       case 'activity_end':
         if (state?.authenticated) {
           await this.orchestrator.handleActivityEnd(state.roomId);
+        }
+        break;
+
+      case 'device_info':
+        if (state?.authenticated) this.handleDeviceInfo(state, envelope);
+        break;
+
+      case 'config_ack':
+        if (state?.authenticated) this.handleConfigAck(ws, state, envelope);
+        break;
+
+      case 'ota_progress':
+        if (state?.authenticated) this.otaEvents?.handleProgress(state.deviceId, envelope.percent);
+        break;
+
+      case 'ota_result':
+        if (state?.authenticated) {
+          getLogger().info(
+            { event: 'ota_result', device_id: state.deviceId, ok: envelope.ok === true, error: envelope.error },
+            `Satélite ${state.deviceId}: ota_result ${envelope.ok === true ? 'ok' : `falhou (${String(envelope.error)})`}`,
+          );
+          this.otaEvents?.handleResult(state.deviceId, envelope.ok, envelope.error);
         }
         break;
 
@@ -634,14 +854,20 @@ export class WsServer {
     }
 
     const now = Date.now();
+    const remoteAddress = this.remoteAddresses.get(ws) ?? null;
     this.clients.set(ws, {
       roomId: room_id,
       deviceId: device_id,
       authenticated: true,
       lastSeenAt: now,
       connectedAt: now,
+      remoteAddress,
+      localAddress: this.localAddresses.get(ws) ?? null,
+      deviceInfo: null,
     });
-    this.seenSatellites.set(device_id, { roomId: room_id, lastSeenAt: now });
+    // `deviceInfo` zera: o que valia era da conexão anterior, talvez de outro
+    // firmware. Satélite antigo, que nunca manda `device_info`, fica "desconhecida".
+    this.seenSatellites.set(device_id, { roomId: room_id, lastSeenAt: now, deviceInfo: null, remoteAddress });
     this.indexClient(ws, room_id);
     this.roomManager.registerClient(room_id);
 
@@ -653,7 +879,55 @@ export class WsServer {
     );
   }
 
+  private handleDeviceInfo(
+    state: ClientState,
+    envelope: NonNullable<ReturnType<typeof parseControlMessage>>,
+  ): void {
+    const info = parseDeviceInfo(envelope, Date.now());
+    state.deviceInfo = info;
+    const seen = this.seenSatellites.get(state.deviceId);
+    if (seen) seen.deviceInfo = info;
+    getLogger().info(
+      {
+        event: 'device_info',
+        room_id: state.roomId,
+        device_id: state.deviceId,
+        fw_version: info.fwVersion,
+        fw_build: info.fwBuild,
+        ip: info.ip,
+        rssi: info.rssi,
+      },
+      `Satélite ${state.deviceId}: firmware ${info.fwVersion ?? '?'}+${info.fwBuild ?? '?'}, IP ${info.ip ?? state.remoteAddress ?? '?'}`,
+    );
+    this.otaEvents?.handleDeviceInfo(state.deviceId, info.fwVersion ?? null, info.fwBuild ?? null, state.connectedAt);
+  }
+
+  private handleConfigAck(ws: WebSocket, state: ClientState, envelope: MessageEnvelope): void {
+    const requestId = typeof envelope.request_id === 'string' ? envelope.request_id : '';
+    const pending = this.pendingConfigs.get(requestId);
+    // Só a conexão que recebeu o pedido responde por ele: um `request_id`
+    // ecoado por outro satélite não fecha o pedido alheio.
+    if (!pending || pending.ws !== ws) {
+      getLogger().debug({ event: 'config_ack_unmatched', device_id: state.deviceId }, 'config_ack sem pedido pendente');
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingConfigs.delete(requestId);
+    pending.resolve(parseConfigAck(envelope, pending.previousRoomId));
+  }
+
+  /** Pedidos desta conexão não vão mais ter resposta. */
+  private rejectPendingConfigs(ws: WebSocket): void {
+    for (const [requestId, pending] of this.pendingConfigs) {
+      if (pending.ws !== ws) continue;
+      clearTimeout(pending.timer);
+      this.pendingConfigs.delete(requestId);
+      pending.reject(new SatelliteConfigError('disconnected', 'conexão caiu antes do config_ack'));
+    }
+  }
+
   private async handleDisconnect(ws: WebSocket): Promise<void> {
+    this.rejectPendingConfigs(ws);
     const state = this.clients.get(ws);
     if (state) {
       // Antes de qualquer await: `releaseRoom` e o drain de áudio pendente não
@@ -675,4 +949,31 @@ export class WsServer {
     }
     this.clients.delete(ws);
   }
+}
+
+/**
+ * `config_ack` do fio → resultado tipado. Defensivo: campo de tipo errado vira
+ * recusa, nunca exceção — o firmware é a única cópia do contrato sem CI.
+ */
+function parseConfigAck(envelope: MessageEnvelope, previousRoomId: string): SatelliteConfigAck {
+  const results: Record<string, ConfigFieldResult> = {};
+  const raw = envelope.results;
+  if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (!value || typeof value !== 'object') continue;
+      const v = value as { ok?: unknown; error?: unknown };
+      results[key] = {
+        ok: v.ok === true,
+        ...(typeof v.error === 'string' ? { error: v.error.slice(0, 120) } : {}),
+      };
+    }
+  }
+  const allFieldsOk = Object.values(results).every((r) => r.ok);
+  return {
+    ok: envelope.ok === true && allFieldsOk,
+    results,
+    reconnect: envelope.reconnect === true,
+    reason: typeof envelope.reason === 'string' ? envelope.reason.slice(0, 120) : null,
+    previousRoomId,
+  };
 }

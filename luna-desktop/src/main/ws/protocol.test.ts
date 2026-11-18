@@ -7,6 +7,8 @@ import {
   parseIncomingMessage,
   serializeControlMessage,
   createEnvelope,
+  unsupportedConfigAck,
+  unsupportedOtaResult,
 } from './protocol.js';
 
 describe('buildAudioMessage / parseIncomingMessage', () => {
@@ -67,5 +69,34 @@ describe('parseControlMessage', () => {
     const parsed = parseControlMessage('{"type":"speaking_start","room_id":"sala"}');
     assert.ok(parsed);
     assert.equal(parsed.type, 'speaking_start');
+  });
+});
+
+describe('unsupportedConfigAck', () => {
+  it('recusa cada campo pedido com "não suportado", ecoando o request_id', () => {
+    const request = createEnvelope('set_config', 'desktop_diogo', { request_id: 'r-1', config: { room_id: 'quarto' } });
+    const ack = unsupportedConfigAck(request, 'desktop_diogo');
+    assert.equal(ack.type, 'config_ack');
+    assert.equal(ack.room_id, 'desktop_diogo');
+    assert.equal(ack.request_id, 'r-1');
+    assert.equal(ack.ok, false);
+    assert.equal(ack.reconnect, false);
+    assert.deepEqual(ack.results, { room_id: { ok: false, error: 'não suportado' } });
+  });
+
+  it('config ausente ou malformada vira resultados vazios, sem lançar', () => {
+    const ack = unsupportedConfigAck(createEnvelope('set_config', 'sala', { config: [] as never }), 'sala');
+    assert.deepEqual(ack.results, {});
+    assert.equal(ack.request_id, '');
+  });
+});
+
+describe('unsupportedOtaResult', () => {
+  it('recusa a OTA com "não suportado" na sala deste cliente', () => {
+    const result = unsupportedOtaResult('desktop_diogo');
+    assert.equal(result.type, 'ota_result');
+    assert.equal(result.room_id, 'desktop_diogo');
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'não suportado');
   });
 });

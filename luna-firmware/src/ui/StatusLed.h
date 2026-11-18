@@ -19,6 +19,7 @@ enum class Ui : uint8_t {
   THINKING,  // parou de falar, aguardando a resposta do servidor
   SPEAKING,  // Luna respondendo
   DEGRADED,  // open-mic: o detector de wake word não subiu
+  UPDATING,  // OTA: baixando/gravando firmware novo — não desligar da tomada
 };
 
 void begin();

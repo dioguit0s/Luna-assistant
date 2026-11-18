@@ -211,16 +211,24 @@ electron-builder), adequado pra distribuição single-user.
 **O sidecar de wake word vai junto** (código Python + os dois `.tflite`
 vendorizados, copiados de `luna-firmware/models/` — ver `extraResources` em
 `electron-builder.yml`), mas **o `.venv` não** (v1 continua exigindo Python
-local, decisão já tomada). Depois de instalar, pra "Hey Luna" funcionar:
+local, decisão já tomada). Não há passo manual: na primeira execução o app cria
+o venv em `%APPDATA%\luna-desktop\wakeword-venv` (com `py -3.14`, `py -3` ou
+`python`, nessa ordem) e roda o `pip install -r requirements.txt`. Uma
+notificação avisa enquanto isso dura (até um minuto, precisa de internet).
 
-```bash
-cd "%LOCALAPPDATA%\Programs\Luna Desktop\resources\wakeword-sidecar"
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-Mesmos passos de [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md),
-só que a partir da instalação em vez do checkout do repo.
+- **Por que no `userData` e não em `resources\`:** o NSIS substitui a pasta de
+  instalação inteira a cada atualização; um venv lá dentro sumia em toda
+  reinstalação e a wake word morria com `python.exe ENOENT`. O `userData`
+  sobrevive (o `deleteAppDataOnUninstall` fica no default, `false`).
+- **`requirements.txt` mudou:** o venv guarda o hash do arquivo
+  (`.luna-requirements.sha256`) e o app reinstala as dependências sozinho.
+- **Sem Python na máquina (ou sem rede):** a notificação "wake word
+  indisponível" diz o que aconteceu, uma vez por erro diferente; o app tenta de
+  novo sozinho, com intervalo que começa em 30 s e dobra até 30 min.
+- **Venv quebrado:** criação interrompida (app fechado no meio) ou Python base
+  desinstalado depois: o app apaga o venv e recria do zero, sem passo manual.
+- **Em dev** nada muda: continua usando o `.venv` do checkout, criado à mão como
+  em [`wakeword-sidecar/README.md`](wakeword-sidecar/README.md).
 
 **Primeira execução:** o instalador não pergunta nada — o app sobe em estado de
 erro e abre **Configurações → Este computador** sozinho. Preenchido o segredo,

@@ -52,6 +52,10 @@ Look lookFor(Ui s) {
   case Ui::THINKING:  return {{255, 0, 0},   Pattern::BREATHE, 1200, 40, 100};
   case Ui::SPEAKING:  return {{0, 0, 255},   Pattern::BREATHE, 1600, 30, 100};
   case Ui::DEGRADED:  return {{255, 0, 255}, Pattern::BREATHE, 3000, 30, 100};
+  // Atualizando: azul piscando rápido e duro. Azul é a cor "normal" (repouso,
+  // falando), mas nenhum estado normal pisca — e piscar é o que os estados de
+  // falha usam, o que aqui é de propósito: "não mexa / não desligue".
+  case Ui::UPDATING:  return {{0, 0, 255},   Pattern::BLINK,   250,  0,  100};
   }
   return {{0, 0, 0}, Pattern::SOLID, 0, 0, 0};
 }
@@ -70,6 +74,8 @@ Look lookFor(Ui s) {
   case Ui::THINKING:  return {{255, 140, 0},   Pattern::BREATHE, 1200, 40, 100};
   case Ui::SPEAKING:  return {{0, 170, 255},   Pattern::BREATHE, 1600, 30, 100};
   case Ui::DEGRADED:  return {{255, 0, 255},   Pattern::BREATHE, 2500, 30, 100};
+  // Atualizando: ciano piscando rápido — o único estado que pisca sem ser falha.
+  case Ui::UPDATING:  return {{0, 255, 255},   Pattern::BLINK,   250,  0,  100};
   }
   return {{0, 0, 0}, Pattern::SOLID, 0, 0, 0};
 }

@@ -5,12 +5,15 @@
 import { EventEmitter } from 'node:events';
 import WebSocket from 'ws';
 import { computeAuthToken } from './auth.js';
+import { buildDesktopDeviceInfo } from './device-info.js';
 import {
   createEnvelope,
   parseControlMessage,
   parseIncomingMessage,
   serializeControlMessage,
   buildAudioMessage,
+  unsupportedConfigAck,
+  unsupportedOtaResult,
   type MessageEnvelope,
 } from './protocol.js';
 
@@ -30,6 +33,8 @@ export interface LunaWsClientOptions {
   roomId: string;
   authSecret: string;
   deviceId: string;
+  /** Versão do app (`app.getVersion()`), anunciada no `device_info`. */
+  appVersion: string;
 }
 
 export interface LunaWsClientEvents {
@@ -63,6 +68,10 @@ export class LunaWsClient extends EventEmitter {
   // (o servidor manda um e depois fecha com 4001), nunca sobrevive a uma
   // reconexão, então uma única flag de instância basta.
   private lastAuthError = false;
+  // Endereço local do socket atual, lido no 'upgrade': é o IP da interface que
+  // chega no servidor. Não muda sem o socket cair, então o `device_info` de
+  // cada auth_ok já cobre "reenviar se o IP mudar".
+  private localAddress: string | undefined;
 
   constructor(private readonly opts: LunaWsClientOptions) {
     super();
@@ -99,6 +108,11 @@ export class LunaWsClient extends EventEmitter {
     this.emit('connecting');
     const ws = new WebSocket(this.opts.serverUrl);
     this.ws = ws;
+    this.localAddress = undefined;
+
+    ws.on('upgrade', (res) => {
+      this.localAddress = res.socket.localAddress;
+    });
 
     ws.on('open', () => {
       const token = computeAuthToken(this.opts.authSecret, this.opts.deviceId);
@@ -148,6 +162,7 @@ export class LunaWsClient extends EventEmitter {
       this.authenticated = true;
       this.backoffMs = BACKOFF_INITIAL_MS; // reconexão saudável reseta o backoff
       this.startPing();
+      this.sendDeviceInfo();
       this.emit('authOk');
       return;
     }
@@ -158,7 +173,30 @@ export class LunaWsClient extends EventEmitter {
       return;
     }
 
+    if (envelope.type === 'set_config') {
+      // A sala do desktop vem da configuração local (Este computador): a troca
+      // pelo painel é só para os satélites ESP32.
+      if (this.authenticated && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeControlMessage(unsupportedConfigAck(envelope, this.opts.roomId)));
+      }
+      return;
+    }
+
+    if (envelope.type === 'ota_start') {
+      // O desktop se atualiza pelo instalador, não pela OTA dos satélites ESP32.
+      if (this.authenticated && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeControlMessage(unsupportedOtaResult(this.opts.roomId)));
+      }
+      return;
+    }
+
     this.emit('control', envelope);
+  }
+
+  private sendDeviceInfo(): void {
+    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    const info = buildDesktopDeviceInfo(this.opts.appVersion, this.localAddress);
+    this.ws.send(serializeControlMessage(createEnvelope('device_info', this.opts.roomId, info)));
   }
 
   private startPing(): void {

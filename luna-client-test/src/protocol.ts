@@ -13,6 +13,20 @@ export type MessageType =
   // acompanhar o contrato — ver docs/protocolo-websocket.md.
   | 'wake_clip'
   | 'activity_end'
+  // Satélite → servidor, logo após auth_ok: versão, IP e saúde (ver
+  // docs/protocolo-websocket.md). Todos os campos opcionais.
+  | 'device_info'
+  // Servidor → satélite: o painel mudando configuração (hoje só a sala), e a
+  // resposta. Este cliente não aplica nada — responde "não suportado" para a
+  // rota do painel não ficar esperando o timeout (ver docs/protocolo-websocket.md).
+  | 'set_config'
+  | 'config_ack'
+  // Servidor → satélite: atualização de firmware pela rede (ADR 012), e o
+  // progresso/resultado. Este cliente não tem firmware para gravar — responde
+  // `ota_result` "não suportado" na hora (ver docs/protocolo-websocket.md).
+  | 'ota_start'
+  | 'ota_progress'
+  | 'ota_result'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
@@ -32,6 +46,42 @@ export interface MessageEnvelope {
   device?: string;
   action?: 'on' | 'off';
   entity_id?: string;
+  /** `device_info`: versão do firmware (semver) ou do app, no desktop. */
+  fw_version?: string;
+  /** `device_info`: build do firmware (SHA curto do git, ou `dev`). */
+  fw_build?: string;
+  /** `device_info`: IP local do satélite (IPv4 no firmware; o desktop pode mandar IPv6). */
+  ip?: string;
+  /** `device_info`: MAC do satélite. */
+  mac?: string;
+  /** `device_info`: sinal do Wi-Fi em dBm. Ausente fora de Wi-Fi (desktop). */
+  rssi?: number;
+  /** `device_info`: heap livre em bytes no envio. */
+  free_heap?: number;
+  /** `device_info`: uptime do satélite em ms no envio. */
+  uptime_ms?: number;
+  /** `set_config` e `config_ack`: casa a resposta com o pedido. */
+  request_id?: string;
+  /** `set_config`: campos a mudar, todos opcionais. Hoje só `room_id`. */
+  config?: Record<string, unknown>;
+  /** `config_ack`: se todos os campos foram aplicados. */
+  ok?: boolean;
+  /** `config_ack`: resultado por campo pedido. */
+  results?: Record<string, { ok: boolean; error?: string }>;
+  /** `config_ack`: se o satélite vai reconectar para a mudança valer. */
+  reconnect?: boolean;
+  /** `ota_start`: URL de uso único, na LAN, de onde o satélite baixa o `.bin`. */
+  url?: string;
+  /** `ota_start`: versão (semver) da imagem. */
+  version?: string;
+  /** `ota_start`: SHA-256 (hex) do `.bin`. */
+  sha256?: string;
+  /** `ota_start`: tamanho do `.bin` em bytes. */
+  size?: number;
+  /** `ota_progress`: 0 a 100. */
+  percent?: number;
+  /** `ota_result`: motivo da falha (junto de `ok: false`). */
+  error?: string;
 }
 
 export function createEnvelope(
@@ -40,6 +90,33 @@ export function createEnvelope(
   extra: Partial<MessageEnvelope> = {},
 ): MessageEnvelope {
   return { type, room_id: roomId, ts: Date.now(), ...extra };
+}
+
+/**
+ * `config_ack` recusando todo campo de um `set_config`: a sala deste cliente
+ * vem da configuração local, não da NVS de um ESP32. Sem resposta, a rota do
+ * painel esperaria o timeout inteiro para dizer a mesma coisa.
+ */
+export function unsupportedConfigAck(request: MessageEnvelope, roomId: string): MessageEnvelope {
+  const fields =
+    request.config && typeof request.config === 'object' && !Array.isArray(request.config)
+      ? Object.keys(request.config)
+      : [];
+  return createEnvelope('config_ack', roomId, {
+    request_id: typeof request.request_id === 'string' ? request.request_id : '',
+    ok: false,
+    reconnect: false,
+    results: Object.fromEntries(fields.map((f) => [f, { ok: false, error: 'não suportado' }])),
+  });
+}
+
+/**
+ * `ota_result` recusando um `ota_start`: este cliente não tem firmware para
+ * gravar. Sem resposta, o servidor esperaria o timeout para dizer que o
+ * satélite "não respondeu", o que soaria como firmware antigo.
+ */
+export function unsupportedOtaResult(roomId: string): MessageEnvelope {
+  return createEnvelope('ota_result', roomId, { ok: false, error: 'não suportado' });
 }
 
 export function serializeControlMessage(envelope: MessageEnvelope): string {

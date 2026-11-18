@@ -5,6 +5,12 @@ export type MessageType =
   | 'audio_chunk'
   | 'wake_clip'
   | 'activity_end'
+  | 'device_info'
+  | 'config_ack'
+  | 'set_config'
+  | 'ota_start'
+  | 'ota_progress'
+  | 'ota_result'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
@@ -40,6 +46,53 @@ export interface MessageEnvelope {
   prob?: number;
   /** `wake_clip`: se o turno desse wake teve resposta (`speaking_start`). */
   responded?: boolean;
+  /** `device_info`: versão do firmware (semver) ou do app, no desktop. */
+  fw_version?: string;
+  /** `device_info`: build do firmware (SHA curto do git, ou `dev`). */
+  fw_build?: string;
+  /** `device_info`: IP local do satélite (IPv4 no firmware; o desktop pode mandar IPv6). */
+  ip?: string;
+  /** `device_info`: MAC do satélite. */
+  mac?: string;
+  /** `device_info`: sinal do Wi-Fi em dBm. Ausente fora de Wi-Fi (desktop). */
+  rssi?: number;
+  /** `device_info`: heap livre em bytes no envio. */
+  free_heap?: number;
+  /** `device_info`: uptime do satélite em ms no envio. */
+  uptime_ms?: number;
+  /** `set_config` e `config_ack`: casa a resposta com o pedido. */
+  request_id?: string;
+  /** `set_config`: campos a mudar, todos opcionais. Hoje só `room_id`. */
+  config?: SatelliteConfigPatch;
+  /** `config_ack`: se todos os campos foram aplicados. */
+  ok?: boolean;
+  /** `config_ack`: resultado por campo pedido. */
+  results?: Record<string, ConfigFieldResult>;
+  /** `config_ack`: se o satélite vai reconectar para a mudança valer (troca de sala). */
+  reconnect?: boolean;
+  /** `ota_start`: URL de uso único, na LAN, de onde o satélite baixa o `.bin`. */
+  url?: string;
+  /** `ota_start`: versão (semver) da imagem que vai ser gravada. */
+  version?: string;
+  /** `ota_start`: SHA-256 (hex minúsculo) do `.bin` inteiro. */
+  sha256?: string;
+  /** `ota_start`: tamanho exato do `.bin` em bytes. */
+  size?: number;
+  /** `ota_progress`: 0 a 100. */
+  percent?: number;
+  /** `ota_result`: motivo da falha (`ocupado`, `sha256 diferente`, `não suportado`…). Também usa `ok`. */
+  error?: string;
+}
+
+/** Corpo do `config` de um `set_config`. Campo ausente = não mexer. */
+export interface SatelliteConfigPatch {
+  room_id?: string;
+}
+
+export interface ConfigFieldResult {
+  ok: boolean;
+  /** Motivo da recusa: `ocupado`, `não suportado`, formato inválido, falha na NVS. */
+  error?: string;
 }
 
 export function createEnvelope(

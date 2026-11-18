@@ -78,6 +78,12 @@ Todas as mensagens de controle seguem o envelope JSON padrão abaixo. Chunks de 
 | `audio_chunk`    | Satélite → Servidor | Chunk de 640 bytes de PCM 16kHz mono. Campo `seq` para detecção de perda |
 | `wake_clip`      | Satélite → Servidor | Binário: os ~2 s antes de um wake, em partes de 20 ms, enviados depois do turno (coleta de material de treino) |
 | `activity_end`   | Satélite → Servidor | Push-to-talk: fim de fala explícito (só com `GEMINI_MANUAL_ACTIVITY=true`) |
+| `device_info`    | Satélite → Servidor | Logo após `auth_ok`: versão do firmware, IP, MAC e sinal do Wi-Fi (painel, OTA) |
+| `config_ack`     | Satélite → Servidor | Resposta ao `set_config`: ok/erro por campo e se vai reconectar          |
+| `set_config`     | Servidor → Satélite | Painel mudando a configuração do satélite em runtime (hoje só `room_id`, gravado na NVS) |
+| `ota_start`      | Servidor → Satélite | Atualização de firmware: URL de uso único na LAN, versão, SHA-256 e tamanho (ADR 012) |
+| `ota_progress`   | Satélite → Servidor | Percentual da OTA em andamento                                           |
+| `ota_result`     | Satélite → Servidor | Fim da OTA (ou recusa), antes do reinício na imagem nova                 |
 | `auth_ok`        | Servidor → Satélite | Token validado — o firmware reseta a FSM ao receber                       |
 | `auth_error`     | Servidor → Satélite | Handshake recusado, com o motivo no campo `reason`                        |
 | `speaking_start` | Servidor → Satélite | Enviado antes do primeiro chunk de resposta — ativa AEC                  |

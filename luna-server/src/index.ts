@@ -20,6 +20,8 @@ import { AdminApi } from './admin/AdminApi.js';
 import { DiagnosticsStore } from './diagnostics/DiagnosticsStore.js';
 import { Diagnostics } from './diagnostics/Diagnostics.js';
 import { WakeClipStore } from './diagnostics/WakeClipStore.js';
+import { FirmwareReleases } from './ota/firmwareReleases.js';
+import { OtaManager } from './ota/OtaManager.js';
 
 /**
  * Loga com o pino se já estiver inicializado; cai para `console.error` durante
@@ -185,6 +187,23 @@ async function main(): Promise<void> {
     getLogger().info({ event: 'wake_clips_enabled', dir: process.env.WAKE_CLIP_DIR }, 'Coleta de clipes de wake ligada');
   }
 
+  // OTA de firmware (ADR 012): o servidor busca a release no GitHub, confere o
+  // SHA-256 e serve a imagem na LAN numa URL de uso único. O satélite nunca
+  // fala com a internet. Repositório público: nenhum token é necessário.
+  const firmwareReleases = new FirmwareReleases({
+    repo: process.env.FIRMWARE_RELEASES_REPO?.trim() || 'dioguit0s/Luna-assistant',
+    token: process.env.FIRMWARE_RELEASES_TOKEN?.trim() || undefined,
+  });
+  const otaManager = new OtaManager({
+    releases: firmwareReleases,
+    link: {
+      connection: (deviceId) => wsServer.otaConnection(deviceId),
+      sendOtaStart: (deviceId, payload) => wsServer.sendOtaStart(deviceId, payload),
+    },
+  });
+  wsServer.setOtaEvents(otaManager);
+  wsServer.addHttpRoute(otaManager.serve);
+
   // `shutdown` só existe mais abaixo; o reinício pelo painel chega por aqui.
   let requestRestart: () => void = () => {};
   wsServer.setAdminHandler(
@@ -212,6 +231,8 @@ async function main(): Promise<void> {
       calendarStatus: () => calendarClient.lastStatus(),
       diagnostics,
       disconnectSatellite: (deviceId) => wsServer.disconnectDevice(deviceId, 'desconectado pelo painel'),
+      setSatelliteConfig: (deviceId, patch) => wsServer.setSatelliteConfig(deviceId, patch),
+      ota: { releases: firmwareReleases, manager: otaManager },
       onRestart: () => requestRestart(),
     }).handle,
   );
@@ -267,6 +288,7 @@ async function main(): Promise<void> {
 
     diagnostics.stop();
     await wakeClipStore.flush();
+    otaManager.stop();
     await wsServer.stop();
     deviceRegistry.stop();
     weatherSource.stop();
