@@ -21,6 +21,12 @@ export type MessageType =
   // rota do painel não ficar esperando o timeout (ver docs/protocolo-websocket.md).
   | 'set_config'
   | 'config_ack'
+  // Servidor → satélite: atualização de firmware pela rede (ADR 012), e o
+  // progresso/resultado. Este cliente não tem firmware para gravar — responde
+  // `ota_result` "não suportado" na hora (ver docs/protocolo-websocket.md).
+  | 'ota_start'
+  | 'ota_progress'
+  | 'ota_result'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
@@ -64,6 +70,18 @@ export interface MessageEnvelope {
   results?: Record<string, { ok: boolean; error?: string }>;
   /** `config_ack`: se o satélite vai reconectar para a mudança valer. */
   reconnect?: boolean;
+  /** `ota_start`: URL de uso único, na LAN, de onde o satélite baixa o `.bin`. */
+  url?: string;
+  /** `ota_start`: versão (semver) da imagem. */
+  version?: string;
+  /** `ota_start`: SHA-256 (hex) do `.bin`. */
+  sha256?: string;
+  /** `ota_start`: tamanho do `.bin` em bytes. */
+  size?: number;
+  /** `ota_progress`: 0 a 100. */
+  percent?: number;
+  /** `ota_result`: motivo da falha (junto de `ok: false`). */
+  error?: string;
 }
 
 export function createEnvelope(
@@ -90,6 +108,15 @@ export function unsupportedConfigAck(request: MessageEnvelope, roomId: string): 
     reconnect: false,
     results: Object.fromEntries(fields.map((f) => [f, { ok: false, error: 'não suportado' }])),
   });
+}
+
+/**
+ * `ota_result` recusando um `ota_start`: este cliente não tem firmware para
+ * gravar. Sem resposta, o servidor esperaria o timeout para dizer que o
+ * satélite "não respondeu", o que soaria como firmware antigo.
+ */
+export function unsupportedOtaResult(roomId: string): MessageEnvelope {
+  return createEnvelope('ota_result', roomId, { ok: false, error: 'não suportado' });
 }
 
 export function serializeControlMessage(envelope: MessageEnvelope): string {

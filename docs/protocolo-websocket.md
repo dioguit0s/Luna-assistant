@@ -95,6 +95,10 @@ de bancada em Node aceita qualquer tamanho.
 | `ok` | `boolean` | só em `config_ack` | Se **todos** os campos pedidos foram aplicados |
 | `results` | `object` | só em `config_ack` | `{ "<campo>": { "ok": bool, "error"?: string } }`, um por campo pedido |
 | `reconnect` | `boolean` | só em `config_ack` | O satélite vai cair e reautenticar para a mudança valer (troca de sala) |
+| `url` | `string` | só em `ota_start` | `http://<ip do servidor>:<porta>/ota/<token>.bin`, de uso único |
+| `version` / `sha256` / `size` | `string` / `string` / `number` | só em `ota_start` | Versão da imagem, SHA-256 em hex minúsculo e tamanho exato em bytes (do `manifest.json` da release) |
+| `percent` | `number` | só em `ota_progress` | 0 a 100 |
+| `ok` / `error` | `boolean` / `string` | só em `ota_result` | Se gravou e conferiu; o motivo quando não |
 
 **`room_id` precisa casar `/^[a-z0-9_]{1,64}$/`** e é a mesma string do `area_id` do
 Home Assistant — o HA é a fonte de verdade dos cômodos. Ver [`infra/README.md`](../infra/README.md).
@@ -117,6 +121,8 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 | `activity_end` | texto | Push-to-talk: fim de fala explícito. Só tem efeito com `GEMINI_MANUAL_ACTIVITY=true` |
 | `device_info` | texto | Logo após `auth_ok`, e de novo se o IP mudar: o satélite descreve a si mesmo. Ver [Descrição do satélite](#descrição-do-satélite-device_info) |
 | `config_ack` | texto | Resposta a um `set_config`. Ver [Configuração em runtime](#configuração-em-runtime-set_config--config_ack) |
+| `ota_progress` | texto | Durante uma OTA: percentual baixado e gravado. Ver [Atualização de firmware](#atualização-de-firmware-ota_start--ota_progress--ota_result) |
+| `ota_result` | texto | Fim da OTA (ou recusa do `ota_start`), antes do reinício |
 | `ping` | texto | Keep-alive a cada 10 s (`PING_INTERVAL_MS`). Ignorado antes da autenticação |
 
 ### Servidor → Satélite
@@ -130,6 +136,7 @@ Em `audio_response` é **monotônico por sala**, mantido pelo servidor. Já foi
 | `speaking_end` | texto | Fim da fala. O satélite espera 150 ms (`AEC_RESUME_DELAY_MS`) e reativa a captura |
 | `command_result` | texto | Resultado de uma automação despachada ao Home Assistant |
 | `set_config` | texto | Painel mudando a configuração do satélite (hoje só a sala). Ver [Configuração em runtime](#configuração-em-runtime-set_config--config_ack) |
+| `ota_start` | texto | Painel pedindo atualização de firmware: URL na LAN, versão, SHA-256 e tamanho. Ver [Atualização de firmware](#atualização-de-firmware-ota_start--ota_progress--ota_result) |
 | `pong` | texto | Resposta ao `ping` |
 
 Mensagens de controle de tipo desconhecido são **logadas e ignoradas**, não derrubam
@@ -226,6 +233,44 @@ satélite → {"type":"config_ack","room_id":"sala_de_estar","request_id":"5f0c�
 - **Fonte da verdade é a NVS do satélite.** O servidor não persiste a sala: a mudança fica só
   no log (`satellite_room_changed`, com `from`/`to`). Ver o provisionamento em
   [`luna-firmware/README.md`](../luna-firmware/README.md).
+
+### Atualização de firmware (`ota_start` / `ota_progress` / `ota_result`)
+
+O canal pelo qual o painel atualiza o firmware de um satélite sem USB. Decisões em
+[ADR 012](adr/012-ota-de-firmware.md).
+
+```
+servidor → {"type":"ota_start","room_id":"sala","url":"http://192.168.0.10:8080/ota/9f3c…e1.bin","version":"0.6.0","sha256":"5a1c…","size":1533952,"ts":1720000000000}
+satélite → {"type":"ota_progress","room_id":"sala","percent":0,"ts":95000}
+satélite → {"type":"ota_progress","room_id":"sala","percent":45,"ts":99000}
+satélite → {"type":"ota_result","room_id":"sala","ok":true,"ts":112000}
+           … reinício; conexão nova; auth; device_info com fw_version 0.6.0
+```
+
+- **A URL é do próprio servidor, na LAN.** O servidor baixou o `.bin` da release no
+  GitHub e conferiu o SHA-256 antes de mandar o `ota_start`; o satélite nunca fala com a
+  internet. A URL é de uso único (um segundo GET dá 404), vale 10 min e só responde ao
+  IP do satélite. O host é o endereço local do socket WebSocket desse satélite.
+- **O satélite responde na hora.** Aceitou: `ota_progress { percent: 0 }`. Recusou:
+  `ota_result { ok: false, error }` — `ocupado` (fora de `IDLE_LISTENING`, mesma regra
+  do `set_config`), `atualização já em andamento`, `url inválida`, `sha256 inválido`,
+  `imagem maior que a partição OTA`, `sem Wi-Fi`. Desktop e bancada respondem
+  `não suportado`.
+- **Progresso:** `ota_progress` a cada 5 pontos ou a cada 5 s mesmo parado. Vai até 99;
+  100 só depois de conferir. O servidor desiste com 60 s sem progresso.
+- **Conferência antes de trocar o boot:** o satélite calcula o SHA-256 enquanto grava e
+  compara tamanho e hash com o `ota_start`; diferente, `ota_result { ok: false, error:
+  "sha256 diferente do manifest" }` e ele segue na versão atual.
+- **`ota_result { ok: true }` sai antes do reinício** (~1 s depois). Com o WebSocket
+  caído quando a gravação termina, o satélite espera até 10 s reconectar para mandar e
+  reinicia de qualquer jeito. A queda do WebSocket no meio **não** cancela a OTA: o
+  download é independente dele.
+- **A confirmação é o `device_info`** da conexão seguinte: versão (e build) do alvo =
+  atualizado. Outra versão = a imagem nova não autenticou em 5 min (ou caiu em boot
+  loop) e o bootloader voltou para a anterior — o painel mostra "revertido".
+- **Compatibilidade:** firmware anterior ao tipo ignora `ota_start` (cai no `strcmp` sem
+  ramo) e o servidor dá a OTA como falha em 15 s, explicando. Firmware novo contra
+  servidor antigo nunca recebe `ota_start`.
 
 ***
 

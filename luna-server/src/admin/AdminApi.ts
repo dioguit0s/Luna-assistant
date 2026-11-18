@@ -36,6 +36,8 @@ import { geocodeCity } from '../weather/geocode.js';
 import { OpenMeteoClient } from '../weather/OpenMeteoClient.js';
 import { describeWeatherCode } from '../weather/wmo.js';
 import { adminTokenMatches, isPrivateAddress } from './auth.js';
+import type { FirmwareRelease, ReleaseList } from '../ota/firmwareReleases.js';
+import { OtaRequestError, type OtaJobView } from '../ota/OtaManager.js';
 
 export interface AdminApiDeps {
   /** Config de boot: token admin e os campos de bootstrap que o painel só mostra. */
@@ -65,6 +67,15 @@ export interface AdminApiDeps {
    * `WsServer.setSatelliteConfig`. Rejeita com `SatelliteConfigError`.
    */
   setSatelliteConfig: (deviceId: string, config: SatelliteConfigPatch) => Promise<SatelliteConfigAck>;
+  /** OTA de firmware (ADR 012): releases no GitHub e o acompanhamento por satélite. */
+  ota: {
+    releases: { readonly repo: string; list(force?: boolean): Promise<ReleaseList> };
+    manager: {
+      get(deviceId: string): OtaJobView | null;
+      /** Rejeita com `OtaRequestError` (status HTTP pronto). */
+      start(deviceId: string, version: unknown): Promise<OtaJobView>;
+    };
+  };
   /** Shutdown gracioso; o `Restart=always` da unit traz o processo de volta. */
   onRestart: () => void;
   fetchImpl?: typeof fetch;
@@ -212,6 +223,13 @@ export class AdminApi {
         break;
       case 'POST satellites/:id/:action':
         if (action === 'disconnect') return { body: this.disconnectSatellite(id!) };
+        if (action === 'ota') return { status: 202, body: await this.startOta(id!, await readJson(req)) };
+        break;
+      case 'GET satellites/:id/:action':
+        if (action === 'ota') return { body: { device_id: id, ota: this.deps.ota.manager.get(id!) } };
+        break;
+      case 'GET firmware/:id':
+        if (id === 'releases') return { body: await this.firmwareReleases(query.get('refresh') === '1') };
         break;
       case 'GET backup':
         return { body: this.backup() };
@@ -362,7 +380,50 @@ export class AdminApi {
           }
         : null,
       remote_address: s.remoteAddress,
+      // Última OTA deste satélite desde o boot do servidor (ou `null`).
+      ota: this.deps.ota.manager.get(s.deviceId),
     }));
+  }
+
+  // ─── Firmware (OTA, ADR 012) ───────────────────────────────────────────
+
+  /**
+   * Releases `fw-v*` publicadas no GitHub, da mais nova para a mais velha.
+   * Cache curto no servidor; com o GitHub fora, a última lista boa vem com
+   * `stale: true` e o motivo em `error` — sem lista nenhuma, 502.
+   */
+  private async firmwareReleases(force: boolean): Promise<unknown> {
+    const list = await this.deps.ota.releases.list(force);
+    if (list.releases.length === 0 && list.error) {
+      throw new HttpError(502, `GitHub inacessível: ${list.error}`);
+    }
+    return {
+      repo: this.deps.ota.releases.repo,
+      fetched_at: list.fetchedAt,
+      stale: list.stale,
+      error: list.error,
+      latest: list.releases.find((r) => !r.prerelease)?.version ?? list.releases[0]?.version ?? null,
+      releases: list.releases.map(firmwareReleaseWire),
+    };
+  }
+
+  /**
+   * `{ version }`: abre a OTA e responde `202` com o job em `downloading`. O
+   * resto (download e conferência do SHA-256, envio, reinício) acompanha-se
+   * por `GET satellites/:id/ota` ou pela lista de satélites.
+   */
+  private async startOta(deviceId: string, body: unknown): Promise<unknown> {
+    const version = field(body, 'version');
+    if (version === undefined) throw new HttpError(422, 'envie "version"', 'version');
+    try {
+      const ota = await this.deps.ota.manager.start(deviceId, version);
+      return { device_id: deviceId, ota };
+    } catch (err) {
+      if (err instanceof OtaRequestError) {
+        throw new HttpError(err.status, err.message, err.status === 422 ? 'version' : undefined);
+      }
+      throw err;
+    }
   }
 
   /** `{ name }` e/ou `{ blocked }`: renomear e bloquear (v2) pela mesma rota. */
@@ -1254,6 +1315,25 @@ function withoutUserinfo(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** Uma release de firmware como o painel a vê. */
+function firmwareReleaseWire(r: FirmwareRelease): unknown {
+  return {
+    version: r.version,
+    tag: r.tag,
+    published_at: r.publishedAt,
+    prerelease: r.prerelease,
+    url: r.htmlUrl,
+    changelog: r.manifest.changelog,
+    manifest: {
+      version: r.manifest.version,
+      build: r.manifest.build,
+      size: r.manifest.size,
+      sha256: r.manifest.sha256,
+      date: r.manifest.date,
+    },
+  };
 }
 
 function releaseWire(): { sha: string; deployed_at: string } | null {

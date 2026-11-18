@@ -92,8 +92,8 @@ Só com o satélite ocioso: no meio de uma conversa ele recusa com "ocupado".
 
 > **Binário genérico para publicar:** compile sem `include/secrets.h` (o build avisa com
 > `#warning`) ou com todos os campos vazios. Antes de publicar, confira que nenhuma
-> credencial ficou nele: `strings .pio/build/*/firmware.bin | grep -i <sua-rede>` não pode
-> achar nada.
+> credencial ficou nele: `python tools/check_release_binary.py .pio/build/*/firmware.bin`.
+> O jeito normal de publicar é a tag `fw-v*` (ver [Lançar uma versão](#lançar-uma-versão-ota)).
 
 ## Build / flash / monitor
 
@@ -105,11 +105,45 @@ pio device monitor      # log serial (115200)
 
 ### Versão do firmware
 
-`custom_fw_version` no `platformio.ini` é a versão (semver) — **suba a cada release**. O
-build (SHA curto do último commit que tocou `luna-firmware/`, `.dirty` com mudança não
-commitada) é anexado sozinho por
-`tools/fw_version.py`. O boot loga `Firmware: 0.4.0+abc1234` e o satélite anuncia os dois
-no `device_info`, que é o que aparece na tela de Satélites do painel.
+`custom_fw_version` no `platformio.ini` é a versão (semver) dos builds locais — suba junto
+com a release. O build (SHA curto do último commit que tocou `luna-firmware/`, `.dirty` com
+mudança não commitada) é anexado sozinho por `tools/fw_version.py`. O boot loga
+`Firmware: 0.6.0+abc1234` e o satélite anuncia os dois no `device_info`, que é o que aparece
+na tela de Satélites do painel. No build de release, os dois vêm da tag
+(`LUNA_FW_VERSION`, `LUNA_FW_BUILD`).
+
+## Lançar uma versão (OTA)
+
+Decisões em [ADR 012](../docs/adr/012-ota-de-firmware.md). Resumo:
+
+```bash
+git tag -a fw-v0.6.0 -m "OTA pelo painel; LED de atualização"
+git push origin fw-v0.6.0
+```
+
+A tag dispara `.github/workflows/firmware-release.yml`: compila **sem `secrets.h`** e com
+`-DLUNA_RELEASE_BUILD=1` (que falha o build se houver qualquer credencial compilada), roda
+o guard de vazamento e publica a GitHub Release com `firmware.bin` + `manifest.json`
+(`version`, `build`, `size`, `sha256`, data e changelog). A mensagem da tag anotada vira o
+changelog; sem mensagem, entram os commits de `luna-firmware/` desde a tag anterior.
+Tag com sufixo (`fw-v0.7.0-rc.1`) sai como pré-release.
+
+Depois, no painel: **Satélites → FIRMWARE**, escolha a versão e `[ ATUALIZAR ]`. O
+satélite precisa estar online e em repouso. O LED pisca rápido (azul) enquanto grava;
+**não desligue**. Ele reinicia sozinho e reaparece com a versão nova, mantendo sala, Wi-Fi,
+segredo e ajustes (tudo na NVS).
+
+- **Primeira vez é por USB:** firmware anterior ao 0.6.0 não entende `ota_start`. Grave
+  uma vez com `pio run -t upload`; dali em diante, pelo painel.
+- **Imagem ruim volta sozinha:** a imagem nova só vale depois de autenticar no servidor.
+  Sem autenticar em 5 min (`OTA_VALIDATE_TIMEOUT_MS`), ou se travar em boot loop, o
+  satélite volta para a anterior e o painel mostra "revertido". O log serial mostra
+  `[ota] imagem nova … pendente de verificação` e depois `validada` ou `revertida`.
+- **Guard de vazamento:** configure no repositório o secret `FW_FORBIDDEN_STRINGS` com o
+  SSID, a senha, o IP do servidor e o segredo reais, um por linha — o CI procura cada um no
+  `.bin` e recusa publicar se achar. Para conferir um binário local antes de mandar a
+  alguém: `python tools/check_release_binary.py .pio/build/esp32-s3-devkitc-1/firmware.bin`
+  (confere também os valores do seu `include/secrets.h`).
 
 ## Validação faseada
 

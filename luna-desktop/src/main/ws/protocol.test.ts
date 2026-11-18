@@ -8,6 +8,7 @@ import {
   serializeControlMessage,
   createEnvelope,
   unsupportedConfigAck,
+  unsupportedOtaResult,
 } from './protocol.js';
 
 describe('buildAudioMessage / parseIncomingMessage', () => {
@@ -87,5 +88,15 @@ describe('unsupportedConfigAck', () => {
     const ack = unsupportedConfigAck(createEnvelope('set_config', 'sala', { config: [] as never }), 'sala');
     assert.deepEqual(ack.results, {});
     assert.equal(ack.request_id, '');
+  });
+});
+
+describe('unsupportedOtaResult', () => {
+  it('recusa a OTA com "não suportado" na sala deste cliente', () => {
+    const result = unsupportedOtaResult('desktop_diogo');
+    assert.equal(result.type, 'ota_result');
+    assert.equal(result.room_id, 'desktop_diogo');
+    assert.equal(result.ok, false);
+    assert.equal(result.error, 'não suportado');
   });
 });

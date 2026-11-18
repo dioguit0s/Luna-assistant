@@ -13,6 +13,7 @@ import {
   serializeControlMessage,
   buildAudioMessage,
   unsupportedConfigAck,
+  unsupportedOtaResult,
   type MessageEnvelope,
 } from './protocol.js';
 
@@ -177,6 +178,14 @@ export class LunaWsClient extends EventEmitter {
       // pelo painel é só para os satélites ESP32.
       if (this.authenticated && this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(serializeControlMessage(unsupportedConfigAck(envelope, this.opts.roomId)));
+      }
+      return;
+    }
+
+    if (envelope.type === 'ota_start') {
+      // O desktop se atualiza pelo instalador, não pela OTA dos satélites ESP32.
+      if (this.authenticated && this.ws?.readyState === WebSocket.OPEN) {
+        this.ws.send(serializeControlMessage(unsupportedOtaResult(this.opts.roomId)));
       }
       return;
     }

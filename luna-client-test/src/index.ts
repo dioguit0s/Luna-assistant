@@ -8,6 +8,7 @@ import {
   parseIncomingMessage,
   serializeControlMessage,
   unsupportedConfigAck,
+  unsupportedOtaResult,
 } from './protocol.js';
 import { readWavPcm16, writeWavPcm16, generateSilence, playPcm16 } from './wav.js';
 
@@ -272,6 +273,14 @@ function connect(): WebSocket {
         // esperar o timeout.
         console.log('set_config recebido — não suportado na bancada (sala vem do .env)');
         ws.send(serializeControlMessage(unsupportedConfigAck(envelope, cfg.roomId)));
+        return;
+      }
+
+      if (envelope.type === 'ota_start') {
+        // Bancada não tem firmware: recusa na hora, para o painel não esperar
+        // o timeout e achar que é um firmware antigo.
+        console.log(`ota_start recebido (${String(envelope.version)}) — não suportado na bancada`);
+        ws.send(serializeControlMessage(unsupportedOtaResult(cfg.roomId)));
         return;
       }
 

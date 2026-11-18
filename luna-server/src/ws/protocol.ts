@@ -8,6 +8,9 @@ export type MessageType =
   | 'device_info'
   | 'config_ack'
   | 'set_config'
+  | 'ota_start'
+  | 'ota_progress'
+  | 'ota_result'
   | 'speaking_start'
   | 'audio_response'
   | 'speaking_end'
@@ -67,6 +70,18 @@ export interface MessageEnvelope {
   results?: Record<string, ConfigFieldResult>;
   /** `config_ack`: se o satélite vai reconectar para a mudança valer (troca de sala). */
   reconnect?: boolean;
+  /** `ota_start`: URL de uso único, na LAN, de onde o satélite baixa o `.bin`. */
+  url?: string;
+  /** `ota_start`: versão (semver) da imagem que vai ser gravada. */
+  version?: string;
+  /** `ota_start`: SHA-256 (hex minúsculo) do `.bin` inteiro. */
+  sha256?: string;
+  /** `ota_start`: tamanho exato do `.bin` em bytes. */
+  size?: number;
+  /** `ota_progress`: 0 a 100. */
+  percent?: number;
+  /** `ota_result`: motivo da falha (`ocupado`, `sha256 diferente`, `não suportado`…). Também usa `ok`. */
+  error?: string;
 }
 
 /** Corpo do `config` de um `set_config`. Campo ausente = não mexer. */

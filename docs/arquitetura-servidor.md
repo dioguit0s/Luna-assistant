@@ -30,6 +30,9 @@ src/
 │   ├── Diagnostics.ts    #   ttfab → série, erros → error_log, buffer do log ao vivo
 │   ├── DiagnosticsStore.ts#  tabelas latency_samples e error_log, poda 30 d / 10 mil
 │   └── WakeClipStore.ts  #   `wake_clip` → WAV + JSON em WAKE_CLIP_DIR (treino da wake word)
+├── ota/                  # OTA de firmware dos satélites (ADR 012)
+│   ├── firmwareReleases.ts#  releases fw-v* no GitHub, manifest, download conferido por SHA-256
+│   └── OtaManager.ts     #   estado por satélite + imagem em /ota/<token>.bin (uso único, LAN)
 ├── time/clock.ts         # relógio único do processo
 ├── ws/                   # camada de transporte
 │   ├── WsServer.ts       #   servidor WS + HTTP /health, auth, fan-out por sala

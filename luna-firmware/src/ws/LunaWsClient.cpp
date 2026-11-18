@@ -27,6 +27,7 @@ static SimpleCb speakingStartCb = nullptr;
 static SimpleCb speakingEndCb = nullptr;
 static AudioResponseCb audioResponseCb = nullptr;
 static BoolCb configBusyCb = nullptr;
+static OtaStartCb otaStartCb = nullptr;
 
 // Troca de sala aceita: a sala vem da autenticação (WsServer.ts), então a
 // conexão atual precisa cair e reautenticar com o room_id novo. Adiado para o
@@ -154,6 +155,24 @@ static void handleSetConfig(JsonDocument &doc) {
   if (reconnect) reconnectAtMs = millis() + CONFIG_RECONNECT_DELAY_MS;
 }
 
+// ota_start: servidor pedindo atualização de firmware (ADR 012). Responde na
+// hora — ota_progress 0 se aceitou, ota_result com o motivo se recusou —, para o
+// painel não confundir recusa com firmware antigo (que não responde nada).
+static void handleOtaStart(JsonDocument &doc) {
+  const char *url = doc["url"] | "";
+  const char *version = doc["version"] | "";
+  const char *sha256 = doc["sha256"] | "";
+  const uint32_t size = doc["size"] | 0u;
+
+  const char *refusal = otaStartCb ? otaStartCb(url, version, sha256, size) : "não suportado";
+  if (refusal) {
+    Serial.printf("[ota] ota_start %s recusado: %s\n", version, refusal);
+    sendOtaResult(false, refusal);
+    return;
+  }
+  sendOtaProgress(0);
+}
+
 static void handleTextFrame(const uint8_t *payload, size_t length) {
   JsonDocument doc;
   if (deserializeJson(doc, payload, length) != DeserializationError::Ok) {
@@ -176,6 +195,8 @@ static void handleTextFrame(const uint8_t *payload, size_t length) {
     if (speakingEndCb) speakingEndCb();
   } else if (strcmp(type, "set_config") == 0) {
     if (authenticated) handleSetConfig(doc);
+  } else if (strcmp(type, "ota_start") == 0) {
+    if (authenticated) handleOtaStart(doc);
   } else if (strcmp(type, "pong") == 0) {
     // keep-alive ok
   }
@@ -339,5 +360,36 @@ void onSpeakingStart(SimpleCb cb) { speakingStartCb = cb; }
 void onSpeakingEnd(SimpleCb cb) { speakingEndCb = cb; }
 void onAudioResponse(AudioResponseCb cb) { audioResponseCb = cb; }
 void onConfigBusy(BoolCb cb) { configBusyCb = cb; }
+void onOtaStart(OtaStartCb cb) { otaStartCb = cb; }
+
+bool sendOtaProgress(int percent) {
+  if (!authenticated) return false;
+  JsonDocument doc;
+  doc["type"] = "ota_progress";
+  doc["room_id"] = roomId;
+  doc["percent"] = percent;
+  doc["ts"] = (uint32_t)millis();
+  String out;
+  serializeJson(doc, out);
+  return ws.sendTXT(out);
+}
+
+bool sendOtaResult(bool ok, const char *error) {
+  if (!authenticated) return false;
+  JsonDocument doc;
+  doc["type"] = "ota_result";
+  doc["room_id"] = roomId;
+  doc["ok"] = ok;
+  if (!ok && error && *error) doc["error"] = error;
+  doc["ts"] = (uint32_t)millis();
+  String out;
+  serializeJson(doc, out);
+  return ws.sendTXT(out);
+}
+
+void disconnectNow() {
+  authenticated = false;
+  ws.disconnect();
+}
 
 } // namespace LunaWsClient

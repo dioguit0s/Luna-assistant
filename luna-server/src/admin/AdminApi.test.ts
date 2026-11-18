@@ -18,6 +18,9 @@ import { adminTokenMatches, isPrivateAddress } from './auth.js';
 import WebSocket from 'ws';
 import { computeAuthToken } from '../ws/auth.js';
 import { createEnvelope, serializeControlMessage } from '../ws/protocol.js';
+import { createHash } from 'node:crypto';
+import { FirmwareReleases } from '../ota/firmwareReleases.js';
+import { OtaManager } from '../ota/OtaManager.js';
 
 const TOKEN = 'token-admin-de-teste';
 
@@ -74,7 +77,57 @@ interface Harness {
   saved: Array<{ id: number; labelChanged: boolean }>;
   fetchCalls: string[];
   restarts: number;
+  /** Releases que o "GitHub" falso do harness publica — os casos de OTA mexem aqui. */
+  firmware: FakeFirmwareRelease[];
   stop(): Promise<void>;
+}
+
+interface FakeFirmwareRelease {
+  version: string;
+  build: string;
+  bin: Buffer;
+  /** Força o manifest a anunciar outro SHA-256 (download corrompido). */
+  manifestSha256?: string;
+}
+
+const FW_REPO = 'teste/luna';
+
+/** `fetch` do `FirmwareReleases` contra um GitHub falso: API de releases, manifest e .bin. */
+function fakeGithub(releases: () => FakeFirmwareRelease[]): typeof fetch {
+  return (async (input: string | URL) => {
+    const url = String(input);
+    if (url === `https://api.github.com/repos/${FW_REPO}/releases?per_page=50`) {
+      return new Response(
+        JSON.stringify(
+          releases().map((r) => ({
+            tag_name: `fw-v${r.version}`,
+            draft: false,
+            prerelease: false,
+            published_at: '2026-11-17T12:00:00Z',
+            html_url: `https://github.com/${FW_REPO}/releases/tag/fw-v${r.version}`,
+            assets: [
+              { name: 'firmware.bin', browser_download_url: `https://dl.test/${r.version}/firmware.bin` },
+              { name: 'manifest.json', browser_download_url: `https://dl.test/${r.version}/manifest.json` },
+            ],
+          })),
+        ),
+      );
+    }
+    const m = /^https:\/\/dl\.test\/([^/]+)\/(firmware\.bin|manifest\.json)$/.exec(url);
+    const rel = m ? releases().find((r) => r.version === m[1]) : undefined;
+    if (!m || !rel) return new Response('nada', { status: 404 });
+    if (m[2] === 'firmware.bin') return new Response(rel.bin);
+    return new Response(
+      JSON.stringify({
+        version: rel.version,
+        build: rel.build,
+        size: rel.bin.length,
+        sha256: rel.manifestSha256 ?? createHash('sha256').update(rel.bin).digest('hex'),
+        date: '2026-11-17T12:00:00Z',
+        changelog: `mudanças da ${rel.version}`,
+      }),
+    );
+  }) as unknown as typeof fetch;
 }
 
 /** Servidor HTTP de verdade, porta efêmera, com a API admin ligada como em `index.ts`. */
@@ -114,13 +167,28 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
     saved: [],
     fetchCalls: [],
     restarts: 0,
+    firmware: [],
     async stop() {
+      otaManager.stop();
       await server.stop();
       reminderStore.close();
       await roomManager.destroy();
       ringBuffer.destroy();
     },
   };
+  // OTA como em `index.ts`, com o GitHub falso e prazos curtos para os casos
+  // de timeout não esperarem minutos.
+  const firmwareReleases = new FirmwareReleases({ repo: FW_REPO, ttlMs: 0, fetchImpl: fakeGithub(() => harness.firmware) });
+  const otaManager = new OtaManager({
+    releases: firmwareReleases,
+    link: {
+      connection: (deviceId) => server.otaConnection(deviceId),
+      sendOtaStart: (deviceId, payload) => server.sendOtaStart(deviceId, payload),
+    },
+    timeouts: { firstResponseMs: 400, progressStallMs: 1_000, rebootMs: 2_000 },
+  });
+  server.setOtaEvents(otaManager);
+  server.addHttpRoute(otaManager.serve);
   server.setAdminHandler(
     new AdminApi({
       config: cfg,
@@ -159,6 +227,7 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
       }) as unknown as typeof fetch,
       disconnectSatellite: (deviceId) => server.disconnectDevice(deviceId, 'desconectado pelo painel'),
       setSatelliteConfig: (deviceId, patch) => server.setSatelliteConfig(deviceId, patch, 300),
+      ota: { releases: firmwareReleases, manager: otaManager },
       onRestart: () => {
         harness.restarts += 1;
       },
@@ -903,5 +972,252 @@ describe('adminTokenMatches', () => {
     assert.equal(adminTokenMatches('abc', 'abc'), false);
     assert.equal(adminTokenMatches('abc', 'Bearer abcd'), false);
     assert.equal(adminTokenMatches('', 'Bearer '), false);
+  });
+});
+
+describe('OTA de firmware (rotas + satélite falso)', () => {
+  let h: Harness;
+  const open: WebSocket[] = [];
+  const BIN_05 = Buffer.alloc(48 * 1024, 0xa5);
+  const BIN_04 = Buffer.alloc(40 * 1024, 0x5a);
+
+  before(async () => {
+    createLogger(config);
+    h = await startHarness(config);
+    h.firmware.push(
+      { version: '0.4.0', build: 'aaaaaaa', bin: BIN_04 },
+      { version: '0.5.0', build: 'bbbbbbb', bin: BIN_05 },
+    );
+  });
+
+  after(async () => {
+    open.forEach((ws) => ws.terminate());
+    await h.stop();
+  });
+
+  /** Satélite autenticado que já anunciou a versão (como o firmware faz após `auth_ok`). */
+  async function satellite(deviceId: string, fwVersion: string, fwBuild: string): Promise<WebSocket> {
+    const { ws } = await authenticate(h, deviceId, 'sala_de_estar');
+    open.push(ws);
+    ws.send(serializeControlMessage({ ...createEnvelope('device_info', 'sala_de_estar'), fw_version: fwVersion, fw_build: fwBuild } as never));
+    for (let i = 0; i < 50; i++) {
+      const sats = (await call(h, 'GET', '/admin/v1/satellites')).body.satellites as any[];
+      if (sats.find((s) => s.device_id === deviceId && s.online)?.device_info?.fw_version === fwVersion) return ws;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    throw new Error('device_info não chegou');
+  }
+
+  function nextMessage(ws: WebSocket, type: string, ms = 2_000): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`sem ${type} em ${ms}ms`)), ms);
+      const onMessage = (data: WebSocket.RawData): void => {
+        const msg = JSON.parse(data.toString());
+        if (msg.type !== type) return;
+        clearTimeout(timer);
+        ws.off('message', onMessage);
+        resolve(msg);
+      };
+      ws.on('message', onMessage);
+    });
+  }
+
+  async function waitState(deviceId: string, state: string, ms = 4_000): Promise<any> {
+    const deadline = Date.now() + ms;
+    let last: any = null;
+    while (Date.now() < deadline) {
+      last = (await call(h, 'GET', `/admin/v1/satellites/${deviceId}/ota`)).body.ota;
+      if (last?.state === state) return last;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error(`OTA de ${deviceId} não chegou em ${state} (último: ${JSON.stringify(last)})`);
+  }
+
+  function send(ws: WebSocket, type: string, extra: Record<string, unknown>): void {
+    ws.send(serializeControlMessage({ ...createEnvelope(type as never, 'sala_de_estar'), ...extra } as never));
+  }
+
+  it('lista as releases do GitHub da mais nova para a mais velha, com o manifest', async () => {
+    const res = await call(h, 'GET', '/admin/v1/firmware/releases');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.repo, FW_REPO);
+    assert.equal(res.body.latest, '0.5.0');
+    assert.deepEqual(res.body.releases.map((r: any) => r.version), ['0.5.0', '0.4.0']);
+    const r = res.body.releases[0];
+    assert.equal(r.tag, 'fw-v0.5.0');
+    assert.equal(r.changelog, 'mudanças da 0.5.0');
+    assert.equal(r.manifest.size, BIN_05.length);
+    assert.equal(r.manifest.sha256, createHash('sha256').update(BIN_05).digest('hex'));
+    assert.equal(r.manifest.build, 'bbbbbbb');
+  });
+
+  it('atualiza: ota_start, imagem de uso único na LAN, progresso, reinício e device_info na versão nova', async () => {
+    const id = 'esp32-ota-ok';
+    const ws = await satellite(id, '0.4.0', 'aaaaaaa');
+    const started = nextMessage(ws, 'ota_start');
+
+    const res = await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' });
+    assert.equal(res.status, 202);
+    assert.equal(res.body.ota.state, 'downloading');
+    assert.equal(res.body.ota.from_version, '0.4.0');
+    assert.equal(res.body.ota.target_version, '0.5.0');
+
+    const start = await started;
+    assert.equal(start.room_id, 'sala_de_estar');
+    assert.equal(start.version, '0.5.0');
+    assert.equal(start.size, BIN_05.length);
+    assert.equal(start.sha256, createHash('sha256').update(BIN_05).digest('hex'));
+    assert.match(start.url, /^http:\/\/127\.0\.0\.1:\d+\/ota\/[0-9a-f]{32}\.bin$/);
+    assert.equal((await waitState(id, 'sending')).percent, 0);
+
+    // O satélite baixa do servidor, não do GitHub; a URL só vale uma vez.
+    const image = await fetch(start.url);
+    assert.equal(image.status, 200);
+    assert.deepEqual(Buffer.from(await image.arrayBuffer()), BIN_05);
+    assert.equal((await fetch(start.url)).status, 404, 'uso único');
+
+    send(ws, 'ota_progress', { percent: 0 });
+    send(ws, 'ota_progress', { percent: 57 });
+    for (let i = 0; i < 50 && (await call(h, 'GET', `/admin/v1/satellites/${id}/ota`)).body.ota.percent !== 57; i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.equal((await call(h, 'GET', `/admin/v1/satellites/${id}/ota`)).body.ota.percent, 57);
+
+    send(ws, 'ota_result', { ok: true });
+    assert.equal((await waitState(id, 'rebooting')).percent, 100);
+    // Uma OTA por vez: outro pedido no meio é recusado.
+    assert.equal((await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.4.0' })).status, 409);
+
+    // Reinício: conexão nova, `device_info` na versão do alvo.
+    ws.terminate();
+    await new Promise((r) => setTimeout(r, 20));
+    const back = await satellite(id, '0.5.0', 'bbbbbbb');
+    const done = await waitState(id, 'ok');
+    assert.equal(done.error, null);
+    assert.equal(typeof done.finished_at, 'number');
+    const listed = (await call(h, 'GET', '/admin/v1/satellites')).body.satellites.find((s: any) => s.device_id === id);
+    assert.equal(listed.ota.state, 'ok');
+    back.terminate();
+  });
+
+  it('imagem que não se valida: o satélite volta na versão antiga e o estado é "revertido"', async () => {
+    const id = 'esp32-ota-rollback';
+    const ws = await satellite(id, '0.4.0', 'aaaaaaa');
+    const started = nextMessage(ws, 'ota_start');
+    assert.equal((await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' })).status, 202);
+    await started;
+    send(ws, 'ota_result', { ok: true });
+    await waitState(id, 'rebooting');
+
+    // O `device_info` repetido na MESMA conexão (troca de IP) não decide nada.
+    send(ws, 'device_info', { fw_version: '0.4.0', fw_build: 'aaaaaaa' });
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal((await call(h, 'GET', `/admin/v1/satellites/${id}/ota`)).body.ota.state, 'rebooting');
+
+    ws.terminate();
+    await new Promise((r) => setTimeout(r, 20));
+    await satellite(id, '0.4.0', 'aaaaaaa');
+    const done = await waitState(id, 'rolled_back');
+    assert.match(done.error, /0\.4\.0/);
+    assert.match(done.error, /revertida/);
+  });
+
+  it('download corrompido (sha256 diferente do manifest) é recusado antes de chegar ao satélite', async () => {
+    h.firmware.push({ version: '0.6.0', build: 'ccccccc', bin: Buffer.alloc(1024, 1), manifestSha256: 'f'.repeat(64) });
+    try {
+      const id = 'esp32-ota-corrompido';
+      const ws = await satellite(id, '0.5.0', 'bbbbbbb');
+      let gotStart = false;
+      ws.on('message', (d) => {
+        if (JSON.parse(d.toString()).type === 'ota_start') gotStart = true;
+      });
+      assert.equal((await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.6.0' })).status, 202);
+      const done = await waitState(id, 'failed');
+      assert.match(done.error, /sha256 diferente/);
+      await new Promise((r) => setTimeout(r, 50));
+      assert.equal(gotStart, false);
+    } finally {
+      h.firmware.pop();
+    }
+  });
+
+  it('satélite ocupado com uma conversa recusa: falha com motivo claro', async () => {
+    const id = 'esp32-ota-ocupado';
+    const ws = await satellite(id, '0.4.0', 'aaaaaaa');
+    const started = nextMessage(ws, 'ota_start');
+    await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' });
+    await started;
+    send(ws, 'ota_result', { ok: false, error: 'ocupado' });
+    assert.match((await waitState(id, 'failed')).error, /ocupado com uma conversa/);
+    // Terminada a anterior, pode tentar de novo.
+    assert.equal((await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' })).status, 202);
+  });
+
+  it('firmware anterior à OTA, que ignora ota_start: falha no timeout explicando', async () => {
+    const id = 'esp32-ota-antigo';
+    await satellite(id, '0.3.0', 'ddddddd');
+    await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' });
+    assert.match((await waitState(id, 'failed', 3_000)).error, /firmware anterior à OTA/);
+  });
+
+  it('desktop/bancada respondem "não suportado"', async () => {
+    const id = 'desktop-ota';
+    const ws = await satellite(id, '0.1.0', 'eeeeeee');
+    const started = nextMessage(ws, 'ota_start');
+    await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' });
+    await started;
+    send(ws, 'ota_result', { ok: false, error: 'não suportado' });
+    assert.match((await waitState(id, 'failed')).error, /não suporta atualização/);
+  });
+
+  it('queda do WebSocket no meio do envio não encerra: sem progresso, falha no prazo', async () => {
+    const id = 'esp32-ota-cai';
+    const ws = await satellite(id, '0.4.0', 'aaaaaaa');
+    const started = nextMessage(ws, 'ota_start');
+    await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' });
+    await started;
+    send(ws, 'ota_progress', { percent: 10 });
+    await waitState(id, 'sending');
+    ws.terminate();
+    // Volta na versão antiga: o download pode estar andando na task do satélite.
+    await new Promise((r) => setTimeout(r, 20));
+    await satellite(id, '0.4.0', 'aaaaaaa');
+    assert.equal((await call(h, 'GET', `/admin/v1/satellites/${id}/ota`)).body.ota.state, 'sending');
+    assert.match((await waitState(id, 'failed', 3_000)).error, /sem progresso/);
+  });
+
+  it('ota_result perdido na queda: o satélite volta na versão nova e conta como ok', async () => {
+    const id = 'esp32-ota-resultado-perdido';
+    const ws = await satellite(id, '0.4.0', 'aaaaaaa');
+    const started = nextMessage(ws, 'ota_start');
+    await call(h, 'POST', `/admin/v1/satellites/${id}/ota`, { version: '0.5.0' });
+    await started;
+    await waitState(id, 'sending');
+    ws.terminate();
+    await new Promise((r) => setTimeout(r, 20));
+    await satellite(id, '0.5.0', 'bbbbbbb');
+    await waitState(id, 'ok');
+  });
+
+  it('erros do pedido: offline 409, versão inexistente 404, versão malformada 422', async () => {
+    const off = await call(h, 'POST', '/admin/v1/satellites/ninguem/ota', { version: '0.5.0' });
+    assert.equal(off.status, 409);
+    assert.match(off.body.error, /offline/);
+
+    await satellite('esp32-ota-erros', '0.4.0', 'aaaaaaa');
+    const missing = await call(h, 'POST', '/admin/v1/satellites/esp32-ota-erros/ota', { version: '9.9.9' });
+    assert.equal(missing.status, 404);
+    for (const version of ['fw-v0.5.0', 'latest', '', 5]) {
+      const bad = await call(h, 'POST', '/admin/v1/satellites/esp32-ota-erros/ota', { version });
+      assert.equal(bad.status, 422);
+      assert.equal(bad.body.field, 'version');
+    }
+    assert.equal((await call(h, 'POST', '/admin/v1/satellites/esp32-ota-erros/ota', {})).status, 422);
+    assert.equal((await call(h, 'GET', '/admin/v1/satellites/esp32-ota-erros/ota')).body.ota, null);
+  });
+
+  it('a imagem fica fora da API admin, mas URL inventada é 404', async () => {
+    assert.equal((await fetch(`${h.baseUrl}/ota/${'0'.repeat(32)}.bin`)).status, 404);
+    assert.equal((await fetch(`${h.baseUrl}/ota/${'0'.repeat(32)}.bin?x=1`, { method: 'POST' })).status, 404);
   });
 });

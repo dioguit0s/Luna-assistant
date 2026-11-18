@@ -62,7 +62,7 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 | Rotacionar o segredo (`ConfigStore::setAuthSecret` existe, nada o aciona; o canal `set_config` já serve) | Proto + FW | depois |
 | Provisionar satélite novo por USB (Wi-Fi, servidor e segredo na NVS) | Tela + FW | depois |
 | Volume, brilho do LED, sensibilidade da wake word por satélite | Proto + FW | depois |
-| Atualização de firmware pela rede (OTA) | FW + API | depois |
+| Atualização de firmware pela rede (OTA): atual × disponível no GitHub, atualizar ou voltar de versão com S/N, progresso e "revertido" ([ADR 012](adr/012-ota-de-firmware.md)) | Proto + FW + API | ✔ |
 
 ### 3. Salas e dispositivos
 
@@ -159,6 +159,9 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `PUT satellites/:device_id` | `{ "name": "Quarto" }` — `null` ou vazio remove; `{ "blocked": true }` recusa o satélite no handshake e derruba a conexão aberta (v2) |
 | `POST satellites/:device_id/disconnect` | Fecha as conexões do satélite; ele reconecta sozinho — v2 |
 | `PUT satellites/:device_id/config` | `{ "room_id": "quarto" }` — manda `set_config` ao satélite conectado e só responde depois do `config_ack` (até 3 s): `200 { device_id, room_id, previous_room_id, reconnect }`. `409` offline, ocupado com um turno, conexão caiu no meio ou cliente que não suporta (desktop, bancada); `504` sem resposta (firmware anterior ao tipo); `422` sala fora do formato ou recusada. Nada é persistido no servidor — a NVS do satélite é a fonte da verdade; a troca fica no log (`satellite_room_changed`) |
+| `GET firmware/releases` | Releases `fw-v*` do repositório (`FIRMWARE_RELEASES_REPO`), da mais nova para a mais velha: `version`, `tag`, `published_at`, `prerelease`, `url`, `changelog` e `manifest` (`build`, `size`, `sha256`, `date`), mais `latest` (a mais nova estável). Cache de 5 min (`?refresh=1` força); GitHub fora devolve a última lista com `stale: true` e `error`, ou `502` sem lista nenhuma |
+| `POST satellites/:device_id/ota` | `{ "version": "0.6.0" }` — abre a OTA e responde `202 { device_id, ota }` com o job em `downloading`; o servidor baixa o `.bin`, confere o SHA-256, manda `ota_start` e acompanha. `409` offline ou OTA em andamento, `404` versão não publicada, `422` versão fora do semver. Recusa do satélite (ocupado, não suportado) aparece no job como `failed` |
+| `GET satellites/:device_id/ota` | `{ device_id, ota }` — última OTA desde o boot do servidor, ou `null`: `state` (`downloading`, `sending`, `rebooting`, `ok`, `failed`, `rolled_back`), `target_version`, `from_version`, `percent`, `error`, `started_at`, `updated_at`, `finished_at`. A mesma coisa vem em `ota` de cada item de `GET satellites`, que o painel acompanha a cada 1,5 s durante a OTA |
 | `GET backup` | Configuração de runtime (sem nenhum campo de segredo) e lembretes vivos, `format: "luna-backup"`, `version: 1` — v2 |
 | `POST restore` | `{ backup, reminders: "keep" \| "replace" }`, até 1 MB. Valida todos os grupos antes de gravar; cada um entra como patch (segredo ausente mantém o gravado). `replace` cancela os lembretes vivos e recria os do arquivo, pulando único que já passou — v2 |
 | `GET rooms` | Salas (de satélite, áreas do HA, mapeadas), área efetiva e o que o `list_devices` veria nelas |

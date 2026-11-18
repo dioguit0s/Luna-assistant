@@ -5,6 +5,14 @@
 // secrets.h só provisiona a NVS (ver ConfigStore.h). Sem ele, ou com campos
 // vazios, sai um binário genérico: funciona num satélite já provisionado e é
 // o único tipo de binário que pode ser publicado (repositório público, OTA).
+//
+// LUNA_RELEASE_BUILD (definido pelo workflow firmware-release.yml) torna isso
+// obrigatório: o build de release falha se houver secrets.h ou qualquer valor
+// compilado não vazio. É a primeira barreira; a segunda é o guard do CI que
+// procura credenciais no .bin (tools/check_release_binary.py).
+#if defined(LUNA_RELEASE_BUILD) && __has_include("secrets.h")
+#error "build de release com include/secrets.h presente — o binário publicado não pode carregar credencial"
+#endif
 #if __has_include("secrets.h")
 #include "secrets.h"
 #else
@@ -35,6 +43,17 @@
 #define LUNA_FORCE_PROVISION 0
 #endif
 
+#ifdef LUNA_RELEASE_BUILD
+// sizeof("") == 1: cada literal precisa ser a string vazia.
+static_assert(sizeof(WIFI_SSID) == 1, "release: WIFI_SSID precisa ser vazio");
+static_assert(sizeof(WIFI_PASS) == 1, "release: WIFI_PASS precisa ser vazio");
+static_assert(sizeof(LUNA_HOST) == 1, "release: LUNA_HOST precisa ser vazio");
+static_assert(sizeof(ROOM_ID) == 1, "release: ROOM_ID precisa ser vazio");
+static_assert(sizeof(WS_AUTH_SECRET) == 1, "release: WS_AUTH_SECRET precisa ser vazio");
+static_assert(LUNA_PORT == 0, "release: LUNA_PORT precisa ser 0");
+static_assert(LUNA_FORCE_PROVISION == 0, "release: LUNA_FORCE_PROVISION precisa ser 0");
+#endif
+
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "freertos/stream_buffer.h"
@@ -42,6 +61,7 @@
 #include "audio/AudioCapture.h"
 #include "audio/AudioPlayback.h"
 #include "fsm/StateMachine.h"
+#include "ota/OtaUpdater.h"
 #include "ui/StatusLed.h"
 #include "wake/WakeWord.h"
 #include "ws/LunaWsClient.h"
@@ -121,6 +141,9 @@ static const char *resetReasonStr(esp_reset_reason_t r) {
 // ============================================================================
 static void onAuthOk() {
   StateMachine::reset(); // recupera se a conexão caiu durante RESPONDING
+  // Primeiro boot depois de uma OTA: autenticar é a prova de que a imagem nova
+  // funciona (Wi-Fi, NVS, segredo, protocolo). Só aqui o rollback é cancelado.
+  OtaUpdater::onAuthenticated();
   Serial.println("[luna] autenticado — aguardando wake word");
 }
 
@@ -137,6 +160,58 @@ static bool configBusy() {
   case StateMachine::State::RESPONDING:
   default:
     return true;
+  }
+}
+
+// ota_start: mesma regra do set_config — só com o satélite em repouso. No meio
+// de um turno a OTA derrubaria a resposta em curso, e reiniciar no fim dela
+// cortaria a próxima. Ver docs/protocolo-websocket.md.
+static const char *onOtaStart(const char *url, const char *version, const char *sha256,
+                              uint32_t size) {
+  if (configBusy()) return "ocupado";
+  return OtaUpdater::start(url, version, sha256, size);
+}
+
+// Progresso e desfecho da OTA, do loop() (único dono do WebSocket). A task de
+// download só escreve números; quem fala com o servidor e reinicia é daqui.
+static void pumpOta() {
+  static int lastSentPct = -1;
+  static uint32_t lastSentMs = 0;
+  static uint32_t rebootAtMs = 0;
+  const uint32_t now = millis();
+
+  if (rebootAtMs != 0 && (int32_t)(now - rebootAtMs) >= 0) {
+    Serial.println("[ota] reiniciando na imagem nova");
+    LunaWsClient::disconnectNow();
+    delay(100);
+    ESP.restart();
+  }
+
+  if (OtaUpdater::finished()) {
+    // Com o WebSocket caído, espera reconectar para contar o desfecho — mas não
+    // para sempre: gravada, reinicia de qualquer jeito (o device_info da versão
+    // nova é a confirmação que vale para o servidor).
+    const bool authed = LunaWsClient::isAuthenticated();
+    if (!authed && now - OtaUpdater::finishedAtMs() < OTA_RESULT_MAX_WAIT_MS) return;
+    bool ok = false;
+    String error;
+    OtaUpdater::takeResult(ok, error);
+    if (authed) LunaWsClient::sendOtaResult(ok, error.c_str());
+    if (ok) rebootAtMs = now + OTA_REBOOT_DELAY_MS;
+    lastSentPct = -1;
+    return;
+  }
+
+  if (!OtaUpdater::active() || rebootAtMs != 0) {
+    lastSentPct = -1;
+    return;
+  }
+  const int pct = OtaUpdater::progress();
+  if (pct - lastSentPct >= OTA_PROGRESS_STEP_PCT || now - lastSentMs >= OTA_PROGRESS_HEARTBEAT_MS) {
+    if (LunaWsClient::sendOtaProgress(pct)) {
+      lastSentPct = pct;
+      lastSentMs = now;
+    }
   }
 }
 
@@ -411,6 +486,14 @@ static void captureTask(void *) {
     chunk.count = AudioCapture::readChunk(chunk.samples); // bloqueia ~20ms
     if (chunk.count == 0) continue;
 
+    // OTA em andamento: o I2S continua sendo lido (senão o DMA transborda),
+    // mas nada vai para o detector nem para a rede — wake word desligada.
+    if (OtaUpdater::active()) {
+      wasStreaming = false;
+      prerollCount = 0;
+      continue;
+    }
+
     // Alimenta a janela de escuta pós-wake com a energia do chunk (fecha por
     // silêncio se o servidor não responder).
     StateMachine::noteCapturePeak(AudioCapture::lastPeak());
@@ -572,7 +655,11 @@ static void playbackTask(void *) {
 static void updateStatusLed() {
   StatusLed::Ui ui;
 
-  if (!WifiManager::isConnected()) {
+  // OTA acima de tudo: mesmo com o Wi-Fi caindo no meio, o aviso que importa é
+  // "atualizando, não desligue".
+  if (OtaUpdater::active()) {
+    ui = StatusLed::Ui::UPDATING;
+  } else if (!WifiManager::isConnected()) {
     ui = StatusLed::Ui::NO_WIFI;
   } else if (!LunaWsClient::isAuthenticated()) {
     ui = StatusLed::Ui::NO_SERVER;
@@ -630,6 +717,7 @@ void setup() {
   Serial.printf("Boot anterior: %s\n", resetReasonStr(esp_reset_reason()));
 
   StatusLed::begin();
+  OtaUpdater::beginBoot();
   ConfigStore::begin({WIFI_SSID, WIFI_PASS, LUNA_HOST, (uint16_t)LUNA_PORT, ROOM_ID,
                       WS_AUTH_SECRET, LUNA_FORCE_PROVISION != 0});
 
@@ -701,6 +789,7 @@ void setup() {
   LunaWsClient::onAudioResponse(onAudioResponse);
 
   LunaWsClient::onConfigBusy(configBusy);
+  LunaWsClient::onOtaStart(onOtaStart);
 
   // As Strings do ConfigStore vivem até o fim do programa: o WifiManager guarda
   // só os ponteiros.
@@ -744,6 +833,10 @@ void loop() {
   }
 
   if (wsClientRunning) LunaWsClient::loop();
+
+  // Prazo de validação de uma imagem nova (rollback) e o desfecho da OTA.
+  OtaUpdater::loop();
+  pumpOta();
 
   // Só entrega o "fim de resposta" à FSM quando o buffer de playback (PSRAM)
   // esvaziou de verdade — ver o porquê em onSpeakingEnd() acima. A partir daí
@@ -810,8 +903,9 @@ void loop() {
 
 #if WAKE_CLIP_UPLOAD
   // Depois da fila de captura: com o turno encerrado ela está vazia, mas a
-  // ordem deixa explícito que áudio de turno tem prioridade.
-  pumpWakeClip();
+  // ordem deixa explícito que áudio de turno tem prioridade. Durante a OTA a
+  // banda é do download.
+  if (!OtaUpdater::active()) pumpWakeClip();
 #endif
 
   const uint32_t now = millis();

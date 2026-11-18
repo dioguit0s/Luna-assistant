@@ -1028,6 +1028,219 @@ function satelliteRoomControls(sel: any, knownRooms: string[]): HTMLElement {
   return box;
 }
 
+// ─── firmware (OTA, ADR 012) ───
+
+/** Compara semver; pré-release vem antes da final. Mesma regra do servidor. */
+function compareSemver(a: string, b: string): number {
+  const parse = (v: string): { nums: number[]; pre: string | null } => {
+    const [core, ...pre] = v.split('-');
+    return { nums: (core ?? '').split('.').map((n) => Number(n) || 0), pre: pre.length ? pre.join('-') : null };
+  };
+  const pa = parse(a);
+  const pb = parse(b);
+  for (let i = 0; i < 3; i++) {
+    const d = (pa.nums[i] ?? 0) - (pb.nums[i] ?? 0);
+    if (d !== 0) return d;
+  }
+  if (pa.pre === pb.pre) return 0;
+  if (pa.pre === null) return 1;
+  if (pb.pre === null) return -1;
+  return pa.pre.localeCompare(pb.pre);
+}
+
+/**
+ * Satélite ESP32 (atualizável pela rede): o firmware manda `fw_build`; o
+ * desktop e a bancada mandam só a versão do app (ver protocolo, device_info).
+ */
+function isFirmwareSatellite(s: any): boolean {
+  return typeof s.device_info?.fw_build === 'string' && typeof s.device_info?.fw_version === 'string';
+}
+
+const OTA_ACTIVE = new Set(['downloading', 'sending', 'rebooting']);
+/** Repaint mais rápido que o poll da tela enquanto uma OTA anda. */
+const OTA_POLL_MS = 1500;
+let otaRepaintTimer: ReturnType<typeof setTimeout> | null = null;
+/** Versão escolhida no seletor, por satélite — o repaint não volta para a mais nova. */
+let otaChoice: { deviceId: string; version: string } | null = null;
+/** S/N aberto para atualizar este satélite nesta versão. */
+let otaConfirm: { deviceId: string; version: string } | null = null;
+/** Pedido em voo (antes do 202): segura o botão. */
+let otaSending: string | null = null;
+
+function scheduleOtaRepaint(): void {
+  if (otaRepaintTimer) return;
+  otaRepaintTimer = setTimeout(() => {
+    otaRepaintTimer = null;
+    if (currentPage?.id === 'satellites') void renderCurrent(true);
+  }, OTA_POLL_MS);
+}
+
+/** "Atualização disponível": a mais nova estável acima da que roda. */
+function updateAvailable(s: any, latest: string | null): boolean {
+  return Boolean(latest && isFirmwareSatellite(s) && compareSemver(latest, s.device_info.fw_version) > 0);
+}
+
+/** `[████████░░░░░░░░]  52%` — barra em caracteres de bloco, como o resto do terminal. */
+function progressBar(percent: number, width = 16): string {
+  const p = Math.max(0, Math.min(100, Math.round(percent)));
+  const full = Math.round((p / 100) * width);
+  return `[${'█'.repeat(full)}${'░'.repeat(width - full)}] ${String(p).padStart(3, ' ')}%`;
+}
+
+function otaStateLine(ota: any): { text: string; tone: string } {
+  const v = String(ota.target_version ?? '?').toUpperCase();
+  switch (ota.state) {
+    case 'downloading':
+      return { text: `BAIXANDO ${v} DO GITHUB E CONFERINDO SHA-256…`, tone: 'hi' };
+    case 'sending':
+      return { text: `SATÉLITE GRAVANDO ${v} — NÃO DESLIGUE`, tone: 'hi' };
+    case 'rebooting':
+      return { text: `GRAVADO · REINICIANDO EM ${v} E AGUARDANDO ELE VOLTAR…`, tone: 'hi' };
+    case 'ok':
+      return { text: `▣ ATUALIZADO PARA ${v}`, tone: 'hi' };
+    case 'rolled_back':
+      return { text: `▲ REVERTIDO — ${String(ota.error ?? '').toUpperCase()}`, tone: 'amber' };
+    case 'failed':
+    default:
+      return { text: `▲ FALHOU: ${String(ota.error ?? 'sem motivo').toUpperCase()}`, tone: 'amber' };
+  }
+}
+
+async function startOta(deviceId: string, version: string): Promise<void> {
+  otaConfirm = null;
+  otaSending = deviceId;
+  repaintSatellites();
+  const label = `FIRMWARE ${deviceId} → ${version}`;
+  const result = await window.panel.call('server.updateFirmware', deviceId, version);
+  otaSending = null;
+  if (!result.ok) say(`${label} ... FALHA: ${errorOf(result)}`, 'warn');
+  else say(`${label} ... INICIADO · BAIXANDO NO NÚCLEO`);
+  repaintSatellites();
+}
+
+/** Bloco FIRMWARE do detalhe: disponível, seletor de versão, S/N, progresso e desfecho. */
+function firmwareControls(sel: any, releasesRes: PanelResult): HTMLElement {
+  const box = h('div', { style: 'display:flex;flex-direction:column;gap:6px;align-items:stretch' });
+  const releases: any[] = releasesRes.ok ? (releasesRes.body?.releases ?? []) : [];
+  const latest: string | null = releasesRes.ok ? (releasesRes.body?.latest ?? null) : null;
+  const current: string | null = sel.device_info?.fw_version ?? null;
+  const ota = sel.ota ?? null;
+  const active = Boolean(ota && OTA_ACTIVE.has(ota.state));
+
+  box.append(kv('DISPONÍVEL', h('span', { class: 'raw' }, latest ?? '—'), latest ? '' : 'fg'));
+  if (updateAvailable(sel, latest)) {
+    box.append(h('span', { class: 'small hi' }, `▲ ATUALIZAÇÃO DISPONÍVEL: ${current} → ${latest}`));
+  }
+
+  if (ota) {
+    const line = otaStateLine(ota);
+    if (active) {
+      box.append(
+        h(
+          'span',
+          { class: 'raw meter', role: 'progressbar', 'aria-label': 'Progresso da atualização', 'aria-valuenow': String(ota.percent ?? 0), 'aria-valuemin': '0', 'aria-valuemax': '100' },
+          progressBar(ota.percent ?? 0),
+        ),
+      );
+      scheduleOtaRepaint();
+    }
+    box.append(h('span', { class: `small ${line.tone}`, style: 'line-height:1.6', role: 'status' }, line.text));
+  }
+
+  if (!isFirmwareSatellite(sel)) {
+    box.append(
+      h(
+        'span',
+        { class: 'small fg', style: 'line-height:1.6' },
+        sel.device_info ? 'SÓ SATÉLITES ESP32 ATUALIZAM PELA REDE.' : 'VERSÃO DESCONHECIDA — FIRMWARE ANTERIOR À OTA: GRAVE UMA VEZ POR USB.',
+      ),
+    );
+    return box;
+  }
+  if (!releasesRes.ok) {
+    box.append(h('span', { class: 'small amber', style: 'line-height:1.6' }, `▲ LISTA DE VERSÕES INDISPONÍVEL: ${errorOf(releasesRes).toUpperCase()}`));
+    return box;
+  }
+  if (releases.length === 0) {
+    box.append(h('span', { class: 'small fg', style: 'line-height:1.6' }, 'NENHUMA RELEASE FW-V* PUBLICADA NO GITHUB.'));
+    return box;
+  }
+  if (releasesRes.body?.stale) {
+    box.append(h('span', { class: 'small amber', style: 'line-height:1.6' }, '▲ GITHUB INACESSÍVEL — LISTA DA ÚLTIMA CONSULTA'));
+  }
+
+  const choice =
+    otaChoice && otaChoice.deviceId === sel.device_id && releases.some((r) => r.version === otaChoice!.version)
+      ? otaChoice.version
+      : (latest ?? releases[0].version);
+  const chosen = releases.find((r) => r.version === choice) ?? releases[0];
+  const cmp = current ? compareSemver(chosen.version, current) : 1;
+  const verb = cmp > 0 ? 'ATUALIZAR' : cmp < 0 ? 'VOLTAR' : 'REINSTALAR';
+  // Mesma versão e mesmo build: a imagem anterior é idêntica à nova, e uma
+  // reversão chegaria com o mesmo device_info — o servidor daria "ok" sem
+  // saber. Não há o que ganhar; o botão fica desligado.
+  const runningBuild = String(sel.device_info?.fw_build ?? '').slice(0, 7);
+  const identical = cmp === 0 && Boolean(chosen.manifest?.build) && chosen.manifest.build === runningBuild;
+
+  const confirming = otaConfirm;
+  if (confirming && confirming.deviceId === sel.device_id) {
+    const target = confirming.version;
+    box.append(
+      confirmLine(
+        `${verb} PARA ${target}? (S/N)`,
+        { yes: '[ S ]', no: '[ N ]' },
+        () => void startOta(sel.device_id, target),
+        () => {
+          otaConfirm = null;
+          void renderCurrent();
+        },
+      ),
+    );
+    return box;
+  }
+
+  const canStart = sel.online && !sel.blocked && !active && !identical && otaSending !== sel.device_id;
+  box.append(
+    cycler(
+      releases.map((r) => ({
+        value: r.version as string,
+        label: `${r.version}${r.version === latest ? ' · MAIS NOVA' : ''}${r.version === current ? ' · ATUAL' : ''}${r.prerelease ? ' · PRÉ' : ''}`,
+        raw: true,
+      })),
+      releases.findIndex((r) => r.version === chosen.version),
+      (version) => {
+        otaChoice = { deviceId: sel.device_id, version };
+        void renderCurrent(true);
+      },
+      'versão',
+    ),
+  );
+  if (chosen.changelog) {
+    box.append(
+      h('span', { class: 'small', style: 'line-height:1.5;white-space:pre-line;max-height:72px;overflow:hidden', title: chosen.changelog }, chosen.changelog),
+    );
+  }
+  box.append(
+    cmd(
+      `${verb} → ${chosen.version}`,
+      () => {
+        otaConfirm = { deviceId: sel.device_id, version: chosen.version };
+        void renderCurrent();
+      },
+      { first: true, disabled: !canStart, tone: cmp < 0 ? 'amber' : undefined, ariaLabel: `${verb} o firmware de ${sel.device_id} para ${chosen.version}` },
+    ),
+  );
+  const hint = identical
+    ? 'JÁ ESTÁ NESTA VERSÃO E NESTE BUILD.'
+    : sel.blocked
+    ? 'DESBLOQUEIE ANTES DE ATUALIZAR.'
+    : !sel.online
+      ? 'SÓ COM O SATÉLITE ONLINE E EM REPOUSO.'
+      : 'MANTÉM SALA, WI-FI E SEGREDO. IMAGEM QUE NÃO AUTENTICA VOLTA SOZINHA.';
+  box.append(h('span', { class: 'small', style: 'line-height:1.6' }, hint));
+  return box;
+}
+
 let selectedSatellite: string | null = null;
 let editingSatellite: string | null = null;
 /** `device_id` com o S/N de bloqueio aberto. */
@@ -1039,8 +1252,13 @@ pages.push({
   title: 'SATÉLITES REGISTRADOS',
   pollMs: 10000,
   async render(root) {
-    const [result, roomsRes] = await Promise.all([window.panel.call('server.satellites'), window.panel.call('server.rooms')]);
+    const [result, roomsRes, releasesRes] = await Promise.all([
+      window.panel.call('server.satellites'),
+      window.panel.call('server.rooms'),
+      window.panel.call('server.firmwareReleases'),
+    ]);
     if (!result.ok) return serverUnavailable(root, result);
+    const latestFirmware: string | null = releasesRes.ok ? (releasesRes.body?.latest ?? null) : null;
     const sats = result.body.satellites as any[];
     // Sugestões do campo de sala: salas com satélite + áreas do HA + mapeadas.
     // Sem a rota (servidor antigo), sobram as salas dos próprios satélites.
@@ -1117,7 +1335,15 @@ pages.push({
         nameCell,
         h('span', { class: 'ellipsis' }, s.room_id ?? '—'),
         h('span', { class: s.blocked ? 'amber' : s.online ? 'hi' : 'fg' }, s.blocked ? '⊘ BLOQUEADO' : s.online ? '▣ ONLINE' : '— OFFLINE'),
-        h('span', { class: `raw nowrap ellipsis${s.device_info?.fw_version ? '' : ' fg'}`, title: firmwareLabel(s) }, firmwareLabel(s)),
+        h(
+          'span',
+          {
+            class: `raw nowrap ellipsis${s.device_info?.fw_version ? '' : ' fg'}`,
+            title: updateAvailable(s, latestFirmware) ? `${firmwareLabel(s)} — ${latestFirmware} disponível` : firmwareLabel(s),
+          },
+          // ▲ = há versão mais nova publicada; ◌ = OTA andando agora.
+          `${s.ota && OTA_ACTIVE.has(s.ota.state) ? '◌ ' : updateAvailable(s, latestFirmware) ? '▲ ' : ''}${firmwareLabel(s)}`,
+        ),
         h('span', {}, s.online ? formatStamp(s.connected_since) : '—'),
         h('span', {}, formatAgo(s.last_seen_at)),
       );
@@ -1133,7 +1359,7 @@ pages.push({
         { class: 'tbl-foot' },
         h('span', {}, `${sats.length} SATÉLITES · ${online} ONLINE · ${sats.length - online} OFFLINE`),
         h('span', { class: 'spacer' }),
-        h('span', {}, 'CLIQUE NO NOME PARA RENOMEAR · ENTER SALVA · ESC CANCELA'),
+        h('span', {}, `${latestFirmware ? `FIRMWARE MAIS NOVO ${latestFirmware} · ▲ DISPONÍVEL · ` : ''}CLIQUE NO NOME PARA RENOMEAR · ENTER SALVA · ESC CANCELA`),
       ),
     );
 
@@ -1180,6 +1406,8 @@ pages.push({
       kv('IP', h('span', { class: 'raw', title: ipLabel(sel).viaSocket ? 'ENDEREÇO DO SOCKET — O SATÉLITE NÃO ANUNCIOU IP' : '' }, ipLabel(sel).text), ipLabel(sel).viaSocket ? 'fg' : ''),
       kv('MAC', h('span', { class: 'raw' }, sel.device_info?.mac ?? '—')),
       kv('WI-FI', rssiLabel(sel.device_info?.rssi).text, rssiLabel(sel.device_info?.rssi).tone),
+      h('div', { class: 'dim small', style: 'margin-top:8px' }, '── FIRMWARE ───────────────────'),
+      firmwareControls(sel, releasesRes),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── SALA ───────────────────────'),
       satelliteRoomControls(sel, knownRooms),
       h('div', { class: 'dim small', style: 'margin-top:8px' }, '── RECURSOS FUTUROS ──────────'),
