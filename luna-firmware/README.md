@@ -105,8 +105,8 @@ pio device monitor      # log serial (115200)
 
 ### Versão do firmware
 
-`custom_fw_version` no `platformio.ini` é a versão (semver) dos builds locais — suba junto
-com a release. O build (SHA curto do último commit que tocou `luna-firmware/`, `.dirty` com
+`custom_fw_version` no `platformio.ini` é a versão (semver) dos builds locais e da release
+publicada no merge; a PR sobe ela sozinha (ver [Lançar uma versão](#lançar-uma-versão-ota)). O build (SHA curto do último commit que tocou `luna-firmware/`, `.dirty` com
 mudança não commitada) é anexado sozinho por `tools/fw_version.py`. O boot loga
 `Firmware: 0.6.0+abc1234` e o satélite anuncia os dois no `device_info`, que é o que aparece
 na tela de Satélites do painel. No build de release, os dois vêm da tag
@@ -114,14 +114,25 @@ na tela de Satélites do painel. No build de release, os dois vêm da tag
 
 ## Lançar uma versão (OTA)
 
-Decisões em [ADR 012](../docs/adr/012-ota-de-firmware.md). Resumo:
+Decisões em [ADR 012](../docs/adr/012-ota-de-firmware.md). Resumo: **abrir a PR para a
+`main` e fazer o merge.**
+
+1. Na PR, `.github/workflows/version-bump.yml` sobe `custom_fw_version` se ela altera
+   `luna-firmware/` (fora Markdown) e commita no branch como `github-actions[bot]`
+   (`git pull --rebase` antes do próximo push). `feat` → minor, `fix` e o resto →
+   patch, `!`/`BREAKING CHANGE` → major (minor enquanto for 0.x). As labels
+   `bump:major`, `bump:minor`, `bump:patch` e `bump:skip` mandam no lugar dos commits.
+2. No merge, `.github/workflows/firmware-release.yml` vê a versão nova e cria a tag
+   `fw-v<versão>` com a release. Merge sem versão nova (tag já existe) não publica nada.
+
+Tag manual continua valendo (por exemplo, para uma pré-release fora da `main`):
 
 ```bash
-git tag -a fw-v0.6.0 -m "OTA pelo painel; LED de atualização"
-git push origin fw-v0.6.0
+git tag -a fw-v0.7.0-rc.1 -m "teste da OTA nova"
+git push origin fw-v0.7.0-rc.1
 ```
 
-A tag dispara `.github/workflows/firmware-release.yml`: compila **sem `secrets.h`** e com
+O workflow compila **sem `secrets.h`** e com
 `-DLUNA_RELEASE_BUILD=1` (que falha o build se houver qualquer credencial compilada), roda
 o guard de vazamento e publica a GitHub Release com `firmware.bin` + `manifest.json`
 (`version`, `build`, `size`, `sha256`, data e changelog). A mensagem da tag anotada vira o
