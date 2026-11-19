@@ -26,12 +26,17 @@ Restrições:
 
 ## Decisão
 
-1. **Release pelo CI, disparada por tag.** A tag `fw-vX.Y.Z` roda
-   `.github/workflows/firmware-release.yml` num runner hospedado: `pio run` **sem**
+1. **Release pelo CI, disparada pelo merge na main (ou por tag).** Toda PR para a
+   `main` que altera `luna-firmware/` recebe do `version-bump.yml` o
+   `custom_fw_version` novo (Conventional Commits ou label `bump:*`; ver
+   `.github/scripts/version-bump.mjs`). No merge, se a tag `fw-v<versão>` ainda não
+   existe, `.github/workflows/firmware-release.yml` cria tag e release naquele
+   commit; uma tag `fw-vX.Y.Z` empurrada à mão continua funcionando. O build roda
+   num runner hospedado: `pio run` **sem**
    `secrets.h` e com `-DLUNA_RELEASE_BUILD=1`, guard de vazamento, `manifest.json`
    (`version`, `build`, `commit`, `size`, `sha256`, `date`, `changelog`) e GitHub
-   Release com `firmware.bin` + `manifest.json`. A versão embutida vem da tag
-   (`LUNA_FW_VERSION`), o build é o SHA curto do commit (`LUNA_FW_BUILD`) — o mesmo
+   Release com `firmware.bin` + `manifest.json`. A versão embutida vem da tag (ou do
+   `platformio.ini`, no merge) via `LUNA_FW_VERSION`, o build é o SHA curto do commit (`LUNA_FW_BUILD`) — o mesmo
    `build` do manifest.
 2. **Nenhum segredo no binário, em três barreiras.** (a) Com `LUNA_RELEASE_BUILD`, o
    `main.cpp` falha com `#error` se houver `secrets.h` e tem `static_assert` exigindo

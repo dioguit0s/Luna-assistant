@@ -1,0 +1,62 @@
+name: Versão das partes alteradas
+
+# PR para a main -> sobe a versão de cada parte que a PR alterou (firmware,
+# server, desktop) e commita no próprio branch da PR. No merge, o firmware com
+# versão nova vira release sozinho (firmware-release.yml) e já aparece no
+# painel para OTA. Regras em .github/scripts/version-bump.mjs.
+#
+# O commit é feito com o GITHUB_TOKEN, que não dispara workflows: não entra em
+# loop. Depois dele, o branch local fica um commit atrás: `git pull --rebase`
+# antes do próximo push.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: version-bump-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  bump:
+    # PR de fork não tem permissão de push no branch dela.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0 # merge-base, log da PR e tags fw-v*
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Testes do script
+        run: node --test .github/scripts/version-bump.test.mjs
+
+      - name: Calcular e aplicar versões
+        id: bump
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: node .github/scripts/version-bump.mjs --base "$BASE_SHA" --title "$PR_TITLE" --labels "$PR_LABELS"
+
+      - name: Commitar no branch da PR
+        if: steps.bump.outputs.changed == 'true'
+        env:
+          SUMMARY: ${{ steps.bump.outputs.summary }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A luna-firmware/platformio.ini luna-server/package.json luna-server/package-lock.json \
+            luna-desktop/package.json luna-desktop/package-lock.json
+          git commit -m "chore(versão): $SUMMARY"
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+          echo "### Versões: $SUMMARY" >> "$GITHUB_STEP_SUMMARY"

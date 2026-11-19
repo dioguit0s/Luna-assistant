@@ -1,21 +1,69 @@
 name: Release do firmware
 
-# Tag fw-vX.Y.Z -> build genérico (sem secrets.h) -> guard de vazamento ->
-# GitHub Release com firmware.bin + manifest.json. Ver ADR 012.
+# Dois gatilhos, mesma release (ADR 012):
+#   - merge na main que toque luna-firmware/: a versão vem do platformio.ini
+#     (que o version-bump.yml já subiu na PR); se a tag fw-v<versão> ainda não
+#     existe, cria tag + release naquele commit. Já existe: não faz nada.
+#   - tag fw-vX.Y.Z empurrada à mão: a versão vem da tag.
+# Build genérico (sem secrets.h) -> guard de vazamento -> GitHub Release com
+# firmware.bin + manifest.json.
 on:
   push:
+    branches: [main]
+    # Filtro de paths não vale para push de tag: a tag manual sempre roda.
+    paths: ['luna-firmware/**']
     tags: ['fw-v*']
 
 permissions:
   contents: write
 
 concurrency:
-  group: firmware-release-${{ github.ref_name }}
+  group: firmware-release
   cancel-in-progress: false
 
 jobs:
-  release:
+  version:
     runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.v.outputs.release }}
+      tag: ${{ steps.v.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Versão e tag
+        id: v
+        run: |
+          INI=$(sed -n 's/^custom_fw_version *= *//p' luna-firmware/platformio.ini | tr -d '\r')
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            TAG="$GITHUB_REF_NAME"
+            VERSION="${TAG#fw-v}"
+            [ "$INI" = "$VERSION" ] || echo "::warning::platformio.ini diz $INI, a tag diz $VERSION (vale a tag)"
+          else
+            VERSION="$INI"
+            TAG="fw-v$VERSION"
+            if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+              echo "::notice::$TAG já existe: firmware sem versão nova neste merge, nada a publicar."
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$ ]]; then
+            echo "::error::versão '$VERSION' fora do formato X.Y.Z"; exit 1
+          fi
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  release:
+    needs: version
+    if: needs.version.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      LUNA_FW_VERSION: ${{ needs.version.outputs.version }}
     defaults:
       run:
         working-directory: luna-firmware
@@ -24,28 +72,24 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Versão a partir da tag
+      - name: Build id
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          VERSION="${TAG#fw-v}"
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]{1,32})?$ ]]; then
-            echo "::error::tag $TAG fora do formato fw-vX.Y.Z"; exit 1
-          fi
-          # checkout pode trazer a tag anotada como leve: busca a mensagem de novo.
-          git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-          echo "LUNA_FW_VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "LUNA_FW_BUILD=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_ENV"
-          INI=$(sed -n 's/^custom_fw_version *= *//p' platformio.ini | tr -d '\r')
-          [ "$INI" = "$VERSION" ] || echo "::warning::platformio.ini diz $INI, a tag diz $VERSION (vale a tag)"
+          # Tag manual: o checkout pode trazer a tag anotada como leve; busca a mensagem de novo.
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          fi
 
       - name: Changelog curto
         run: |
-          TAG="${GITHUB_REF_NAME}"
-          MSG=$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)' | sed '/-----BEGIN PGP/,$d')
+          MSG=""
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            MSG=$(git for-each-ref "refs/tags/${TAG}" --format='%(contents)' | sed '/-----BEGIN PGP/,$d')
+          fi
           if [ -z "$(echo "$MSG" | tr -d '[:space:]')" ]; then
             PREV=$(git tag --list 'fw-v*' --sort=-v:refname | grep -vx "$TAG" | head -1)
             RANGE="${PREV:+$PREV..}HEAD"
-            MSG=$(git log --format='- %s' "$RANGE" -- . | head -20)
+            MSG=$(git log --no-merges --format='- %s' "$RANGE" -- . | grep -v '^- chore(versão)' | head -20)
           fi
           printf '%s\n' "$MSG" > "$RUNNER_TEMP/changelog.txt"
 
@@ -87,7 +131,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          # --target: no merge a tag ainda não existe e é criada neste commit.
+          # (Tag criada pelo GITHUB_TOKEN não dispara este workflow de novo.)
+          gh release create "$TAG" \
             "$RUNNER_TEMP/out/firmware.bin" "$RUNNER_TEMP/out/manifest.json" \
+            --target "$(git rev-parse HEAD)" \
             --title "Firmware $LUNA_FW_VERSION" --notes-file "$RUNNER_TEMP/changelog.txt" \
             $([[ "$LUNA_FW_VERSION" == *-* ]] && echo --prerelease)
