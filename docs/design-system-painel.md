@@ -17,7 +17,7 @@ quebrar a linguagem visual. **Mudou um token em `panel.css`? Mude aqui também.*
 | Arquivo | O que tem |
 |---|---|
 | `luna-desktop/src/panel/panel.css` | Tokens (`:root`), `@font-face`, efeitos CRT e todas as classes de componente |
-| `luna-desktop/src/panel/panel.ts` | Fábricas de componente (`frame`, `kv`, `cmd`, `field`, `cycler`, `secretField`, `confirmLine`, `typeInto`, `say`) e as oito telas |
+| `luna-desktop/src/panel/panel.ts` | Fábricas de componente (`frame`, `kv`, `cmd`, `field`, `cycler`, `secretField`, `confirmLine`, `typeInto`, `say`) e as nove telas |
 | `luna-desktop/src/panel/index.html` | Esqueleto fixo: barra do topo, menu, linha de comando, faixa de voz, sobreposições |
 | `luna-desktop/scripts/copy-renderer.mjs` | Copia as fontes de `@fontsource/*` para `dist/panel/fonts/` |
 
@@ -84,6 +84,7 @@ Cada componente tem uma fábrica em `panel.ts`; use a fábrica em vez de montar 
 | **Confirmação** | `confirmLine(pergunta, …)` | Linha âmbar `PERGUNTA? (S/N)█ [ S ] [ N ]`. Teclas S/N/ESC funcionam |
 | **Log de comando** | `.log` | Separador tracejado, linhas `> …` digitadas — resultado do "testar conexão" |
 | **Relatório vazio** | `emptyReport()` | Moldura central com manchete VT323 digitada e dica de voz |
+| **Esqueleto** | `skeletonRows(colunas, linhas, células)` → `.skel` | Linhas de `░` em `--dim` que pulsam devagar no lugar de uma tabela que ainda vai chegar (`aria-busy`). Só na primeira abertura da tela — o repinte do poll mantém o conteúdo anterior até o novo chegar. Parado com `prefers-reduced-motion` |
 
 ## Estrutura da tela
 
@@ -94,7 +95,7 @@ Cada componente tem uma fábrica em `panel.ts`; use a fábrica em vez de montar 
 │ ┌ MENU     │ 0N // TÍTULO DA TELA (digitado)            metadado │
 │ 01 INÍCIO  │                                                     │
 │ …          │   molduras da tela                                  │
-│ 08 DIAGN.  │                                                     │
+│ 09 DIAGN.  │                                                     │
 │ └ TECLAS   │                                                     │
 ├────────────┴─────────────────────────────────────────────────────┤
 │ > ÚLTIMO COMANDO ... OK█                  NÚCLEO host · OPERADOR │ linha de comando
@@ -130,7 +131,7 @@ Cada componente tem uma fábrica em `panel.ts`; use a fábrica em vez de montar 
 4. **Destrutivo sempre pede (S/N) na linha**, em âmbar — nunca `confirm()` do sistema.
 5. **Segredos mostram só os 4 últimos caracteres** (quando o servidor os dá).
 6. **Âmbar só para alerta, vermelho só para falha crítica.** Estado normal é verde.
-7. **Teclado:** 1–8 navegam entre telas, ESC cancela edição ou confirmação, S/N
+7. **Teclado:** 1–9 navegam entre telas, ESC cancela edição ou confirmação, S/N
    respondem confirmações.
 8. **Efeitos CRT são decorativos:** `pointer-events: none`, `aria-hidden`, nunca carregam
    informação.

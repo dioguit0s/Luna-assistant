@@ -1,6 +1,6 @@
 # Painel de controle — plano
 
-**Status:** v1 e v2 implementadas (marcos 1–11) e validadas manualmente no app instalado e no servidor de produção (2026-11-17); a agenda por voz entrou ([ADR 011](adr/011-agenda-compasso.md)); fora da v2 ficaram as telas da agenda e o "não perturbe"
+**Status:** v1 e v2 implementadas (marcos 1–11) e validadas manualmente no app instalado e no servidor de produção (2026-11-17); a agenda por voz entrou ([ADR 011](adr/011-agenda-compasso.md)); a tela da Agenda ("o que a Luna vê hoje" e histórico, migração 5) entrou em 2026-11-19; fora da v2 ficou o "não perturbe"
 **Data:** 2026-09-24
 **Decisão de arquitetura:** [ADR 010](adr/010-painel-de-controle-e-api-admin.md)
 
@@ -99,8 +99,16 @@ sendo um satélite** — o painel é uma janela a mais, não um app novo.
 
 | Função | Precisa de | Quando |
 |---|---|---|
-| "O que a Luna vê hoje": eventos, tarefas e aulas do dia, como ela receberia | API | v2 |
-| Log do que a Luna consultou ou criou na agenda (ação e resultado, sem transcrição) | API + Persist | v2 |
+| "O que a Luna vê hoje": eventos, tarefas e aulas do dia, como ela receberia | API | v2 ✔ |
+| Log do que a Luna consultou ou criou na agenda (ação e resultado, sem transcrição) | API + Persist | v2 ✔ |
+
+Tela própria, **06 AGENDA** (as de Este terminal, Servidor e Diagnóstico desceram uma
+posição; o teclado vai de 1 a 9). "O que a Luna vê hoje" chama `GET calendar/today`, que
+usa a mesma `calendar/agendaQuery.ts` do `get_agenda` — não há reimplementação: a tela
+mostra os itens do dia por tipo, quais cabem no teto que o modelo recebe e, recolhido, o
+payload cru da tool. O histórico (`GET calendar/log`) grava ação, parâmetros de enum ou
+número, resultado (`ok`, `error.code` do Compasso ou motivo de recusa) e latência — nunca
+`search`, `title` ou texto falado.
 
 Edição de eventos e tarefas fica no app de agendas — duplicar aqui só criaria
 atrito.
@@ -180,6 +188,8 @@ header `Authorization: Bearer <LUNA_ADMIN_TOKEN>`, JSON nos dois sentidos.
 | `POST settings/weather/test` | Busca a previsão para `{ latitude, longitude }` (ou as gravadas) sem gravar; devolve a temperatura atual — v2 |
 | `POST settings/weather/geocode` | `{ city }` → até 5 candidatos `{ label, latitude, longitude }` pelo geocoding do Open-Meteo — v2 |
 | `POST restart` | 202 e shutdown gracioso; o `Restart=always` traz de volta |
+| `GET calendar/today` | "O que a Luna vê hoje", pela mesma função do `get_agenda({ when: "today" })`: `state` (`ok` / `off` sem URL ou credencial / `error` com `error: { code, message }` do Compasso — nunca 500), `date`, `period`, `latency_ms`, `total`, `spoken_count`, `max_spoken_items` (15), `more`, `items` (todos os do dia: `type` `event`/`class`/`task`, `title`, `time` — a frase que a Luna fala —, `start`, `end`, `all_day`, `at` para ordenar, `seen_by_luna`; aula com `location`, `professor`, `cancelled`; tarefa com `due`, `done`) e `tool_payload`, o objeto exato que o modelo receberia. Não entra no histórico, mas atualiza o semáforo da agenda — v2 |
+| `GET calendar/log?limit=50` | Histórico das tools da agenda, mais recente primeiro (1–500): `at`, `room_id`, `tool`, `action` (`query`, `create_event`, `create_task`, `complete_task`), `params` (só `when`, `day_of_month`, `kind`, `effort`, `attribute`, `has_search` presentes), `result`, `ok`, `item_count`, `item_id` (do Compasso) e `latency_ms` (soma das idas ao Compasso; `null` se nem chamou). Sem texto livre — v2 |
 | `GET diagnostics/latency?hours=24` | Série de TTFAB (até 2000 amostras, 1 h–30 d), meta de 800 ms e resumo por sala × provedor: `p50_ms`, `p90_ms`, `max_ms`, `over_target`, `cold` (sessões frias, fora dos percentis) — v2 |
 | `GET diagnostics/errors?limit=20` | Últimos erros: todo `error`/`fatal` e os `warn` de dependência externa (HA, clima, provider, lembrete perdido) — v2 |
 | `GET logs/stream?level=info&room=` | Log ao vivo em SSE: primeiro o buffer em memória (500 linhas) filtrado, depois cada linha nova; heartbeat a cada 15 s; até 4 streams (429) — v2 |
@@ -199,7 +209,8 @@ linhas de log dos eventos de lembrete (`reminder_events`), então para de cresce
 
 O diagnóstico não sabe de conversa: `logTap` descarta toda chave de log que possa carregar
 fala (`raw`, `text`, `transcript`…) e guarda só escalares. Retenção no SQLite: 30 dias ou 10
-mil linhas por tabela (`latency_samples`, `error_log`, `reminder_events`, migração 4).
+mil linhas por tabela (`latency_samples`, `error_log`, `reminder_events`, migração 4; `agenda_events`, migração 5).
+A migração 5 torna o deploy de mão única de novo — ver `luna-server/deploy/README.md`.
 
 Códigos: 404 em tudo sem `LUNA_ADMIN_TOKEN`; 403 fora de loopback/rede privada; 401
 token errado; 422 validação; 413 corpo acima de 64 KB.

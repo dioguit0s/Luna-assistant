@@ -8,6 +8,7 @@ import {
 import { OpenMeteoClient } from './weather/OpenMeteoClient.js';
 import { WeatherSource } from './weather/WeatherSource.js';
 import { CompassoClient } from './calendar/CompassoClient.js';
+import { deferredAgendaSink } from './calendar/agendaLog.js';
 import { ConversationRingBuffer } from './rooms/ConversationRingBuffer.js';
 import { RoomManager } from './rooms/RoomManager.js';
 import { WsServer } from './ws/WsServer.js';
@@ -153,6 +154,8 @@ async function main(): Promise<void> {
     reminderStore,
     weatherSource,
     calendarClient,
+    // Histórico da agenda do painel: grava fora do caminho da resposta da tool.
+    deferredAgendaSink((entry) => diagnostics.store.insertAgendaEvent(entry)),
   );
 
   // O ciclo de toque (rajada → janela de escuta → rajada, dispensa, soneca e o
@@ -229,6 +232,7 @@ async function main(): Promise<void> {
       },
       weatherSource,
       calendarStatus: () => calendarClient.lastStatus(),
+      calendarClient,
       diagnostics,
       disconnectSatellite: (deviceId) => wsServer.disconnectDevice(deviceId, 'desconectado pelo painel'),
       setSatelliteConfig: (deviceId, patch) => wsServer.setSatelliteConfig(deviceId, patch),

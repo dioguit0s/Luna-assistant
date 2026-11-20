@@ -199,6 +199,38 @@ const MIGRATIONS: ReadonlyArray<(db: DatabaseSync) => void> = [
       CREATE INDEX IF NOT EXISTS idx_reminder_events_at ON reminder_events (at);
     `);
   },
+  /**
+   * Histórico da agenda no painel: o que `get_agenda` e `manage_agenda`
+   * consultaram ou criaram no Compasso, com ação, parâmetros de enum/número,
+   * resultado e latência. **Sem texto livre** (`search`, `title`): ver
+   * `calendar/agendaLog.ts`. Mesmo dono e mesma poda das tabelas da migração 4
+   * (`DiagnosticsStore`). `when` é palavra reservada do SQL, daí `when_arg`.
+   *
+   * Como toda migração, torna o rollback para a release anterior (que conhece
+   * só 4) impossível sem restaurar `luna.db.pre-v4-*` — ver `deploy/README.md`.
+   */
+  (db) => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS agenda_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        at           INTEGER NOT NULL,
+        room_id      TEXT,
+        tool         TEXT    NOT NULL,
+        action       TEXT,
+        when_arg     TEXT,
+        day_of_month INTEGER,
+        kind         TEXT,
+        effort       INTEGER,
+        attribute    TEXT,
+        has_search   INTEGER NOT NULL DEFAULT 0,
+        result       TEXT    NOT NULL,
+        item_count   INTEGER,
+        item_id      TEXT,
+        latency_ms   INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_agenda_events_at ON agenda_events (at);
+    `);
+  },
 ];
 
 /**

@@ -250,3 +250,9 @@ do painel v2 é de mão única: se ele falhar no health check por **qualquer**
 motivo, o rollback automático também falha e o serviço fica fora até a
 restauração acima (com `pre-v3`). Suba essa release quando der para olhar o
 servidor em seguida.
+
+A **v5** (histórico da agenda no painel: `agenda_events`) é igual: a release que a
+traz copia o banco para `luna.db.pre-v4-<carimbo>` antes de migrar, e qualquer
+release anterior passa a morrer no boot com `versão 5, mais nova que este código
+(4)`. Deploy de mão única de novo — voltar é a restauração acima, com `pre-v4`, e
+perde só o que mudou depois da cópia (o histórico da agenda em si é descartável).
