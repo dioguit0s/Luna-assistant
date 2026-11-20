@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { CompassoClient, type CompassoStatus } from '../calendar/CompassoClient.js';
+import { CompassoClient, cleanText, type CompassoItem, type CompassoStatus } from '../calendar/CompassoClient.js';
+import { MAX_SPOKEN_ITEMS, queryAgenda } from '../calendar/agendaQuery.js';
+import { describeItem } from '../calendar/spoken.js';
 import type { AppConfig } from '../config/env.js';
 import { ACTIONABLE_DOMAINS, type HomeAssistantClient } from '../ha/HomeAssistantClient.js';
 import type { DeviceRegistrySource } from '../ha/deviceRegistrySource.js';
@@ -58,6 +60,11 @@ export interface AdminApiDeps {
   weatherSource: WeatherSource | null;
   /** Desfecho da última chamada ao Compasso, para o semáforo da agenda. */
   calendarStatus?: () => CompassoStatus | null;
+  /**
+   * O mesmo client das tools de voz: "O que a Luna vê hoje" consulta por ele,
+   * com a conexão gravada. Ausente = agenda desligada para o painel.
+   */
+  calendarClient?: Pick<CompassoClient, 'configured' | 'agenda' | 'pendingTasks'>;
   /** Série de TTFAB, últimos erros e log ao vivo (v2). */
   diagnostics: Diagnostics;
   /** Fecha as conexões de um `device_id` — ver `WsServer.disconnectDevice`. */
@@ -265,6 +272,10 @@ export class AdminApi {
       case 'POST settings/:id/:action':
         if (action === 'test') return { body: await this.testConnection(editableGroup(id!), await readJson(req)) };
         if (action === 'geocode' && id === 'weather') return { body: await this.geocode(await readJson(req)) };
+        break;
+      case 'GET calendar/:id':
+        if (id === 'today') return { body: await this.calendarToday() };
+        if (id === 'log') return { body: this.calendarLog(query) };
         break;
       case 'GET diagnostics/:id':
         if (id === 'latency') return { body: this.latency(query) };
@@ -958,6 +969,88 @@ export class AdminApi {
       : { ok: false, latency_ms: latency, error: 'o Compasso respondeu, mas não está saudável' };
   }
 
+  // ─── Agenda ────────────────────────────────────────────────────────────
+
+  /**
+   * "O que a Luna vê hoje": a mesma `queryAgenda` do `get_agenda({ when:
+   * "today" })`, com o `tool_payload` exato que o modelo receberia e, ao lado,
+   * os itens estruturados para a tela — todos, com `seen_by_luna` marcando os
+   * que cabem no teto. Falha do Compasso não é erro da API: volta 200 com
+   * `state: "error"` e o `error.code`, como o "testar conexão".
+   *
+   * Não entra no histórico da agenda (não foi a Luna que consultou), mas
+   * atualiza o semáforo: é uma chamada real com a conexão gravada.
+   */
+  private async calendarToday(): Promise<unknown> {
+    const agora = new Date(this.now());
+    const p = localDateTime(agora);
+    const base = {
+      date: `${p.year}-${pad2(p.month)}-${pad2(p.day)}`,
+      max_spoken_items: MAX_SPOKEN_ITEMS,
+    };
+    const client = this.deps.calendarClient;
+    const outcome = client
+      ? await queryAgenda(client, { when: 'today' }, agora)
+      : ({ ok: false, code: 'not_configured', latencyMs: null, payload: { success: false, error: 'a agenda não está configurada' } } as const);
+
+    if (!outcome.ok) {
+      const off = outcome.code === 'not_configured';
+      return {
+        ...base,
+        state: off ? 'off' : 'error',
+        error: off ? null : { code: outcome.code, message: outcome.payload.error },
+        period: null,
+        latency_ms: outcome.latencyMs,
+        total: 0,
+        spoken_count: 0,
+        more: false,
+        items: [],
+        tool_payload: outcome.payload,
+      };
+    }
+    return {
+      ...base,
+      state: 'ok',
+      error: null,
+      period: outcome.period,
+      latency_ms: outcome.latencyMs,
+      total: outcome.items.length,
+      spoken_count: outcome.payload.items.length,
+      more: outcome.payload.more === true,
+      items: outcome.items.map((item, i) => todayItemWire(item, agora, i < MAX_SPOKEN_ITEMS)),
+      tool_payload: outcome.payload,
+    };
+  }
+
+  /** Histórico do que a Luna consultou ou criou — sem texto falado (ver `agendaLog.ts`). */
+  private calendarLog(query: URLSearchParams): unknown {
+    const limit = intParam(query, 'limit', 50, 1, 500);
+    return {
+      events: this.deps.diagnostics.store.agendaHistory(limit).map((e) => {
+        const params: Record<string, unknown> = {};
+        if (e.when !== null) params.when = e.when;
+        if (e.dayOfMonth !== null) params.day_of_month = e.dayOfMonth;
+        if (e.kind !== null) params.kind = e.kind;
+        if (e.effort !== null) params.effort = e.effort;
+        if (e.attribute !== null) params.attribute = e.attribute;
+        if (e.hasSearch) params.has_search = true;
+        return {
+          id: e.id,
+          at: e.at,
+          room_id: e.roomId || null,
+          tool: e.tool,
+          action: e.action,
+          params,
+          result: e.result,
+          ok: e.result === 'ok',
+          item_count: e.itemCount,
+          item_id: e.itemId,
+          latency_ms: e.latencyMs,
+        };
+      }),
+    };
+  }
+
   // ─── Diagnóstico ───────────────────────────────────────────────────────
 
   /**
@@ -1338,6 +1431,46 @@ function firmwareReleaseWire(r: FirmwareRelease): unknown {
 
 function releaseWire(): { sha: string; deployed_at: string } | null {
   return SERVER_RELEASE ? { sha: SERVER_RELEASE.sha, deployed_at: SERVER_RELEASE.deployedAt } : null;
+}
+
+const pad2 = (n: number): string => String(n).padStart(2, '0');
+
+/** ISO do Compasso para o painel: dado externo, só string e com teto. */
+function isoOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value !== '' ? value.slice(0, 40) : null;
+}
+
+/**
+ * Item do dia para a tela. `time` é a mesma frase que a Luna fala (`describeItem`);
+ * `at` é a chave de ordenação (prazo da tarefa, início do resto).
+ */
+function todayItemWire(item: CompassoItem, agora: Date, seenByLuna: boolean): unknown {
+  const spoken = describeItem(item, agora, false);
+  const start = isoOrNull(item.start);
+  const base = {
+    // Tipo fora do contrato não vira string arbitrária na tela.
+    type: item.type === 'event' || item.type === 'class' || item.type === 'task' ? item.type : 'item',
+    title: spoken.title,
+    time: spoken.time,
+    start,
+    end: isoOrNull(item.end),
+    all_day: item.all_day === true,
+    seen_by_luna: seenByLuna,
+  };
+  if (item.type === 'task') {
+    const due = isoOrNull(item.due);
+    return { ...base, at: due ?? start, due, done: item.done === true };
+  }
+  if (item.type === 'class') {
+    return {
+      ...base,
+      at: start,
+      location: spoken.room ?? null,
+      professor: spoken.professor ?? null,
+      cancelled: item.cancelled === true,
+    };
+  }
+  return { ...base, at: start, location: item.type === 'event' ? cleanText(item.location, 60) || null : null };
 }
 
 function asRecord(value: unknown, name: string): Record<string, unknown> {

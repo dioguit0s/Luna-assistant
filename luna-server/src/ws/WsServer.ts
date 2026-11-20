@@ -1,3 +1,4 @@
+import type { AgendaEventSink } from '../calendar/agendaLog.js';
 import {
   createServer,
   type IncomingMessage,
@@ -227,6 +228,7 @@ export class WsServer {
     reminderStore: ReminderStore,
     weatherSource: WeatherSource | null,
     calendarClient: CompassoClient | null = null,
+    agendaLog: AgendaEventSink | null = null,
   ) {
     this.providerName = () => config.audioProvider;
     // O client do HA e o registro são construídos em `index.ts`: o registro tem
@@ -240,6 +242,7 @@ export class WsServer {
       reminderStore,
       weatherSource,
       calendarClient,
+      agendaLog,
     );
   }
 

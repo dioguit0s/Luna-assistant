@@ -878,6 +878,33 @@ body {
   animation: luna-blink 0.44s steps(1) infinite;
 }
 
+/* Esqueleto de carregamento: linhas de ░ apagadas que pulsam devagar.
+   Com prefers-reduced-motion, ficam paradas (bloco global acima). */
+.skel {
+  color: var(--dim);
+  text-shadow: none;
+  animation: luna-skel 1.4s ease-in-out infinite both;
+}
+@keyframes luna-skel {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Payload cru da tool na Agenda: JSON como o modelo recebe, rolável. */
+.agenda-payload {
+  border-top: 1px dashed var(--dim);
+  padding-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 260px;
+  overflow: auto;
+}
+
 .empty-report {
   flex: 1;
   display: flex;

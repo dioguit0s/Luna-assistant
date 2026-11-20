@@ -6,6 +6,7 @@ import type { IAudioProvider } from '../../providers/IAudioProvider.js';
 import type { CompassoClient, CompassoItem, CompassoResult, CompassoTask } from '../../calendar/CompassoClient.js';
 import { createManageAgendaHandler } from './manageAgenda.js';
 import { INVALID_ARGS_RESULT, type ToolContext } from './types.js';
+import type { AgendaLogEntry } from '../../calendar/agendaLog.js';
 
 /** Sexta-feira, 25 de setembro de 2026, 10:00 em São Paulo. */
 const NOW = new Date('2026-09-25T13:00:00Z');
@@ -322,6 +323,79 @@ describe('createManageAgendaHandler', () => {
         ctx(),
       );
       assert.deepEqual(result, { success: false, error: 'não encontrei essa tarefa' });
+    });
+  });
+
+  describe('histórico da agenda', () => {
+    function sink(): { log: { record(e: AgendaLogEntry): void }; entries: AgendaLogEntry[] } {
+      const entries: AgendaLogEntry[] = [];
+      return { log: { record: (e) => entries.push(e) }, entries };
+    }
+
+    it('criar tarefa: grava ação, esforço, atributo e o id criado — sem o título', async () => {
+      const { client } = fakeClient({ createTask: [ok(task({ id: 'tsk_9', title: 'Pagar a conta de luz' }))] });
+      const { log, entries } = sink();
+      await createManageAgendaHandler({ client, now: () => NOW, log })(
+        { action: 'create_task', title: 'Pagar a conta de luz', effort: 2, attribute: 'casa', when_day: 'tomorrow' },
+        ctx(),
+      );
+      assert.equal(entries.length, 1);
+      const e = entries[0]!;
+      assert.equal(e.tool, 'manage_agenda');
+      assert.equal(e.action, 'create_task');
+      assert.equal(e.effort, 2);
+      assert.equal(e.attribute, 'casa');
+      assert.equal(e.when, 'tomorrow');
+      assert.equal(e.result, 'ok');
+      assert.equal(e.itemId, 'tsk_9');
+      assert.equal(typeof e.latencyMs, 'number');
+      assert.ok(!JSON.stringify(e).toLowerCase().includes('conta de luz'), 'título não entra no histórico');
+    });
+
+    it('falha do Compasso na escrita: grava o error.code', async () => {
+      const { client } = fakeClient({
+        createEvent: [{ ok: false, status: 422, code: 'validation_error', message: 'início inválido', field: 'start' }],
+      });
+      const { log, entries } = sink();
+      await createManageAgendaHandler({ client, now: () => NOW, log })(
+        { action: 'create_event', title: 'Reunião', when_day: 'fri', at_time: '14:00' },
+        ctx(),
+      );
+      assert.equal(entries[0]!.result, 'validation_error');
+      assert.equal(entries[0]!.itemId, null);
+    });
+
+    it('recusa deste lado: motivo fixo e nenhuma ida ao Compasso', async () => {
+      const { client, calls } = fakeClient({});
+      const { log, entries } = sink();
+      await createManageAgendaHandler({ client, now: () => NOW, log })(
+        { action: 'create_task', title: 'Lavar o carro', effort: 4, attribute: 'casa' },
+        ctx(),
+      );
+      assert.equal(calls.length, 0);
+      assert.equal(entries[0]!.result, 'missing_effort');
+      assert.equal(entries[0]!.effort, 4, 'o esforço recusado é o que interessa ver');
+      assert.equal(entries[0]!.latencyMs, null);
+    });
+
+    it('concluir ambígua: soma as idas e grava quantas candidatas', async () => {
+      const { client } = fakeClient({
+        pendingTasks: [list([task({ id: 'a', title: 'Estudar cálculo' }), task({ id: 'b', title: 'Estudar cálculo II' })])],
+      });
+      const { log, entries } = sink();
+      await createManageAgendaHandler({ client, now: () => NOW, log })({ action: 'complete_task', title: 'estudar' }, ctx());
+      assert.equal(entries[0]!.result, 'ambiguous');
+      assert.equal(entries[0]!.itemCount, 2);
+    });
+
+    it('args inválidos: grava sem parâmetros e com a ação só se for do enum', async () => {
+      const { log, entries } = sink();
+      await createManageAgendaHandler({ client: fakeClient({}).client, now: () => NOW, log })(
+        { action: 'delete_event', title: 'segredo' },
+        ctx(),
+      );
+      assert.equal(entries[0]!.result, 'invalid_args');
+      assert.equal(entries[0]!.action, null);
     });
   });
 });

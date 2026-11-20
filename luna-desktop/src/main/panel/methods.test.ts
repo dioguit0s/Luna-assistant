@@ -175,6 +175,24 @@ describe('métodos do painel', () => {
     assert.equal(recorded.length, 1);
   });
 
+  it('agenda: hoje e histórico vão às rotas de calendar, limite validado', async () => {
+    const { methods, recorded } = setup();
+    await methods['server.calendarToday']!();
+    await methods['server.calendarLog']!(30);
+    await methods['server.calendarLog']!();
+    assert.deepEqual(
+      recorded.map((r) => `${r.method} ${r.url}`),
+      [
+        'GET http://192.168.0.20:8080/admin/v1/calendar/today',
+        'GET http://192.168.0.20:8080/admin/v1/calendar/log?limit=30',
+        'GET http://192.168.0.20:8080/admin/v1/calendar/log?limit=50',
+      ],
+    );
+    const bad = await methods['server.calendarLog']!('50&x=1');
+    assert.equal(bad.ok, false);
+    assert.equal(recorded.length, 3);
+  });
+
   it('lembretes: criar vai por POST com o corpo, editar exige id inteiro', async () => {
     const { methods, recorded } = setup();
     await methods['server.createReminder']!({ room_id: 'quarto', time: '07:00' });

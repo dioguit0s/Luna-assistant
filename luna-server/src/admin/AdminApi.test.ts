@@ -21,6 +21,8 @@ import { createEnvelope, serializeControlMessage } from '../ws/protocol.js';
 import { createHash } from 'node:crypto';
 import { FirmwareReleases } from '../ota/firmwareReleases.js';
 import { OtaManager } from '../ota/OtaManager.js';
+import type { CompassoItem, CompassoList, CompassoResult } from '../calendar/CompassoClient.js';
+import { MAX_SPOKEN_ITEMS } from '../calendar/agendaQuery.js';
 
 const TOKEN = 'token-admin-de-teste';
 
@@ -79,6 +81,8 @@ interface Harness {
   restarts: number;
   /** Releases que o "GitHub" falso do harness publica — os casos de OTA mexem aqui. */
   firmware: FakeFirmwareRelease[];
+  /** Compasso falso do "O que a Luna vê hoje": os casos trocam a resposta. */
+  calendar: { configured: boolean; response: CompassoResult<CompassoList>; calls: unknown[] };
   stop(): Promise<void>;
 }
 
@@ -168,6 +172,11 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
     fetchCalls: [],
     restarts: 0,
     firmware: [],
+    calendar: {
+      configured: true,
+      response: { ok: true, status: 200, data: { timezone: 'America/Sao_Paulo', items: [], next_cursor: null } },
+      calls: [],
+    },
     async stop() {
       otaManager.stop();
       await server.stop();
@@ -207,6 +216,16 @@ async function startHarness(cfg: AppConfig): Promise<Harness> {
       },
       weatherSource: null,
       diagnostics,
+      calendarClient: {
+        get configured() {
+          return harness.calendar.configured;
+        },
+        agenda: async (params: unknown) => {
+          harness.calendar.calls.push(params);
+          return harness.calendar.response;
+        },
+        pendingTasks: async () => harness.calendar.response,
+      } as never,
       // Só o que o painel chama por fora: geocoding e previsão do Open-Meteo,
       // e o health do Compasso (200 só com o token certo).
       fetchImpl: (async (url: string, init?: RequestInit) => {
@@ -563,6 +582,98 @@ describe('API admin', () => {
     assert.deepEqual(res.body.events.map((e: { kind: string }) => e.kind), ['snoozed', 'fired']);
     assert.equal(res.body.complete, false, 'LOG_LEVEL silent: histórico não cresce e o painel precisa saber');
     assert.equal(res.body.events[0].label, 'pão');
+  });
+
+  describe('agenda: o que a Luna vê hoje', () => {
+    const at = (hour: number): string => {
+      const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Sao_Paulo', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+      return `${day}T${String(hour).padStart(2, '0')}:00:00-03:00`;
+    };
+    const item = (i: number, type: 'event' | 'class' | 'task'): CompassoItem => {
+      const base = { id: `x${i}`, title: `Item ${i}`, start: at(7 + (i % 14)), end: null, all_day: false, location: null, recurring: false, occurrence_date: null };
+      if (type === 'task') return { ...base, type, due: base.start, done: i % 2 === 0 };
+      if (type === 'class') return { ...base, type, subject: null, professor: 'Prof. X', cancelled: true, location: 'B-204' };
+      return { ...base, type };
+    };
+    const respond = (items: CompassoItem[]): void => {
+      h.calendar.configured = true;
+      h.calendar.response = { ok: true, status: 200, data: { timezone: 'America/Sao_Paulo', items, next_cursor: null } };
+    };
+
+    it('itens estruturados e o payload exato da tool, pelo mesmo caminho', async () => {
+      respond([item(1, 'event'), item(2, 'class'), item(3, 'task')]);
+      h.calendar.calls.length = 0;
+      const res = await call(h, 'GET', '/admin/v1/calendar/today');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.state, 'ok');
+      assert.equal(res.body.max_spoken_items, MAX_SPOKEN_ITEMS);
+      assert.equal(res.body.total, 3);
+      assert.match(res.body.period, /^hoje/);
+      assert.deepEqual(res.body.items.map((i: { type: string }) => i.type), ['event', 'class', 'task']);
+      assert.equal(res.body.items[1].cancelled, true);
+      assert.equal(res.body.items[1].location, 'B-204');
+      assert.equal(res.body.items[2].done, false);
+      assert.ok(res.body.items.every((i: { seen_by_luna: boolean }) => i.seen_by_luna));
+      // O que o modelo recebe: mesma frase de horário que a tela mostra.
+      assert.equal(res.body.tool_payload.success, true);
+      assert.equal(res.body.tool_payload.items.length, 3);
+      assert.equal(res.body.tool_payload.items[0].time, res.body.items[0].time);
+      assert.equal(res.body.tool_payload.more, undefined);
+      const params = h.calendar.calls[0] as { from: string; to: string };
+      assert.ok(params.from.endsWith('T00:00:00-03:00'), 'intervalo de hoje resolvido como na tool');
+    });
+
+    it('acima do teto: só os primeiros N são vistos pela Luna e o resto vira more', async () => {
+      respond(Array.from({ length: MAX_SPOKEN_ITEMS + 3 }, (_, i) => item(i, 'task')));
+      const res = await call(h, 'GET', '/admin/v1/calendar/today');
+      assert.equal(res.body.total, MAX_SPOKEN_ITEMS + 3);
+      assert.equal(res.body.spoken_count, MAX_SPOKEN_ITEMS);
+      assert.equal(res.body.more, true);
+      assert.equal(res.body.tool_payload.more, true);
+      assert.equal(res.body.items.filter((i: { seen_by_luna: boolean }) => !i.seen_by_luna).length, 3);
+    });
+
+    it('desligada: estado explícito, sem 500 e sem rede', async () => {
+      h.calendar.configured = false;
+      h.calendar.calls.length = 0;
+      const res = await call(h, 'GET', '/admin/v1/calendar/today');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.state, 'off');
+      assert.equal(h.calendar.calls.length, 0);
+      assert.deepEqual(res.body.tool_payload, { success: false, error: 'a agenda não está configurada' });
+      h.calendar.configured = true;
+    });
+
+    it('credencial errada ou Compasso fora: estado de erro com o código', async () => {
+      h.calendar.response = { ok: false, status: 401, code: 'unauthorized', message: 'a integração com o Compasso precisa de um token novo', field: null };
+      const res = await call(h, 'GET', '/admin/v1/calendar/today');
+      assert.equal(res.status, 200);
+      assert.equal(res.body.state, 'error');
+      assert.equal(res.body.error.code, 'unauthorized');
+      assert.deepEqual(res.body.items, []);
+    });
+  });
+
+  it('histórico da agenda: mais recente primeiro, params só com o que veio, limit', async () => {
+    const store = h.diagnostics.store;
+    const base = { roomId: 'quarto', dayOfMonth: null, kind: null, effort: null, attribute: null, hasSearch: false, itemCount: null, itemId: null, latencyMs: 80 };
+    store.insertAgendaEvent({ ...base, at: Date.now() - 2000, tool: 'get_agenda', action: 'query', when: 'tomorrow', kind: 'all', result: 'ok', itemCount: 4 });
+    store.insertAgendaEvent({ ...base, at: Date.now() - 1000, tool: 'manage_agenda', action: 'create_task', when: null, effort: 3, attribute: 'casa', result: 'ok', itemId: 'tsk_1' });
+    store.insertAgendaEvent({ ...base, at: Date.now(), tool: 'get_agenda', action: 'query', when: null, result: 'unreachable', latencyMs: 2003 });
+
+    const res = await call(h, 'GET', '/admin/v1/calendar/log?limit=2');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.events.length, 2);
+    const [last, created] = res.body.events;
+    assert.equal(last.result, 'unreachable');
+    assert.equal(last.ok, false);
+    assert.deepEqual(last.params, {});
+    assert.equal(created.action, 'create_task');
+    assert.deepEqual(created.params, { effort: 3, attribute: 'casa' });
+    assert.equal(created.item_id, 'tsk_1');
+    assert.equal(created.ok, true);
+    assert.equal((await call(h, 'GET', '/admin/v1/calendar/log?limit=0')).status, 422);
+    assert.equal((await call(h, 'GET', '/admin/v1/calendar/outra')).status, 404);
   });
 
   it('bootstrap é só leitura e sem segredo', async () => {

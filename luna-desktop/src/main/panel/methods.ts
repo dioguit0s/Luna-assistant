@@ -185,6 +185,10 @@ export function createPanelMethods(deps: PanelDeps): Record<string, Method> {
     'server.editReminder': (id, body) =>
       admin.request('PUT', `reminders/${int(id, 'id', 1, Number.MAX_SAFE_INTEGER)}`, obj(body, 'lembrete')),
     'server.reminderHistory': (limit) => admin.request('GET', `reminders/history?limit=${int(limit ?? 50, 'limit', 1, 500)}`),
+    // Agenda: o que a Luna veria hoje (mesma função do `get_agenda`) e o
+    // histórico do que ela consultou ou criou no Compasso.
+    'server.calendarToday': () => admin.request('GET', 'calendar/today'),
+    'server.calendarLog': (limit) => admin.request('GET', `calendar/log?limit=${int(limit ?? 50, 'limit', 1, 500)}`),
     'server.settings': (g) => admin.request('GET', `settings/${group(g)}`),
     'server.saveSettings': (g, patch) => admin.request('PUT', `settings/${group(g)}`, obj(patch, 'patch')),
     'server.testConnection': (g, patch) =>

@@ -2138,7 +2138,7 @@ pages.push({
             secretLabel: 'CREDENCIAL',
             value: calendar.body.value,
             light: lights.calendar,
-            note: 'SÓ A CONEXÃO, POR ENQUANTO: A LUNA AINDA NÃO CONSULTA A AGENDA. O TESTE SÓ CONFIRMA QUE A URL RESPONDE.',
+            note: 'O TESTE CONFIRMA URL E CREDENCIAL. O QUE A LUNA VÊ HOJE E O HISTÓRICO DE CONSULTAS FICAM EM 06 AGENDA.',
           })
         : null,
     );
@@ -2460,7 +2460,307 @@ async function renderReminderHistory(root: HTMLElement): Promise<void> {
   );
 }
 
-// ─── 06 Este terminal ────────────────────────────────────────────────────
+// ─── 06 Agenda ───────────────────────────────────────────────────────────
+//
+// "O que a Luna vê hoje" (a mesma `queryAgenda` do `get_agenda`, com o payload
+// exato que o modelo receberia) e o histórico do que ela consultou ou criou no
+// Compasso. Edição de evento e tarefa fica no Compasso (inventário do painel).
+
+/** Última resposta das duas rotas: o repinte do poll não volta ao skeleton. Zera ao sair. */
+let agendaCache: { today: PanelResult; log: PanelResult } | null = null;
+/** Detalhe do payload cru aberto — sobrevive ao repinte do poll. */
+let agendaPayloadOpen = false;
+/** O próximo repinte consulta o Compasso de novo (ATUALIZAR); o poll não. */
+let agendaRefreshToday = false;
+
+const AGENDA_GROUPS: Array<{ type: string; label: string }> = [
+  { type: 'event', label: 'COMPROMISSOS' },
+  { type: 'class', label: 'AULAS' },
+  { type: 'task', label: 'TAREFAS' },
+  { type: 'item', label: 'OUTROS' },
+];
+
+const AGENDA_ACTIONS: Record<string, string> = {
+  query: '? CONSULTA',
+  create_event: '+ EVENTO',
+  create_task: '+ TAREFA',
+  complete_task: '▣ CONCLUIR',
+};
+
+const AGENDA_WHEN: Record<string, string> = {
+  today: 'HOJE',
+  tomorrow: 'AMANHÃ',
+  mon: 'SEG',
+  tue: 'TER',
+  wed: 'QUA',
+  thu: 'QUI',
+  fri: 'SEX',
+  sat: 'SÁB',
+  sun: 'DOM',
+  week: '7 DIAS',
+  next_week: 'SEMANA QUE VEM',
+  upcoming: 'PRÓXIMOS MESES',
+};
+
+const AGENDA_KINDS: Record<string, string> = {
+  all: 'TUDO',
+  events: 'COMPROMISSOS',
+  classes: 'AULAS',
+  tasks: 'TAREFAS',
+  pending_tasks: 'PENDENTES',
+};
+
+/** `result` do histórico: código do Compasso ou motivo deste lado, em palavras. */
+const AGENDA_RESULTS: Record<string, string> = {
+  unauthorized: 'CREDENCIAL RECUSADA',
+  forbidden: 'SEM PERMISSÃO',
+  unreachable: 'SEM RESPOSTA',
+  bad_response: 'RESPOSTA ESTRANHA',
+  internal: 'FALHA NO COMPASSO',
+  rate_limited: 'LIMITE DE PEDIDOS',
+  validation_error: 'VALIDAÇÃO',
+  conflict: 'CONFLITO',
+  not_found: 'NÃO ENCONTRADA',
+  not_configured: 'AGENDA DESLIGADA',
+  invalid_args: 'ARGS INVÁLIDOS',
+  invalid_range: 'PERÍODO INVÁLIDO',
+  invalid_day: 'DIA INVÁLIDO',
+  invalid_time: 'HORA INVÁLIDA',
+  missing_title: 'SEM NOME',
+  title_too_long: 'NOME LONGO',
+  missing_effort: 'FALTOU ESFORÇO',
+  missing_attribute: 'FALTOU ATRIBUTO',
+  ambiguous: 'AMBÍGUA',
+  already_done: 'JÁ FEITA',
+};
+
+/** Linhas apagadas que pulsam no lugar do conteúdo — "carregando" sem tela vazia. */
+function skeletonRows(columns: string, rows: number, cells: number): HTMLElement {
+  return h(
+    'div',
+    { class: 'tbl', 'aria-busy': 'true', 'aria-label': 'Carregando' },
+    ...Array.from({ length: rows }, (_, r) =>
+      grid(columns, { class: 'tbl-row dotted skel', style: `padding:7px 0;animation-delay:${r * 120}ms`, 'aria-hidden': 'true' },
+        ...Array.from({ length: cells }, (_, c) => h('span', { class: 'ellipsis' }, '░'.repeat(c === 1 ? 22 : 9)))),
+    ),
+  );
+}
+
+function agendaParams(params: Record<string, unknown>): string {
+  const out: string[] = [];
+  if (typeof params.when === 'string') out.push(AGENDA_WHEN[params.when] ?? params.when.toUpperCase());
+  if (typeof params.day_of_month === 'number') out.push(`DIA ${params.day_of_month}`);
+  if (typeof params.kind === 'string') out.push(AGENDA_KINDS[params.kind] ?? params.kind.toUpperCase());
+  if (typeof params.effort === 'number') out.push(`ESFORÇO ${params.effort}`);
+  if (typeof params.attribute === 'string') out.push(params.attribute.toUpperCase());
+  if (params.has_search === true) out.push('COM BUSCA');
+  return out.length ? out.join(' · ') : '—';
+}
+
+function agendaTodayFrame(result: PanelResult): HTMLElement {
+  const refresh = cmd('ATUALIZAR', async () => {
+    refresh.disabled = true;
+    refresh.textContent = '[ CONSULTANDO… ]';
+    agendaRefreshToday = true;
+    await renderCurrent();
+    say('AGENDA DE HOJE ... CONSULTADA');
+  }, { first: true, tone: 'quiet' });
+
+  if (!result.ok) {
+    return frame(
+      'O QUE A LUNA VÊ HOJE',
+      { tone: 'warn' },
+      h('span', { class: 'amber' }, result.status === 404 ? '◈ O NÚCLEO NÃO TEM ESTA ROTA — ATUALIZE O SERVIDOR' : `◈ FALHA — ${errorOf(result)}`),
+      h('div', { class: 'row' }, refresh),
+    );
+  }
+
+  const body = result.body;
+  const payload = body.tool_payload;
+  const toggle = cmd(`${agendaPayloadOpen ? '−' : '+'} PAYLOAD CRU DA TOOL`, () => {
+    agendaPayloadOpen = !agendaPayloadOpen;
+    toggle.textContent = `[ ${agendaPayloadOpen ? '−' : '+'} PAYLOAD CRU DA TOOL ]`;
+    toggle.setAttribute('aria-expanded', String(agendaPayloadOpen));
+    raw.hidden = !agendaPayloadOpen;
+  }, { tone: 'quiet' });
+  toggle.setAttribute('aria-expanded', String(agendaPayloadOpen));
+  toggle.setAttribute('aria-controls', 'agenda-payload');
+  const raw = h(
+    'div',
+    { id: 'agenda-payload', class: 'agenda-payload raw pre', hidden: !agendaPayloadOpen },
+    `get_agenda({ when: "today" }) →\n${JSON.stringify(payload, null, 2)}`,
+  );
+
+  const head = h(
+    'div',
+    { class: 'row', style: 'gap:18px;flex-wrap:wrap' },
+    h('span', {}, 'DIA ', h('span', { class: 'hi' }, body.period ? String(body.period).toUpperCase() : String(body.date).split('-').reverse().join('.'))),
+    body.state === 'ok' ? h('span', {}, 'A LUNA RECEBE ', h('span', { class: 'hi' }, `${body.spoken_count}/${body.total}`), ' ITENS') : null,
+    // Desligada nem chama o Compasso: latência não existe, não é zero.
+    body.state === 'off' ? null : h('span', {}, 'COMPASSO ', h('span', { class: 'hi' }, typeof body.latency_ms === 'number' ? `${body.latency_ms}MS` : '----MS')),
+    h('span', { class: 'spacer' }),
+    refresh,
+  );
+
+  let content: Child;
+  if (body.state === 'off') {
+    content = h(
+      'div',
+      { style: 'display:flex;flex-direction:column;gap:8px' },
+      h('span', { class: 'fg' }, '— AGENDA DESLIGADA'),
+      h('span', { class: 'small', style: 'line-height:1.6' }, 'SEM URL OU CREDENCIAL DO COMPASSO, A LUNA RESPONDE QUE A AGENDA NÃO ESTÁ CONFIGURADA.'),
+      h('div', { class: 'row' }, cmd('CONFIGURAR EM INTEGRAÇÕES', () => void show('integrations'))),
+    );
+  } else if (body.state === 'error') {
+    content = h(
+      'div',
+      { class: 'alert' },
+      h('span', { class: 'alert-title' }, `◈ O COMPASSO RECUSOU A CONSULTA — ${AGENDA_RESULTS[body.error?.code] ?? 'ERRO'}`),
+      h('span', { style: 'font-size:12px' }, 'CÓDIGO ', h('span', { class: 'raw hi' }, String(body.error?.code ?? '?')), ` · A LUNA DIRIA: “${String(body.error?.message ?? '').toUpperCase()}”`),
+    );
+  } else if (body.items.length === 0) {
+    content = emptyReport('HOJE // 0 ITENS', 'NADA HOJE.', 'NENHUM COMPROMISSO, AULA OU TAREFA COM PRAZO. É O QUE A LUNA RESPONDERIA A “O QUE EU TENHO HOJE?”.');
+  } else {
+    const cols = '150px minmax(0,1fr) minmax(0,190px) 118px';
+    const items = body.items as any[];
+    content = h(
+      'div',
+      { style: 'display:flex;flex-direction:column;gap:14px' },
+      body.more
+        ? h('div', { class: 'hi small', style: 'line-height:1.6' }, `▲ ACIMA DO TETO: A LUNA SÓ RECEBE OS PRIMEIROS ${body.max_spoken_items}; O RESTO VIRA “MORE” E ELA PEDE PARA ESTREITAR (UM TIPO, UM DIA).`)
+        : null,
+      ...AGENDA_GROUPS.map(({ type, label }) => {
+        const group = items
+          .map((item, index) => ({ item, index }))
+          .filter(({ item }) => item.type === type)
+          .sort((a, b) => String(a.item.at ?? '').localeCompare(String(b.item.at ?? '')) || a.index - b.index);
+        if (group.length === 0) return null;
+        return h(
+          'div',
+          { class: 'tbl', style: 'gap:0' },
+          grid(cols, { class: 'tbl-head' }, h('span', {}, `${label} · ${group.length}`), h('span', {}, 'TÍTULO'), h('span', {}, 'DETALHE'), h('span', {}, 'A LUNA')),
+          ...group.map(({ item }) => {
+            const detail =
+              item.type === 'class'
+                ? [item.location, item.professor].filter(Boolean).join(' · ') + (item.cancelled ? `${item.location || item.professor ? ' · ' : ''}— CANCELADA` : '')
+                : item.type === 'task'
+                  ? item.done ? '▣ FEITA' : '░ PENDENTE'
+                  : item.location ?? '';
+            return grid(
+              cols,
+              { class: 'tbl-row dotted', style: 'padding:6px 0;font-size:12px' },
+              h('span', { class: 'nowrap' }, String(item.time).toUpperCase()),
+              h('span', { class: `ellipsis ${item.seen_by_luna ? 'hi' : 'fg'}`, title: item.title }, item.title),
+              h('span', { class: 'ellipsis', title: detail }, detail || '—'),
+              h('span', { class: item.seen_by_luna ? 'hi' : 'fg' }, item.seen_by_luna ? '► RECEBE' : '— FORA DO TETO'),
+            );
+          }),
+        );
+      }),
+    );
+  }
+
+  return frame(
+    'O QUE A LUNA VÊ HOJE',
+    { tone: body.state === 'error' ? 'warn' : body.state === 'off' ? 'muted' : undefined, style: 'gap:12px' },
+    head,
+    content,
+    h('div', { class: 'row', style: 'gap:10px' }, toggle, h('span', { class: 'small' }, 'O QUE O MODELO RECEBE AO OUVIR “O QUE EU TENHO HOJE?”')),
+    raw,
+  );
+}
+
+function agendaLogFrame(result: PanelResult): HTMLElement {
+  if (!result.ok) {
+    return frame('HISTÓRICO', { tone: 'warn' }, h('span', { class: 'amber' }, result.status === 404 ? '◈ O NÚCLEO NÃO TEM ESTA ROTA — ATUALIZE O SERVIDOR' : `◈ FALHA — ${errorOf(result)}`));
+  }
+  const events = result.body.events as any[];
+  if (events.length === 0) {
+    return frame('HISTÓRICO', {}, emptyReport('HISTÓRICO // 0 REGISTROS', 'NENHUMA CONSULTA AINDA.', 'PERGUNTE À LUNA “O QUE EU TENHO AMANHÃ?” OU PEÇA PARA CRIAR UMA TAREFA: A LINHA APARECE AQUI.'));
+  }
+  const cols = '100px 110px 110px minmax(0,1fr) 170px 72px';
+  return frame(
+    'HISTÓRICO',
+    { style: 'gap:8px' },
+    h(
+      'div',
+      { class: 'tbl', style: 'gap:0' },
+      grid(cols, { class: 'tbl-head strong' }, h('span', {}, 'QUANDO'), h('span', {}, 'SALA'), h('span', {}, 'AÇÃO'), h('span', {}, 'PARÂMETROS'), h('span', {}, 'RESULTADO'), h('span', { style: 'text-align:right' }, 'LATÊNCIA')),
+      ...events.map((e) => {
+        const count = typeof e.item_count === 'number' ? ` · ${e.item_count} ${e.item_count === 1 ? 'ITEM' : 'ITENS'}` : '';
+        const resultText = e.ok ? `▣ OK${count}` : `◈ ${AGENDA_RESULTS[e.result] ?? String(e.result).toUpperCase()}${count}`;
+        return grid(
+          cols,
+          { class: 'tbl-row dotted', style: 'padding:6px 0;font-size:12px' },
+          h('span', {}, formatStamp(e.at)),
+          h('span', { class: 'ellipsis' }, e.room_id ?? '—'),
+          h('span', { class: 'hi' }, e.action ? AGENDA_ACTIONS[e.action] ?? e.action.toUpperCase() : '◈ INVÁLIDA'),
+          h('span', { class: 'ellipsis' }, agendaParams(e.params ?? {})),
+          h('span', { class: `ellipsis ${e.ok ? 'hi' : 'amber'}`, title: e.result }, resultText),
+          h('span', { style: 'text-align:right' }, typeof e.latency_ms === 'number' ? `${e.latency_ms}MS` : '----MS'),
+        );
+      }),
+    ),
+    h('div', { class: 'small', style: 'margin-top:6px' }, 'SEM TRANSCRIÇÃO: SÓ AÇÃO, PARÂMETROS, RESULTADO E LATÊNCIA. RETENÇÃO DE 30 DIAS.'),
+  );
+}
+
+function paintAgenda(host: HTMLElement, today: PanelResult, log: PanelResult): void {
+  const events = log.ok ? (log.body.events as any[]).length : 0;
+  setMeta(today.ok && today.body.state === 'ok' ? `${today.body.total} ITENS HOJE · ${events} REGISTROS` : `${events} REGISTROS`);
+  host.replaceChildren(agendaTodayFrame(today), agendaLogFrame(log));
+}
+
+pages.push({
+  id: 'calendar',
+  nav: 'AGENDA',
+  title: 'AGENDA — O QUE A LUNA VÊ',
+  // O histórico aparece "em poucos segundos" depois da pergunta por voz.
+  pollMs: 15000,
+  leave() {
+    agendaCache = null;
+  },
+  async render(root) {
+    const host = h('div', { style: 'display:flex;flex-direction:column;gap:26px;min-width:0' });
+    if (agendaCache) {
+      // Repinte: a tela antiga fica até a nova chegar. O poll só relê o
+      // histórico — `calendar/today` vai ao Compasso e sobrescreve o semáforo,
+      // então só roda ao abrir a tela e no ATUALIZAR.
+      const withToday = agendaRefreshToday;
+      agendaRefreshToday = false;
+      const [today, log] = await Promise.all([
+        withToday ? window.panel.call('server.calendarToday') : Promise.resolve(agendaCache.today),
+        window.panel.call('server.calendarLog', 50),
+      ]);
+      const offline = [today, log].find((r) => !r.ok && r.body?.offline);
+      if (offline) return serverUnavailable(root, offline);
+      agendaCache = { today, log };
+      root.append(host);
+      paintAgenda(host, today, log);
+      return;
+    }
+    root.append(host);
+    const load = Promise.all([window.panel.call('server.calendarToday'), window.panel.call('server.calendarLog', 50)]);
+    // Primeira abertura: o esqueleto entra já, e o Compasso responde depois.
+    setMeta('CONSULTANDO…');
+    host.append(
+      frame('O QUE A LUNA VÊ HOJE', { style: 'gap:12px' }, h('span', { class: 'fg' }, '░ CONSULTANDO O COMPASSO…'), skeletonRows('150px minmax(0,1fr) 190px 118px', 4, 4)),
+      frame('HISTÓRICO', { style: 'gap:8px' }, skeletonRows('100px 110px 110px minmax(0,1fr) 170px 72px', 5, 6)),
+    );
+    void load.then(([today, log]) => {
+      if (currentPage?.id !== 'calendar') return;
+      agendaCache = { today, log };
+      if (!today.ok && today.body?.offline) {
+        host.replaceChildren();
+        serverUnavailable(host, today);
+        return;
+      }
+      paintAgenda(host, today, log);
+    });
+  },
+});
+
+// ─── 07 Este terminal ────────────────────────────────────────────────────
 
 const SOURCE_LABELS: Record<string, string> = { panel: 'LOCAL', env: '.ENV', none: 'NÃO DEFINIDO' };
 
@@ -2723,7 +3023,7 @@ pages.push({
   },
 });
 
-// ─── 07 Servidor ─────────────────────────────────────────────────────────
+// ─── 08 Servidor ─────────────────────────────────────────────────────────
 
 const RESTART_ESTIMATE_MS = 12000;
 const RESTART_GIVE_UP_MS = 60000;
@@ -2956,7 +3256,7 @@ pages.push({
   },
 });
 
-// ─── 08 Diagnóstico ──────────────────────────────────────────────────────
+// ─── 09 Diagnóstico ──────────────────────────────────────────────────────
 
 const DIAG_WINDOWS: Array<{ value: number; label: string }> = [
   { value: 1, label: '1H' },
@@ -3290,7 +3590,7 @@ window.addEventListener('keydown', (e) => {
     pendingEscape();
     return;
   }
-  if (/^[1-8]$/.test(key) && !e.ctrlKey && !e.metaKey && !e.altKey && !$('workspace').hidden) {
+  if (/^[1-9]$/.test(key) && !e.ctrlKey && !e.metaKey && !e.altKey && !$('workspace').hidden) {
     const page = pages[Number(key) - 1];
     if (page) void show(page.id);
     e.preventDefault();

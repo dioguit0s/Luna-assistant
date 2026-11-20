@@ -24,6 +24,7 @@ import { GET_WEATHER_TOOL } from '../weather/tools.js';
 import type { WeatherSource } from '../weather/WeatherSource.js';
 import type { CompassoClient } from '../calendar/CompassoClient.js';
 import { GET_AGENDA_TOOL, MANAGE_AGENDA_TOOL } from '../calendar/tools.js';
+import type { AgendaEventSink } from '../calendar/agendaLog.js';
 import { createGetAgendaHandler } from './tools/getAgenda.js';
 import { createManageAgendaHandler } from './tools/manageAgenda.js';
 import {
@@ -337,6 +338,8 @@ export class Orchestrator implements AlarmAudioSink {
      * de uma sessão que ainda tem a tool.
      */
     calendarClient: CompassoClient | null = null,
+    /** Histórico da agenda no painel; `null` nos testes que não olham para ele. */
+    agendaLog: AgendaEventSink | null = null,
   ) {
     this.alarmRinger = new AlarmRinger({
       store: reminderStore,
@@ -394,8 +397,8 @@ export class Orchestrator implements AlarmAudioSink {
         : []),
       ...(calendarClient
         ? ([
-            [GET_AGENDA_TOOL.name, createGetAgendaHandler({ client: calendarClient })],
-            [MANAGE_AGENDA_TOOL.name, createManageAgendaHandler({ client: calendarClient })],
+            [GET_AGENDA_TOOL.name, createGetAgendaHandler({ client: calendarClient, log: agendaLog })],
+            [MANAGE_AGENDA_TOOL.name, createManageAgendaHandler({ client: calendarClient, log: agendaLog })],
           ] as const)
         : []),
     ]);

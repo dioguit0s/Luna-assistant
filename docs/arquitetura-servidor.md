@@ -28,7 +28,7 @@ src/
 │   └── logTap.ts         #   cópia de cada linha para o diagnóstico, sem transcrição
 ├── diagnostics/          # diagnóstico do painel (v2), alimentado só pelo log
 │   ├── Diagnostics.ts    #   ttfab → série, erros → error_log, buffer do log ao vivo
-│   ├── DiagnosticsStore.ts#  tabelas latency_samples e error_log, poda 30 d / 10 mil
+│   ├── DiagnosticsStore.ts#  latency_samples, error_log, reminder_events e agenda_events; poda 30 d / 10 mil
 │   └── WakeClipStore.ts  #   `wake_clip` → WAV + JSON em WAKE_CLIP_DIR (treino da wake word)
 ├── ota/                  # OTA de firmware dos satélites (ADR 012)
 │   ├── firmwareReleases.ts#  releases fw-v* no GitHub, manifest, download conferido por SHA-256
@@ -72,6 +72,8 @@ src/
 │   └── tools.ts          #   schema da tool get_weather
 ├── calendar/             # agenda no Compasso (ADR 011)
 │   ├── CompassoClient.ts #   HTTP /api/v1, erros por error.code, Idempotency-Key
+│   ├── agendaQuery.ts    #   resultado do get_agenda — a tool e o painel ("o que a Luna vê hoje") usam a mesma
+│   ├── agendaLog.ts      #   histórico do painel: tipo da linha (sem texto livre) e gravação adiada
 │   ├── dates.ts          #   "amanhã"/"sexta"/"dia 30" → ISO com offset
 │   ├── spoken.ts         #   item da agenda → frase
 │   └── tools.ts          #   schema de get_agenda e manage_agenda

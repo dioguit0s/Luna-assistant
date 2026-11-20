@@ -6,6 +6,7 @@ import type { IAudioProvider } from '../../providers/IAudioProvider.js';
 import type { CompassoClient, CompassoItem, CompassoResult, CompassoList } from '../../calendar/CompassoClient.js';
 import { createGetAgendaHandler, MAX_SPOKEN_ITEMS } from './getAgenda.js';
 import { INVALID_ARGS_RESULT, type ToolContext } from './types.js';
+import type { AgendaLogEntry } from '../../calendar/agendaLog.js';
 
 /** Sexta-feira, 25 de setembro de 2026, 10:00 em São Paulo. */
 const NOW = new Date('2026-09-25T13:00:00Z');
@@ -180,5 +181,50 @@ describe('createGetAgendaHandler', () => {
     };
     assert.equal(result.items[0].day, 'terça');
     assert.equal(result.items[0].time, 'até 18:00');
+  });
+
+  describe('histórico da agenda', () => {
+    function sink(): { log: { record(e: AgendaLogEntry): void }; entries: AgendaLogEntry[] } {
+      const entries: AgendaLogEntry[] = [];
+      return { log: { record: (e) => entries.push(e) }, entries };
+    }
+
+    it('grava a consulta com parâmetros de enum, contagem e latência — sem o texto da busca', async () => {
+      const { client } = fakeClient(ok(ITEMS));
+      const { log, entries } = sink();
+      await createGetAgendaHandler({ client, now: () => NOW, log })(
+        { when: 'tomorrow', kind: 'events', search: 'aniversário da Ana' },
+        ctx(),
+      );
+      assert.equal(entries.length, 1);
+      const e = entries[0]!;
+      assert.equal(e.tool, 'get_agenda');
+      assert.equal(e.action, 'query');
+      assert.equal(e.roomId, 'quarto');
+      assert.equal(e.when, 'tomorrow');
+      assert.equal(e.kind, 'events');
+      assert.equal(e.hasSearch, true);
+      assert.equal(e.result, 'ok');
+      assert.equal(e.itemCount, ITEMS.length);
+      assert.equal(typeof e.latencyMs, 'number');
+      assert.ok(!JSON.stringify(e).includes('Ana'), 'o texto falado não entra no histórico');
+    });
+
+    it('grava a falha do Compasso com o error.code', async () => {
+      const { client } = fakeClient({ ok: false, status: null, code: 'unreachable', message: 'o Compasso não respondeu agora', field: null });
+      const { log, entries } = sink();
+      await createGetAgendaHandler({ client, now: () => NOW, log })({}, ctx());
+      assert.equal(entries[0]!.result, 'unreachable');
+      assert.equal(entries[0]!.itemCount, null);
+    });
+
+    it('grava args inválidos e agenda desligada, sem latência', async () => {
+      const { log, entries } = sink();
+      await createGetAgendaHandler({ client: fakeClient(ok([])).client, now: () => NOW, log })({ when: 'ontem' }, ctx());
+      await createGetAgendaHandler({ client: fakeClient(ok([]), false).client, now: () => NOW, log })({}, ctx());
+      assert.deepEqual(entries.map((e) => e.result), ['invalid_args', 'not_configured']);
+      assert.ok(entries.every((e) => e.latencyMs === null));
+      assert.equal(entries[0]!.when, null, 'valor fora do enum não é gravado');
+    });
   });
 });

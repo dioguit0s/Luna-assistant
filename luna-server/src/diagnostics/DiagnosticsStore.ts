@@ -1,9 +1,10 @@
 import type { DatabaseSync, StatementSync } from 'node:sqlite';
+import type { AgendaLogAction, AgendaLogEntry, AgendaTool } from '../calendar/agendaLog.js';
 
 /**
  * Wrapper das tabelas `latency_samples`, `error_log` e `reminder_events`
- * (migração 4 do `ReminderStore`, mesmo banco). Único ponto de SQL do
- * diagnóstico.
+ * (migração 4 do `ReminderStore`, mesmo banco) e `agenda_events` (migração 5).
+ * Único ponto de SQL do diagnóstico.
  *
  * Retenção: 30 dias **ou** 10 mil linhas por tabela, o que vier primeiro. A
  * poda é do `Diagnostics`, num timer próprio — nunca na mesma volta do event
@@ -56,6 +57,13 @@ export interface ReminderEvent {
   label: string | null;
   shortId: string | null;
 }
+
+export interface AgendaEvent extends AgendaLogEntry {
+  id: number;
+}
+
+/** Tabelas podadas por idade e por teto de linhas. */
+const PRUNED_TABLES = ['latency_samples', 'error_log', 'reminder_events', 'agenda_events'] as const;
 
 export class DiagnosticsStore {
   private readonly statements = new Map<string, StatementSync>();
@@ -114,6 +122,57 @@ export class DiagnosticsStore {
       }));
   }
 
+  insertAgendaEvent(e: AgendaLogEntry): void {
+    this.stmt(
+      `INSERT INTO agenda_events
+         (at, room_id, tool, action, when_arg, day_of_month, kind, effort, attribute, has_search,
+          result, item_count, item_id, latency_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      e.at,
+      e.roomId,
+      e.tool,
+      e.action,
+      e.when,
+      e.dayOfMonth,
+      e.kind,
+      e.effort,
+      e.attribute,
+      e.hasSearch ? 1 : 0,
+      e.result,
+      e.itemCount,
+      e.itemId,
+      e.latencyMs === null ? null : Math.round(e.latencyMs),
+    );
+  }
+
+  /** Mais recentes primeiro. */
+  agendaHistory(limit: number): AgendaEvent[] {
+    return this.stmt(
+      `SELECT id, at, room_id, tool, action, when_arg, day_of_month, kind, effort, attribute, has_search,
+              result, item_count, item_id, latency_ms
+         FROM agenda_events ORDER BY at DESC, id DESC LIMIT ?`,
+    )
+      .all(limit)
+      .map((r) => ({
+        id: Number(r.id),
+        at: Number(r.at),
+        roomId: r.room_id === null ? '' : String(r.room_id),
+        tool: String(r.tool) as AgendaTool,
+        action: r.action === null ? null : (String(r.action) as AgendaLogAction),
+        when: r.when_arg === null ? null : String(r.when_arg),
+        dayOfMonth: r.day_of_month === null ? null : Number(r.day_of_month),
+        kind: r.kind === null ? null : String(r.kind),
+        effort: r.effort === null ? null : Number(r.effort),
+        attribute: r.attribute === null ? null : String(r.attribute),
+        hasSearch: Number(r.has_search) === 1,
+        result: String(r.result),
+        itemCount: r.item_count === null ? null : Number(r.item_count),
+        itemId: r.item_id === null ? null : String(r.item_id),
+        latencyMs: r.latency_ms === null ? null : Number(r.latency_ms),
+      }));
+  }
+
   /** Amostras desde `sinceMs`, mais antigas primeiro. */
   latencySince(sinceMs: number, limit = MAX_ROWS): LatencySample[] {
     return this.stmt(
@@ -151,10 +210,10 @@ export class DiagnosticsStore {
       }));
   }
 
-  /** Por idade e por teto de linhas, nas duas tabelas. */
+  /** Por idade e por teto de linhas, em cada tabela. */
   prune(): void {
     const cutoff = this.now() - RETENTION_MS;
-    for (const table of ['latency_samples', 'error_log', 'reminder_events']) {
+    for (const table of PRUNED_TABLES) {
       this.stmt(`DELETE FROM ${table} WHERE at < ?`).run(cutoff);
       this.stmt(
         `DELETE FROM ${table} WHERE id <= (SELECT id FROM ${table} ORDER BY id DESC LIMIT 1 OFFSET ?)`,
